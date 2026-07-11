@@ -113,7 +113,10 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'service_id', 'payer_type', 'is_active']);
+            $table->index(
+    ['facility_id', 'service_id', 'payer_type', 'is_active'],
+    'svc_price_fac_srv_pay_active_idx'
+);
         });
 
         Schema::create('patient_number_sequences', function (Blueprint $table): void {

@@ -82,7 +82,7 @@ class Step5FoundationTest extends TestCase
             'last_name' => 'Musa',
             'gender' => 'female',
             'age_years' => 28,
-            'primary_phone' => '07123456789',
+            'primary_phone' => '07123456780',
             'patient_status' => 'active',
         ], [
             'payer_type' => 'cash',
@@ -109,7 +109,7 @@ class Step5FoundationTest extends TestCase
         $patient = Patient::query()->create([
             'facility_id' => currentFacility()->id,
             'patient_number' => 'PAT-2026-000001',
-            'first_name' => 'John',
+            'first_name' => 'James',
             'last_name' => 'Doe',
             'gender' => 'male',
             'primary_phone' => '+255712345678',

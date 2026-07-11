@@ -1,0 +1,1 @@
+<x-card><div class="space-y-3">@foreach($alerts as $alert)<div class="rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950/30"><p class="font-semibold">{{ $alert->title }}</p><p class="text-sm">{{ $alert->patient?->fullName() }} · {{ $alert->message }}</p></div>@endforeach</div><div class="mt-4">{{ $alerts->links() }}</div></x-card>

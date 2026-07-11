@@ -1,0 +1,32 @@
+<?php
+
+return [
+    'regions' => [
+        'Arusha' => ['Arusha City', 'Arumeru', 'Karatu', 'Longido', 'Monduli', 'Ngorongoro'],
+        'Dar es Salaam' => ['Ilala', 'Kinondoni', 'Temeke', 'Ubungo', 'Kigamboni'],
+        'Dodoma' => ['Dodoma City', 'Bahi', 'Chamwino', 'Chemba', 'Kondoa', 'Kongwa', 'Mpwapwa'],
+        'Geita' => ['Geita', 'Bukombe', 'Chato', 'Mbogwe', 'Nyanghvale'],
+        'Iringa' => ['Iringa Municipal', 'Iringa Rural', 'Kilolo', 'Mafinga', 'Mufindi'],
+        'Kagera' => ['Bukoba Municipal', 'Bukoba Rural', 'Biharamulo', 'Karagwe', 'Kyerwa', 'Missenyi', 'Muleba', 'Ngara'],
+        'Katavi' => ['Mpanda Municipal', 'Mpanda Rural', 'Mlele'],
+        'Kigoma' => ['Kigoma Municipal', 'Kigoma Rural', 'Kasulu', 'Kibondo', 'Kakonko', 'Uvinza'],
+        'Kilimanjaro' => ['Moshi Municipal', 'Moshi Rural', 'Hai', 'Mwanga', 'Rombo', 'Same', 'Siha'],
+        'Lindi' => ['Lindi Municipal', 'Lindi Rural', 'Kilwa', 'Liwale', 'Nachingwea', 'Ruangwa'],
+        'Manyara' => ['Babati Town', 'Babati Rural', 'Hanang', 'Kiteto', 'Mbulu', 'Simanjiro'],
+        'Mara' => ['Musoma Municipal', 'Musoma Rural', 'Bunda', 'Butiama', 'Rorya', 'Serengeti', 'Tarime'],
+        'Mbeya' => ['Mbeya City', 'Mbeya Rural', 'Busokelo', 'Chunya', 'Kyela', 'Mbarali', 'Rungwe'],
+        'Morogoro' => ['Morogoro Municipal', 'Morogoro Rural', 'Gairo', 'Kilombero', 'Kilosa', 'Mvomero', 'Ulanga'],
+        'Mtwara' => ['Mtwara Municipal', 'Mtwara Rural', 'Masasi', 'Nanyumbu', 'Newala', 'Tandahimba'],
+        'Mwanza' => ['Mwanza City', 'Ilemela', 'Kwimba', 'Magu', 'Misungwi', 'Sengerema', 'Ukerewe'],
+        'Njombe' => ['Njombe Town', 'Ludewa', 'Makambako', 'Makete', 'Wangingombe'],
+        'Pwani' => ['Kibaha Town', 'Kibaha Rural', 'Bagamoyo', 'Kisarawe', 'Mafia', 'Mkuranga', 'Rufiji'],
+        'Rukwa' => ['Sumbawanga Municipal', 'Sumbawanga Rural', 'Kalambo', 'Nkasi'],
+        'Ruvuma' => ['Songea Municipal', 'Songea Rural', 'Mbinga', 'Namtumbo', 'Nyasa', 'Tunduru'],
+        'Shinyanga' => ['Shinyanga Municipal', 'Shinyanga Rural', 'Kahama', 'Kishapu'],
+        'Simiyu' => ['Bariadi', 'Busega', 'Itilima', 'Maswa', 'Meatu'],
+        'Singida' => ['Singida Municipal', 'Singida Rural', 'Ikungi', 'Iramba', 'Manyoni', 'Mkalama'],
+        'Songwe' => ['Tunduma', 'Ileje', 'Mbozi', 'Momba', 'Songwe'],
+        'Tabora' => ['Tabora Municipal', 'Igunga', 'Kaliua', 'Nzega', 'Sikonge', 'Urambo', 'Uyui'],
+        'Tanga' => ['Tanga City', 'Handeni', 'Kilindi', 'Korogwe', 'Lushoto', 'Muheza', 'Mkinga', 'Pangani'],
+    ],
+];

@@ -1,0 +1,33 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../../vendor/masmerise/livewire-toaster/resources/views/*.blade.php';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+    --font-sans: 'Poppins', ui-sans-serif, system-ui, sans-serif;
+    --color-primary: #0F766E;
+    --color-primary-2: #14B8A6;
+    --color-success: #16A34A;
+    --color-warning: #F59E0B;
+    --color-danger: #DC2626;
+    --color-info: #2563EB;
+    --color-app-light: #F8FAFC;
+    --color-card-light: #FFFFFF;
+    --color-app-dark: #0F172A;
+    --color-card-dark: #1E293B;
+}
+
+html {
+    color-scheme: light;
+}
+
+html.dark {
+    color-scheme: dark;
+}
+
+[x-cloak] {
+    display: none !important;
+}

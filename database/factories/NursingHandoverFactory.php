@@ -1,0 +1,2 @@
+<?php
+namespace Database\Factories; use App\Models\Facility; use App\Models\NursingHandover; use App\Models\ObservationAdmission; use App\Models\Patient; use App\Models\User; use Illuminate\Database\Eloquent\Factories\Factory; class NursingHandoverFactory extends Factory { protected $model=NursingHandover::class; public function definition(): array { return ['facility_id'=>Facility::factory(),'observation_admission_id'=>ObservationAdmission::factory(),'patient_id'=>Patient::factory(),'from_user_id'=>User::factory(),'handover_at'=>now(),'patient_condition'=>'Stable']; } }

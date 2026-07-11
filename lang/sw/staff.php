@@ -1,0 +1,26 @@
+<?php
+
+return [
+    'title' => 'Watumishi',
+    'description' => 'Sajili na simamia profiles, accounts, departments, roles, elimu, leseni na nyaraka za watumishi.',
+    'add_staff' => 'Ongeza Mtumishi',
+    'created' => 'Mtumishi amesajiliwa kikamilifu.',
+    'updated' => 'Taarifa za mtumishi zimebadilishwa kikamilifu.',
+    'employee_number' => 'Namba ya Mtumishi',
+    'passport_photo' => 'Picha ya Passport',
+    'primary_department' => 'Department Kuu',
+    'additional_departments' => 'Departments za Ziada',
+    'job_title' => 'Cheo cha Kazi',
+    'employment_status' => 'Hali ya Ajira',
+    'account_status' => 'Hali ya Account',
+    'professional_license' => 'Leseni ya Kitaaluma',
+    'emergency_contact' => 'Mtu wa Dharura',
+    'login_history' => 'Historia ya Kuingia',
+    'must_change_password' => 'Lazima Abadilishe Nenosiri',
+    'account_activated' => 'Account imewezeshwa.',
+    'account_suspended' => 'Account imesimamishwa.',
+    'account_deactivated' => 'Account imezimwa.',
+    'password_reset' => 'Nenosiri limebadilishwa.',
+    'signature_saved' => 'Signature imehifadhiwa.',
+    'signature_deleted' => 'Signature imefutwa.',
+];

@@ -1,0 +1,207 @@
+<?php
+
+namespace App\Providers;
+
+use App\Models\Facility;
+use App\Models\FacilityDocument;
+use App\Models\Department;
+use App\Models\JobTitle;
+use App\Models\Role;
+use App\Models\StaffDocument;
+use App\Models\StaffProfile;
+use App\Models\StaffSignature;
+use App\Models\LaboratoryTestCategory;
+use App\Models\SpecimenType;
+use App\Models\LaboratoryTest;
+use App\Models\LaboratorySample;
+use App\Models\LaboratoryResult;
+use App\Models\LaboratoryCriticalResultNotification;
+use App\Models\OutsourcedLaboratoryRequest;
+use App\Models\ServiceCategory;
+use App\Models\Service;
+use App\Models\Patient;
+use App\Models\PatientDocument;
+use App\Models\Visit;
+use App\Models\Invoice;
+use App\Models\TriageAssessment;
+use App\Models\ClinicalEncounter;
+use App\Models\Diagnosis;
+use App\Models\LaboratoryOrder;
+use App\Models\Prescription;
+use App\Models\ClinicalProcedureOrder;
+use App\Models\Appointment;
+use App\Models\PatientReferral;
+use App\Models\ClinicalAlert;
+use App\Models\MedicineCategory;
+use App\Models\GenericMedicine;
+use App\Models\Medicine;
+use App\Models\Supplier;
+use App\Models\StockLocation;
+use App\Models\MedicineBatch;
+use App\Models\PurchaseOrder;
+use App\Models\PurchaseReceipt;
+use App\Models\StockTransfer;
+use App\Models\StockAdjustment;
+use App\Models\StockCount;
+use App\Models\Dispensing;
+use App\Models\PharmacyReturn;
+use App\Models\SupplierReturn;
+use App\Models\ObservationRoom;
+use App\Models\Bed;
+use App\Models\ObservationAdmission;
+use App\Models\NursingObservation;
+use App\Models\ObservationOrder;
+use App\Models\MedicationAdministration;
+use App\Models\BedsideProcedure;
+use App\Models\NursingHandover;
+use App\Models\ObservationDischarge;
+use App\Models\ObservationDeathRecord;
+use App\Models\User;
+use App\Policies\DepartmentPolicy;
+use App\Policies\FacilityDocumentPolicy;
+use App\Policies\FacilityPolicy;
+use App\Policies\JobTitlePolicy;
+use App\Policies\RolePolicy;
+use App\Policies\StaffDocumentPolicy;
+use App\Policies\StaffProfilePolicy;
+use App\Policies\StaffSignaturePolicy;
+use App\Policies\LaboratoryTestCategoryPolicy;
+use App\Policies\SpecimenTypePolicy;
+use App\Policies\LaboratoryTestPolicy;
+use App\Policies\LaboratorySamplePolicy;
+use App\Policies\LaboratoryResultPolicy;
+use App\Policies\LaboratoryCriticalResultPolicy;
+use App\Policies\OutsourcedLaboratoryRequestPolicy;
+use App\Policies\ServiceCategoryPolicy;
+use App\Policies\ServicePolicy;
+use App\Policies\PatientPolicy;
+use App\Policies\PatientDocumentPolicy;
+use App\Policies\VisitPolicy;
+use App\Policies\InvoicePolicy;
+use App\Policies\TriageAssessmentPolicy;
+use App\Policies\ClinicalEncounterPolicy;
+use App\Policies\DiagnosisPolicy;
+use App\Policies\LaboratoryOrderPolicy;
+use App\Policies\PrescriptionPolicy;
+use App\Policies\ClinicalProcedureOrderPolicy;
+use App\Policies\AppointmentPolicy;
+use App\Policies\PatientReferralPolicy;
+use App\Policies\ClinicalAlertPolicy;
+use App\Policies\MedicineCategoryPolicy;
+use App\Policies\GenericMedicinePolicy;
+use App\Policies\MedicinePolicy;
+use App\Policies\SupplierPolicy;
+use App\Policies\StockLocationPolicy;
+use App\Policies\MedicineBatchPolicy;
+use App\Policies\PurchaseOrderPolicy;
+use App\Policies\PurchaseReceiptPolicy;
+use App\Policies\StockTransferPolicy;
+use App\Policies\StockAdjustmentPolicy;
+use App\Policies\StockCountPolicy;
+use App\Policies\PrescriptionDispensingPolicy;
+use App\Policies\PharmacyReturnPolicy;
+use App\Policies\SupplierReturnPolicy;
+use App\Policies\ObservationRoomPolicy;
+use App\Policies\BedPolicy;
+use App\Policies\ObservationAdmissionPolicy;
+use App\Policies\NursingObservationPolicy;
+use App\Policies\ObservationOrderPolicy;
+use App\Policies\MedicationAdministrationPolicy;
+use App\Policies\BedsideProcedurePolicy;
+use App\Policies\NursingHandoverPolicy;
+use App\Policies\ObservationDischargePolicy;
+use App\Policies\ObservationDeathRecordPolicy;
+use App\Services\FacilityContext;
+use Illuminate\Auth\Events\Failed;
+use Illuminate\Auth\Events\Login;
+use Illuminate\Auth\Events\Logout;
+use Illuminate\Support\ServiceProvider;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Event;
+
+class AppServiceProvider extends ServiceProvider
+{
+    /**
+     * Register any application services.
+     */
+    public function register(): void
+    {
+        $this->app->singleton(FacilityContext::class);
+    }
+
+    /**
+     * Bootstrap any application services.
+     */
+    public function boot(): void
+    {
+        Gate::before(fn (User $user, string $ability): ?bool => $user->is_super_admin ? true : null);
+
+        Gate::policy(Facility::class, FacilityPolicy::class);
+        Gate::policy(FacilityDocument::class, FacilityDocumentPolicy::class);
+        Gate::policy(Department::class, DepartmentPolicy::class);
+        Gate::policy(JobTitle::class, JobTitlePolicy::class);
+        Gate::policy(Role::class, RolePolicy::class);
+        Gate::policy(StaffProfile::class, StaffProfilePolicy::class);
+        Gate::policy(StaffDocument::class, StaffDocumentPolicy::class);
+        Gate::policy(StaffSignature::class, StaffSignaturePolicy::class);
+        Gate::policy(LaboratoryTestCategory::class, LaboratoryTestCategoryPolicy::class);
+        Gate::policy(SpecimenType::class, SpecimenTypePolicy::class);
+        Gate::policy(LaboratoryTest::class, LaboratoryTestPolicy::class);
+        Gate::policy(LaboratorySample::class, LaboratorySamplePolicy::class);
+        Gate::policy(LaboratoryResult::class, LaboratoryResultPolicy::class);
+        Gate::policy(LaboratoryCriticalResultNotification::class, LaboratoryCriticalResultPolicy::class);
+        Gate::policy(OutsourcedLaboratoryRequest::class, OutsourcedLaboratoryRequestPolicy::class);
+        Gate::policy(ServiceCategory::class, ServiceCategoryPolicy::class);
+        Gate::policy(Service::class, ServicePolicy::class);
+        Gate::policy(Patient::class, PatientPolicy::class);
+        Gate::policy(PatientDocument::class, PatientDocumentPolicy::class);
+        Gate::policy(Visit::class, VisitPolicy::class);
+        Gate::policy(Invoice::class, InvoicePolicy::class);
+        Gate::policy(TriageAssessment::class, TriageAssessmentPolicy::class);
+        Gate::policy(ClinicalEncounter::class, ClinicalEncounterPolicy::class);
+        Gate::policy(Diagnosis::class, DiagnosisPolicy::class);
+        Gate::policy(LaboratoryOrder::class, LaboratoryOrderPolicy::class);
+        Gate::policy(Prescription::class, PrescriptionPolicy::class);
+        Gate::policy(ClinicalProcedureOrder::class, ClinicalProcedureOrderPolicy::class);
+        Gate::policy(Appointment::class, AppointmentPolicy::class);
+        Gate::policy(PatientReferral::class, PatientReferralPolicy::class);
+        Gate::policy(ClinicalAlert::class, ClinicalAlertPolicy::class);
+        Gate::policy(MedicineCategory::class, MedicineCategoryPolicy::class);
+        Gate::policy(GenericMedicine::class, GenericMedicinePolicy::class);
+        Gate::policy(Medicine::class, MedicinePolicy::class);
+        Gate::policy(Supplier::class, SupplierPolicy::class);
+        Gate::policy(StockLocation::class, StockLocationPolicy::class);
+        Gate::policy(MedicineBatch::class, MedicineBatchPolicy::class);
+        Gate::policy(PurchaseOrder::class, PurchaseOrderPolicy::class);
+        Gate::policy(PurchaseReceipt::class, PurchaseReceiptPolicy::class);
+        Gate::policy(StockTransfer::class, StockTransferPolicy::class);
+        Gate::policy(StockAdjustment::class, StockAdjustmentPolicy::class);
+        Gate::policy(StockCount::class, StockCountPolicy::class);
+        Gate::policy(Dispensing::class, PrescriptionDispensingPolicy::class);
+        Gate::policy(PharmacyReturn::class, PharmacyReturnPolicy::class);
+        Gate::policy(SupplierReturn::class, SupplierReturnPolicy::class);
+        Gate::policy(ObservationRoom::class, ObservationRoomPolicy::class);
+        Gate::policy(Bed::class, BedPolicy::class);
+        Gate::policy(ObservationAdmission::class, ObservationAdmissionPolicy::class);
+        Gate::policy(NursingObservation::class, NursingObservationPolicy::class);
+        Gate::policy(ObservationOrder::class, ObservationOrderPolicy::class);
+        Gate::policy(MedicationAdministration::class, MedicationAdministrationPolicy::class);
+        Gate::policy(BedsideProcedure::class, BedsideProcedurePolicy::class);
+        Gate::policy(NursingHandover::class, NursingHandoverPolicy::class);
+        Gate::policy(ObservationDischarge::class, ObservationDischargePolicy::class);
+        Gate::policy(ObservationDeathRecord::class, ObservationDeathRecordPolicy::class);
+        Gate::policy(\App\Models\DentalEncounter::class, \App\Policies\DentalEncounterPolicy::class);
+        Gate::policy(\App\Models\DentalToothRecord::class, \App\Policies\DentalToothRecordPolicy::class);
+        Gate::policy(\App\Models\DentalToothFinding::class, \App\Policies\DentalFindingPolicy::class);
+        Gate::policy(\App\Models\DentalTreatmentPlan::class, \App\Policies\DentalTreatmentPlanPolicy::class);
+        Gate::policy(\App\Models\DentalProcedure::class, \App\Policies\DentalProcedurePolicy::class);
+        Gate::policy(\App\Models\DentalConsent::class, \App\Policies\DentalConsentPolicy::class);
+        Gate::policy(\App\Models\DentalAttachment::class, \App\Policies\DentalAttachmentPolicy::class);
+        Gate::policy(\App\Models\OrthodonticCase::class, \App\Policies\OrthodonticCasePolicy::class);
+        Gate::policy(\App\Models\DentalLabOrder::class, \App\Policies\DentalLabOrderPolicy::class);
+
+        Event::listen(Login::class, \App\Listeners\RecordSuccessfulLogin::class);
+        Event::listen(Failed::class, \App\Listeners\RecordFailedLogin::class);
+        Event::listen(Logout::class, \App\Listeners\RecordLogout::class);
+    }
+}

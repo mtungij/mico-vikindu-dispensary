@@ -1,0 +1,2 @@
+<?php
+namespace Database\Factories; use App\Models\Facility; use App\Models\ObservationRoom; use Illuminate\Database\Eloquent\Factories\Factory; class ObservationRoomFactory extends Factory { protected $model=ObservationRoom::class; public function definition(): array { return ['facility_id'=>Facility::factory(),'name'=>fake()->unique()->words(2,true),'code'=>strtoupper(fake()->unique()->lexify('???')),'room_type'=>'general_observation','gender_restriction'=>'any','capacity'=>1,'isolation_room'=>false,'is_active'=>true]; } }

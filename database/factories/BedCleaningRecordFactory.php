@@ -1,0 +1,2 @@
+<?php
+namespace Database\Factories; use App\Models\Bed; use App\Models\BedCleaningRecord; use App\Models\Facility; use App\Models\User; use Illuminate\Database\Eloquent\Factories\Factory; class BedCleaningRecordFactory extends Factory { protected $model=BedCleaningRecord::class; public function definition(): array { return ['facility_id'=>Facility::factory(),'bed_id'=>Bed::factory(),'cleaning_type'=>'routine','status'=>'requested','requested_at'=>now(),'requested_by'=>User::factory()]; } }

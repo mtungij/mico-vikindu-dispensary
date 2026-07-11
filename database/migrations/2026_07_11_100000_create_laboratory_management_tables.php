@@ -81,7 +81,10 @@ return new class extends Migration
             $table->timestamps();
             $table->softDeletes();
             $table->unique(['facility_id', 'code']);
-            $table->index(['facility_id', 'laboratory_test_category_id', 'is_active']);
+            $table->index(
+    ['facility_id', 'laboratory_test_category_id', 'is_active'],
+    'lab_test_cat_active_idx'
+);
         });
 
         Schema::create('laboratory_test_parameters', function (Blueprint $table): void {
@@ -121,7 +124,10 @@ return new class extends Migration
             $table->unsignedInteger('sort_order')->default(0);
             $table->boolean('is_required')->default(true);
             $table->timestamps();
-            $table->unique(['laboratory_test_id', 'child_laboratory_test_id']);
+            $table->unique(
+    ['laboratory_test_id', 'child_laboratory_test_id'],
+    'lab_panel_child_unq'
+);
         });
 
         Schema::create('laboratory_reference_ranges', function (Blueprint $table): void {
@@ -258,7 +264,10 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'laboratory_order_item_id', 'result_status']);
+            $table->index(
+    ['facility_id', 'laboratory_order_item_id', 'result_status'],
+    'lab_result_status_idx'
+);
         });
 
         Schema::create('laboratory_result_values', function (Blueprint $table): void {

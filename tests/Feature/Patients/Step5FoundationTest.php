@@ -82,7 +82,7 @@ class Step5FoundationTest extends TestCase
             'last_name' => 'Musa',
             'gender' => 'female',
             'age_years' => 28,
-            'primary_phone' => '0712345678',
+            'primary_phone' => '07123456789',
             'patient_status' => 'active',
         ], [
             'payer_type' => 'cash',

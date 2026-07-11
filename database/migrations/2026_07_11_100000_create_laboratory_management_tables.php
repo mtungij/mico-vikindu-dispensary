@@ -295,21 +295,59 @@ return new class extends Migration
             $table->softDeletes();
         });
 
-        Schema::create('laboratory_critical_result_notifications', function (Blueprint $table): void {
-            $table->id();
-            $table->foreignId('facility_id')->constrained()->restrictOnDelete();
-            $table->foreignId('laboratory_result_id')->constrained()->cascadeOnDelete();
-            $table->foreignId('laboratory_result_value_id')->nullable()->constrained()->nullOnDelete();
-            $table->foreignId('notified_to_user_id')->nullable()->constrained('users')->nullOnDelete();
-            $table->string('notification_method');
-            $table->foreignId('notified_by')->constrained('users')->restrictOnDelete();
-            $table->dateTime('notified_at');
-            $table->foreignId('acknowledged_by')->nullable()->constrained('users')->nullOnDelete();
-            $table->dateTime('acknowledged_at')->nullable();
-            $table->text('communication_notes')->nullable();
-            $table->string('status')->index();
-            $table->timestamps();
-        });
+       Schema::create('laboratory_critical_result_notifications', function (Blueprint $table): void {
+    $table->id();
+    $table->foreignId('facility_id')->constrained()->restrictOnDelete();
+
+    $table->foreignId('laboratory_result_id');
+    $table->foreign(
+        'laboratory_result_id',
+        'lab_critical_result_fk'
+    )->references('id')
+      ->on('laboratory_results')
+      ->cascadeOnDelete();
+
+    $table->foreignId('laboratory_result_value_id')->nullable();
+    $table->foreign(
+        'laboratory_result_value_id',
+        'lab_critical_value_fk'
+    )->references('id')
+      ->on('laboratory_result_values')
+      ->nullOnDelete();
+
+    $table->foreignId('notified_to_user_id')->nullable();
+    $table->foreign(
+        'notified_to_user_id',
+        'lab_critical_notified_user_fk'
+    )->references('id')
+      ->on('users')
+      ->nullOnDelete();
+
+    $table->string('notification_method');
+
+    $table->foreignId('notified_by');
+    $table->foreign(
+        'notified_by',
+        'lab_critical_notified_by_fk'
+    )->references('id')
+      ->on('users')
+      ->restrictOnDelete();
+
+    $table->dateTime('notified_at');
+
+    $table->foreignId('acknowledged_by')->nullable();
+    $table->foreign(
+        'acknowledged_by',
+        'lab_critical_ack_by_fk'
+    )->references('id')
+      ->on('users')
+      ->nullOnDelete();
+
+    $table->dateTime('acknowledged_at')->nullable();
+    $table->text('communication_notes')->nullable();
+    $table->string('status')->index();
+    $table->timestamps();
+});
 
         Schema::create('outsourced_laboratory_requests', function (Blueprint $table): void {
             $table->id();

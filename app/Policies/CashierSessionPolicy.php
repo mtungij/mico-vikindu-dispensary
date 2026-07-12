@@ -1,0 +1,4 @@
+<?php
+namespace App\Policies;
+use App\Models\CashierSession; use App\Models\User;
+class CashierSessionPolicy { public function viewAny(User $user): bool { return $user->can('cashier.sessions.view'); } public function view(User $user, CashierSession $session): bool { return $session->facility_id === currentFacility()?->id && ($user->can('cashier.sessions.view-all') || ($user->can('cashier.sessions.view') && $session->user_id === $user->id)); } public function create(User $user): bool { return $user->can('cashier.sessions.open'); } public function close(User $user, CashierSession $session): bool { return $session->facility_id === currentFacility()?->id && $session->user_id === $user->id && $user->can('cashier.sessions.close'); } public function approve(User $user, CashierSession $session): bool { return $session->facility_id === currentFacility()?->id && $user->can('cashier.sessions.approve'); } }

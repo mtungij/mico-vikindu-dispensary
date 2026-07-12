@@ -227,6 +227,18 @@ class AppServiceProvider extends ServiceProvider
         Gate::policy(\App\Models\InsuranceClaimBatch::class, \App\Policies\InsuranceClaimBatchPolicy::class);
         Gate::policy(\App\Models\InsuranceClaimAttachment::class, \App\Policies\InsuranceClaimAttachmentPolicy::class);
         Gate::policy(\App\Models\InsurancePayment::class, \App\Policies\InsurancePaymentPolicy::class);
+        Gate::policy(\App\Models\PaymentMethod::class, \App\Policies\PaymentMethodPolicy::class);
+        Gate::policy(\App\Models\Payment::class, \App\Policies\PaymentPolicy::class);
+        Gate::policy(\App\Models\Receipt::class, \App\Policies\ReceiptPolicy::class);
+        Gate::policy(\App\Models\CashierSession::class, \App\Policies\CashierSessionPolicy::class);
+        Gate::policy(\App\Models\VisitPaymentHandoff::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\BillingDiscount::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\BillingWaiver::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\InvoiceAdjustment::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\PaymentReversal::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\PaymentRefund::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\PatientDeposit::class, \App\Policies\BillingSetupPolicy::class);
+        Gate::policy(\App\Models\PatientCreditProfile::class, \App\Policies\BillingSetupPolicy::class);
 
         Event::listen(Login::class, \App\Listeners\RecordSuccessfulLogin::class);
         Event::listen(Failed::class, \App\Listeners\RecordFailedLogin::class);

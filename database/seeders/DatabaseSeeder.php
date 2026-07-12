@@ -40,6 +40,8 @@ class DatabaseSeeder extends Seeder
             InsuranceSchemeSeeder::class,
             InsuranceRejectionReasonSeeder::class,
             InsuranceSettingsSeeder::class,
+            PaymentMethodSeeder::class,
+            BillingSettingsSeeder::class,
             ServiceCategorySeeder::class,
             ServiceSeeder::class,
             DentalFindingTypeSeeder::class,

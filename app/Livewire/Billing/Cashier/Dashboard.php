@@ -1,0 +1,4 @@
+<?php
+namespace App\Livewire\Billing\Cashier;
+use App\Models\Payment; use App\Services\CashierSessionService; use Illuminate\Support\Facades\Gate; use Livewire\Component;
+class Dashboard extends Component { public function mount(): void { Gate::authorize('billing.access'); } public function render(CashierSessionService $sessions){ $session=$sessions->getActiveSession(auth()->user()); return view('livewire.billing.cashier.dashboard',['session'=>$session,'payments'=>Payment::query()->forCurrentFacility()->where('received_by',auth()->id())->whereDate('payment_date',today())->with('method')->latest()->limit(10)->get(),'expected'=>$session?$sessions->calculateExpectedCash($session):0])->layout('components.layouts.app',['title'=>'Cashier Dashboard','description'=>'Session yako, collections na expected cash.']); } }

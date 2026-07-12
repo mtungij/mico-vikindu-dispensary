@@ -76,16 +76,26 @@ class InvoiceService
         $payerAmounts = $this->resolvePayerAmounts($invoice->payer_type, $total);
 
         $item = $invoice->items()->create([
+            'facility_id' => $invoice->facility_id,
+            'patient_id' => $invoice->patient_id,
+            'visit_id' => $invoice->visit_id,
             'service_id' => $service->id,
             'item_type' => $service->service_type->value,
+            'code_snapshot' => $service->code,
             'description' => $service->name,
+            'description_snapshot' => $service->name,
+            'department_id' => $service->department_id,
             'quantity' => 1,
             'unit_price' => $price,
+            'gross_amount' => $total,
             'total_amount' => $total,
             'payer_amount' => $payerAmounts['payer_amount'],
             'insurance_amount' => $payerAmounts['insurance_amount'],
+            'corporate_amount' => $payerAmounts['corporate_amount'] ?? 0,
             'patient_amount' => $payerAmounts['patient_amount'],
+            'net_amount' => $total,
             'status' => $invoice->payer_type === PayerType::Cash ? 'pending' : 'covered',
+            'service_date' => today(),
             'metadata' => ['service_code' => $service->code],
             'created_by' => $actor->id,
         ]);
@@ -95,14 +105,7 @@ class InvoiceService
 
     public function calculateTotals(Invoice $invoice): Invoice
     {
-        $subtotal = $invoice->items()->sum('total_amount');
-        $invoice->update([
-            'subtotal' => $subtotal,
-            'total_amount' => $subtotal,
-            'balance_amount' => max(0, $subtotal - (float) $invoice->paid_amount),
-        ]);
-
-        return $invoice->refresh();
+        return app(InvoiceStatusService::class)->recalculate($invoice);
     }
 
     public function cancelItem($item): void { $item->update(['status' => 'cancelled']); $this->calculateTotals($item->invoice); }
@@ -111,9 +114,9 @@ class InvoiceService
     {
         return match ($payerType) {
             PayerType::Insurance => ['payer_amount' => $total, 'insurance_amount' => $total, 'patient_amount' => 0],
-            PayerType::Corporate => ['payer_amount' => $total, 'insurance_amount' => 0, 'patient_amount' => 0],
+            PayerType::Corporate => ['payer_amount' => $total, 'insurance_amount' => 0, 'corporate_amount' => $total, 'patient_amount' => 0],
             PayerType::Exempted => ['payer_amount' => 0, 'insurance_amount' => 0, 'patient_amount' => 0],
-            default => ['payer_amount' => $total, 'insurance_amount' => 0, 'patient_amount' => $total],
+            default => ['payer_amount' => $total, 'insurance_amount' => 0, 'corporate_amount' => 0, 'patient_amount' => $total],
         };
     }
 }

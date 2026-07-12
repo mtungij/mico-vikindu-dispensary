@@ -3,6 +3,9 @@
 use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
+use App\Http\Controllers\Billing\BillingInvoicePrintController;
+use App\Http\Controllers\Billing\CashierSessionPrintController;
+use App\Http\Controllers\Billing\ReceiptPrintController;
 use App\Http\Controllers\FacilityDocumentController;
 use App\Http\Controllers\Clinical\ClinicalEncounterPrintController;
 use App\Http\Controllers\Clinical\ReferralPrintController;
@@ -33,6 +36,7 @@ use App\Http\Controllers\Reports\ReferralReportExportController;
 use App\Http\Controllers\Reports\DentalReportExportController;
 use App\Http\Controllers\Reports\WorkflowReportExportController;
 use App\Http\Controllers\Reports\InsuranceReportExportController;
+use App\Http\Controllers\Reports\BillingReportExportController;
 use App\Http\Controllers\Insurance\InsuranceClaimAttachmentController;
 use App\Http\Controllers\Insurance\InsuranceClaimBatchPrintController;
 use App\Http\Controllers\Insurance\InsuranceClaimPrintController;
@@ -57,6 +61,16 @@ use App\Livewire\Dental\Settings\Rooms as DentalSettingsRooms;
 use App\Livewire\Dental\Settings\Services as DentalSettingsServices;
 use App\Livewire\Facility\SetupWizard;
 use App\Livewire\InsuranceProviders\Index as InsuranceProvidersIndex;
+use App\Livewire\Billing\Dashboard as BillingDashboard;
+use App\Livewire\Billing\Queue as BillingQueue;
+use App\Livewire\Billing\Cashier\Dashboard as CashierDashboard;
+use App\Livewire\Billing\Cashier\SessionShow as CashierSessionShow;
+use App\Livewire\Billing\Cashier\Sessions as CashierSessions;
+use App\Livewire\Billing\Invoices\Index as BillingInvoicesIndex;
+use App\Livewire\Billing\Invoices\Show as BillingInvoiceShow;
+use App\Livewire\Billing\Reports\Index as BillingReport;
+use App\Livewire\Billing\Settings\PaymentMethods as BillingPaymentMethods;
+use App\Livewire\Billing\Settings\Preferences as BillingPreferences;
 use App\Livewire\Insurance\Dashboard as InsuranceDashboard;
 use App\Livewire\Insurance\Memberships\Index as InsuranceMembershipsIndex;
 use App\Livewire\Insurance\Memberships\Show as InsuranceMembershipShow;
@@ -238,6 +252,20 @@ Route::middleware(['auth', 'active.user'])->group(function (): void {
         Route::get('settings/insurance/preferences', InsuranceSettingsPreferences::class)->middleware('permission:insurance.manage-settings')->name('settings.insurance.preferences');
         Route::get('settings/insurance/report-settings', InsuranceSettingsPreferences::class)->middleware('permission:insurance.manage-settings')->name('settings.insurance.report-settings');
         Route::get('settings/corporate-accounts', CorporateAccountsIndex::class)->middleware('permission:corporate-accounts.view')->name('settings.corporate-accounts.index');
+        Route::get('billing', BillingQueue::class)->middleware('permission:billing.view-queue')->name('billing.index');
+        Route::get('billing/dashboard', BillingDashboard::class)->middleware('permission:billing.view-dashboard')->name('billing.dashboard');
+        Route::get('billing/invoices', BillingInvoicesIndex::class)->middleware('permission:billing.view-invoice')->name('billing.invoices.index');
+        Route::get('billing/invoices/{invoice}', BillingInvoiceShow::class)->middleware('permission:billing.view-invoice')->name('billing.invoices.show');
+        Route::get('billing/invoices/{invoice}/print', BillingInvoicePrintController::class)->middleware('permission:billing.print-invoice')->name('billing.invoices.print');
+        Route::get('billing/receipts/{receipt}/print', ReceiptPrintController::class)->middleware('permission:billing.reprint-receipt|billing.receive-payment')->name('billing.receipts.print');
+        Route::get('billing/deposits', BillingReport::class)->middleware('permission:billing.deposits.view')->defaults('type', 'deposits')->name('billing.deposits.index');
+        Route::get('billing/credit-patients', BillingReport::class)->middleware('permission:billing.credit-profiles.view')->defaults('type', 'credit-patients')->name('billing.credit-patients.index');
+        Route::get('billing/refunds', BillingReport::class)->middleware('permission:billing.request-refund|billing.process-refund')->defaults('type', 'refunds')->name('billing.refunds.index');
+        Route::get('billing/reversals', BillingReport::class)->middleware('permission:billing.request-reversal|billing.process-reversal')->defaults('type', 'reversals')->name('billing.reversals.index');
+        Route::get('cashier', CashierDashboard::class)->middleware('permission:billing.access')->name('cashier.dashboard');
+        Route::get('cashier/sessions', CashierSessions::class)->middleware('permission:cashier.sessions.view')->name('cashier.sessions.index');
+        Route::get('cashier/sessions/{cashierSession}', CashierSessionShow::class)->middleware('permission:cashier.sessions.view')->name('cashier.sessions.show');
+        Route::get('cashier/sessions/{cashierSession}/print', CashierSessionPrintController::class)->middleware('permission:cashier.sessions.view')->name('cashier.sessions.print');
         Route::get('patients', PatientsIndex::class)->middleware('permission:patients.view')->name('patients.index');
         Route::get('patients/{patient}', PatientShow::class)->middleware('permission:patients.view')->name('patients.show');
         Route::get('patients/{patient}/card', PatientCardController::class)->middleware('permission:patients.print-card')->name('patients.card');
@@ -322,6 +350,11 @@ Route::middleware(['auth', 'active.user'])->group(function (): void {
         Route::get('settings/dental/chairs', DentalSettingsChairs::class)->middleware('permission:dental.manage-chairs')->name('settings.dental.chairs');
         Route::get('settings/dental/preferences', DentalSettingsPreferences::class)->middleware('permission:settings.update')->name('settings.dental.preferences');
         Route::get('settings/dental/report-settings', DentalSettingsPreferences::class)->middleware('permission:dental.manage-settings')->defaults('section', 'reports')->name('settings.dental.report-settings');
+        Route::get('settings/billing/payment-methods', BillingPaymentMethods::class)->middleware('permission:billing.manage-payment-methods')->name('settings.billing.payment-methods');
+        Route::get('settings/billing/preferences', BillingPreferences::class)->middleware('permission:billing.manage-settings')->name('settings.billing.preferences');
+        foreach (['payment-rules', 'discount-rules', 'waiver-rules', 'receipt-settings', 'cashier-settings', 'credit-settings', 'report-settings'] as $section) {
+            Route::get('settings/billing/'.$section, BillingPreferences::class)->middleware('permission:billing.manage-settings')->defaults('section', $section)->name('settings.billing.'.$section);
+        }
         Route::get('reports/patients', PatientsReport::class)->middleware('permission:patients.export|reports.view')->name('reports.patients');
         Route::get('reports/patients/export', PatientReportExportController::class)->middleware('permission:patients.export|reports.view')->name('reports.patients.export');
         Route::get('reports/reception', ReceptionReport::class)->middleware('permission:patients.export|reports.view')->name('reports.reception');
@@ -344,6 +377,10 @@ Route::middleware(['auth', 'active.user'])->group(function (): void {
             Route::get('reports/insurance/'.$type, InsuranceReport::class)->middleware('permission:insurance.reports.view')->defaults('type', $type)->name('reports.insurance.'.$type);
         }
         Route::get('reports/insurance/{type}/export', InsuranceReportExportController::class)->middleware('permission:insurance.reports.export')->name('reports.insurance.export');
+        foreach (['collections', 'pending', 'outstanding', 'invoices', 'payments', 'payment-methods', 'cashiers', 'discounts', 'waivers', 'refunds', 'reversals', 'deposits', 'credit-patients', 'department-revenue', 'service-revenue'] as $type) {
+            Route::get('reports/billing/'.$type, BillingReport::class)->middleware('permission:billing.reports.view')->defaults('type', $type)->name('reports.billing.'.$type);
+        }
+        Route::get('reports/billing/{type}/export', BillingReportExportController::class)->middleware('permission:billing.reports.export')->name('reports.billing.export');
         Route::get('reports/referrals', ReferralsReport::class)->middleware('permission:reports.view')->name('reports.referrals');
         Route::get('reports/referrals/export', ReferralReportExportController::class)->middleware('permission:reports.view')->name('reports.referrals.export');
         Route::get('reports/laboratory/{type?}', LaboratoryReport::class)->middleware('permission:laboratory-reports.view')->name('reports.laboratory');

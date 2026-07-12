@@ -11,7 +11,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-#[Fillable(['facility_id','patient_id','visit_id','clinical_encounter_id','provider_user_id','dental_encounter_number','complaint','dental_history','medical_history_review','oral_hygiene_history','previous_dental_treatment','tobacco_use','alcohol_use','brushing_frequency','flossing_frequency','dental_anxiety_level','pregnancy_status_snapshot','allergies_snapshot','current_medications_snapshot','extraoral_examination','intraoral_examination','periodontal_summary','occlusion_summary','radiographic_findings','clinical_summary','treatment_plan_summary','status','started_at','completed_at','signed_off_by','signed_off_at','amendment_reason','created_by','updated_by'])]
+#[Fillable(['facility_id','patient_id','visit_id','clinical_encounter_id','provider_user_id','dental_encounter_number','complaint','complaint_duration','dental_history','medical_history_review','medication_history','allergy_history','oral_hygiene_history','previous_dental_treatment','tobacco_use','alcohol_use','brushing_frequency','flossing_frequency','dental_anxiety_level','pregnancy_status_snapshot','allergies_snapshot','current_medications_snapshot','extraoral_examination','intraoral_examination','periodontal_summary','occlusion_summary','radiographic_findings','clinical_summary','treatment_plan_summary','status','started_at','completed_at','signed_off_by','signed_off_at','amendment_reason','created_by','updated_by'])]
 class DentalEncounter extends Model
 {
     use HasFactory, SoftDeletes;

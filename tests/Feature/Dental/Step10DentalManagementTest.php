@@ -114,7 +114,7 @@ class Step10DentalManagementTest extends TestCase
             'plaque_index' => 25,
             'bleeding_index' => 10,
             'oral_hygiene_status' => 'Fair',
-        ], [['tooth_number' => '16', 'surface' => 'buccal', 'pocket_depth_mm' => 4]], $admin);
+        ], [['tooth_number' => '16', 'site' => 'buccal', 'surface' => 'buccal', 'pocket_depth_mm' => 4]], $admin);
         $this->assertSame(1, $assessment->measurements()->count());
 
         app(DentalDiagnosisService::class)->add($encounter, [
@@ -181,7 +181,7 @@ class Step10DentalManagementTest extends TestCase
 
         $this->assertStringStartsWith('ORT-', $case->case_number);
         $this->assertSame('11', $endo->tooth_number);
-        $this->assertStringStartsWith('DL-', $lab->order_number);
+        $this->assertStringStartsWith('DLB-', $lab->order_number);
 
         $this->expectException(ValidationException::class);
         app(DentalConsentService::class)->update($consent, ['patient_or_guardian_name' => 'Changed']);

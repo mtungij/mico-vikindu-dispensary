@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Department;
+use App\Models\DepartmentQueue;
 use Illuminate\Support\Facades\DB;
 
 class QueueNumberService
@@ -20,7 +21,12 @@ class QueueNumberService
                 DB::table('queue_number_sequences')->insert(['facility_id' => $facilityId, 'department_id' => $department->id, 'queue_date' => $date, 'last_number' => $next, 'created_at' => now(), 'updated_at' => now()]);
             }
 
-            return str($department->code)->upper()->substr(0, 3)->append('-'.str_pad((string) $next, 3, '0', STR_PAD_LEFT))->toString();
+            $prefix = DepartmentQueue::query()
+                ->where('facility_id', $facilityId)
+                ->where('department_id', $department->id)
+                ->value('queue_prefix') ?: str($department->code)->upper()->substr(0, 3)->toString();
+
+            return str($prefix)->upper()->append('-'.str_pad((string) $next, 4, '0', STR_PAD_LEFT))->toString();
         });
     }
 }

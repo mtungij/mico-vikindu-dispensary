@@ -1,0 +1,7 @@
+<?php
+namespace App\Livewire\Insurance\Settings;
+use App\Models\FacilitySetting;
+use Illuminate\Support\Facades\Gate;
+use Livewire\Component;
+use Masmerise\Toaster\Toaster as Notifier;
+class Preferences extends Component { public array $settings=[]; public function mount(): void { Gate::authorize('insurance.manage-settings'); $keys=['insurance_enabled','insurance_require_membership_verification','insurance_allow_manual_verification','insurance_allow_verification_override','insurance_block_unmapped_service_codes','insurance_require_primary_diagnosis','insurance_require_provider_signature','insurance_claim_deadline_warning_days','insurance_ageing_basis','insurance_private_attachment_max_mb']; foreach($keys as $key) $this->settings[$key]=FacilitySetting::where('facility_id',currentFacility()?->id)->where('key',$key)->value('value') ?? ''; } public function save(): void { Gate::authorize('insurance.manage-settings'); foreach($this->settings as $key=>$value) FacilitySetting::updateOrCreate(['facility_id'=>currentFacility()?->id,'key'=>$key],['value'=>(string)$value,'type'=>is_bool($value)?'boolean':'string','group'=>'insurance','is_public'=>false]); Notifier::success('messages.saved'); } public function render(){ return view('livewire.insurance.settings.preferences')->layout('components.layouts.app',['title'=>'Insurance Preferences','description'=>'Facility insurance behaviour and report defaults.']); } }

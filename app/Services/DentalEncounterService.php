@@ -18,7 +18,7 @@ use Illuminate\Validation\ValidationException;
 
 class DentalEncounterService
 {
-    public function __construct(private readonly ClinicalEncounterNumberService $clinicalNumbers, private readonly DentalEncounterNumberService $numbers, private readonly DentalOdontogramService $odontogram) {}
+    public function __construct(private readonly ClinicalEncounterNumberService $clinicalNumbers, private readonly DentalEncounterNumberService $numbers, private readonly DentalOdontogramService $odontogram, private readonly WorkflowService $workflow) {}
 
     public function start(Visit $visit, $actor, ?string $overrideReason = null): DentalEncounter
     {
@@ -48,9 +48,10 @@ class DentalEncounterService
                 'provider_user_id'=>$actor->id,'dental_encounter_number'=>$this->numbers->next($visit->facility_id),'status'=>DentalEncounterStatus::InProgress,
                 'started_at'=>now(),'allergies_snapshot'=>$visit->patient->known_allergies,'current_medications_snapshot'=>$visit->patient->chronic_conditions,'created_by'=>$actor->id,
             ]);
-            $visit->update(['visit_status'=>VisitStatus::InConsultation,'current_department_id'=>$department->id,'updated_by'=>$actor->id]);
-            PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', ['waiting','called'])->update(['queue_status'=>'serving','service_started_at'=>now(),'assigned_to_user_id'=>$actor->id]);
-            VisitMovement::query()->create(['facility_id'=>$visit->facility_id,'visit_id'=>$visit->id,'patient_id'=>$visit->patient_id,'from_department_id'=>$visit->current_department_id,'to_department_id'=>$department->id,'movement_type'=>'dental_encounter_started','status'=>'completed','reason'=>$overrideReason,'moved_by'=>$actor->id,'moved_at'=>now()]);
+            if ($queue = PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', ['waiting','called'])->latest()->first()) $this->workflow->startService($queue, $actor);
+            $this->workflow->updateCurrentDepartment($visit, $department, $actor, $queue ?? null);
+            $this->workflow->updateVisitStatus($visit, VisitStatus::InConsultation, $actor, $queue ?? null);
+            $this->workflow->createMovement($visit, $visit->currentDepartment, $department, $overrideReason, $actor, 'dental_encounter_started', filled($overrideReason), $actor);
             $this->odontogram->initializeDentition($dental, 'permanent', $actor);
             $this->audit($actor, $overrideReason ? 'dental_payment_override_used' : 'dental_encounter_started', $dental, ['visit_id'=>$visit->id]);
             return $dental->refresh();
@@ -73,8 +74,8 @@ class DentalEncounterService
             if (blank($encounter->clinical_summary) && blank($encounter->treatment_plan_summary)) throw ValidationException::withMessages(['summary'=>'Clinical summary au treatment plan inahitajika.']);
             $encounter->update(['status'=>DentalEncounterStatus::Completed,'completed_at'=>now(),'signed_off_by'=>$actor->id,'signed_off_at'=>now(),'updated_by'=>$actor->id]);
             $encounter->clinicalEncounter->update(['status'=>ClinicalEncounterStatus::Completed,'completed_at'=>now(),'signed_off_by'=>$actor->id,'signed_off_at'=>now(),'updated_by'=>$actor->id]);
-            $encounter->visit->update(['visit_status'=>VisitStatus::Completed,'completed_at'=>now(),'updated_by'=>$actor->id]);
-            PatientQueue::query()->where('visit_id', $encounter->visit_id)->where('queue_status', 'serving')->update(['queue_status'=>'completed','service_completed_at'=>now()]);
+            if ($queue = PatientQueue::query()->where('visit_id', $encounter->visit_id)->where('queue_status', 'serving')->latest()->first()) $this->workflow->completeQueue($queue, $actor);
+            $this->workflow->completeVisit($encounter->visit, $actor, 'Dental encounter completed');
             $this->audit($actor, 'dental_encounter_completed', $encounter);
             return $encounter->refresh();
         });

@@ -18,6 +18,7 @@ class TriageService
         private readonly VitalSignAssessmentService $vitals,
         private readonly ClinicalAlertService $alerts,
         private readonly QueueNumberService $queueNumbers,
+        private readonly WorkflowService $workflow,
     ) {}
 
     public function startAssessment(Visit $visit, $actor): TriageAssessment
@@ -64,29 +65,14 @@ class TriageService
             $assessment = $this->saveAssessment($assessment, $data, $actor);
             $assessment->update(['status' => TriageStatus::Completed, 'assessed_at' => now(), 'updated_by' => $actor->id]);
 
-            PatientQueue::query()->where('id', $assessment->queue_id)->update(['queue_status' => 'completed', 'service_completed_at' => now()]);
+            if ($assessment->queue_id && $queue = PatientQueue::query()->find($assessment->queue_id)) {
+                $this->workflow->completeQueue($queue, $actor);
+            }
 
             $department = $this->determineNextDepartment($visit);
-            $visit->update([
-                'visit_status' => VisitStatus::InQueue,
-                'current_department_id' => $department?->id ?? $visit->current_department_id,
-                'updated_by' => $actor->id,
-            ]);
-
-            VisitMovement::query()->create([
-                'facility_id' => $visit->facility_id,
-                'visit_id' => $visit->id,
-                'patient_id' => $visit->patient_id,
-                'from_department_id' => $visit->current_department_id,
-                'to_department_id' => $department?->id,
-                'movement_type' => 'triage_to_department',
-                'status' => 'completed',
-                'reason' => 'Triage completed',
-                'moved_by' => $actor->id,
-                'moved_at' => now(),
-            ]);
-
-            $this->createTargetQueue($visit->refresh(), $actor);
+            if ($department) {
+                $this->workflow->transferPatient($visit->refresh(), $department, 'Triage completed', $actor, VisitStatus::InQueue, true, $actor);
+            }
             $this->alerts->createFromVitals($assessment->refresh(), $this->vitals->buildClinicalAlerts($assessment->toArray()));
             $this->audit($actor, 'triage_completed', $assessment);
 

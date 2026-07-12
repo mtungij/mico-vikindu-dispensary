@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-#[Fillable(['facility_id','patient_id','tooth_number','dental_encounter_id','diagnosis','canals_expected','canals_found','working_length_details','instrumentation_method','irrigation_solution','intracanal_medicament','obturation_material','status','started_at','completed_at','provider_user_id','notes'])]
+#[Fillable(['facility_id','patient_id','tooth_number','dental_encounter_id','case_number','diagnosis','canals_expected','canals_found','working_length_details','instrumentation_method','irrigation_solution','intracanal_medicament','obturation_material','status','started_at','completed_at','provider_user_id','notes'])]
 class DentalEndodonticCase extends Model
 {
     use HasFactory, SoftDeletes;

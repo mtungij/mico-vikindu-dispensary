@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-#[Fillable(['facility_id','patient_id','visit_id','dental_encounter_id','dental_procedure_id','consent_type','consent_text_snapshot','risks_explained','alternatives_explained','patient_or_guardian_name','relationship_to_patient','consent_given','signed_at','patient_signature_path','witness_user_id','clinician_user_id'])]
+#[Fillable(['facility_id','patient_id','visit_id','dental_encounter_id','dental_procedure_id','dental_consent_template_id','consent_type','consent_text_snapshot','risks_explained','alternatives_explained','patient_or_guardian_name','relationship_to_patient','consent_given','signed_at','patient_signature_path','witness_user_id','clinician_user_id'])]
 class DentalConsent extends Model
 {
     use HasFactory, SoftDeletes;
@@ -17,4 +17,5 @@ class DentalConsent extends Model
     public function scopeForCurrentFacility(Builder $q): Builder { return $q->where('facility_id', currentFacility()?->id); }
     public function encounter(): BelongsTo { return $this->belongsTo(DentalEncounter::class, 'dental_encounter_id'); }
     public function procedure(): BelongsTo { return $this->belongsTo(DentalProcedure::class, 'dental_procedure_id'); }
+    public function template(): BelongsTo { return $this->belongsTo(DentalConsentTemplate::class, 'dental_consent_template_id'); }
 }

@@ -27,6 +27,7 @@ class ClinicalEncounterService
         private readonly ProcedureOrderService $procedures,
         private readonly AppointmentService $appointments,
         private readonly ReferralService $referrals,
+        private readonly WorkflowService $workflow,
     ) {}
 
     public function startEncounter(Visit $visit, $actor): ClinicalEncounter
@@ -52,7 +53,9 @@ class ClinicalEncounterService
             }
 
             $queue = PatientQueue::query()->where('visit_id', $visit->id)->where('department_id', $visit->current_department_id)->whereIn('queue_status', ['waiting', 'called'])->lockForUpdate()->latest()->first();
-            $queue?->update(['queue_status' => 'serving', 'service_started_at' => now(), 'assigned_to_user_id' => $actor->id]);
+            if ($queue) {
+                $this->workflow->startService($queue, $actor);
+            }
 
             $encounter = ClinicalEncounter::query()->create([
                 'facility_id' => $visit->facility_id,
@@ -67,18 +70,8 @@ class ClinicalEncounterService
                 'created_by' => $actor->id,
             ]);
 
-            $visit->update(['visit_status' => VisitStatus::InConsultation, 'updated_by' => $actor->id]);
-            VisitMovement::query()->create([
-                'facility_id' => $visit->facility_id,
-                'visit_id' => $visit->id,
-                'patient_id' => $visit->patient_id,
-                'from_department_id' => $visit->current_department_id,
-                'to_department_id' => $visit->current_department_id,
-                'movement_type' => 'clinical_encounter_started',
-                'status' => 'completed',
-                'moved_by' => $actor->id,
-                'moved_at' => now(),
-            ]);
+            $this->workflow->updateVisitStatus($visit, VisitStatus::InConsultation, $actor, $queue);
+            $this->workflow->createMovement($visit, $visit->currentDepartment, $visit->currentDepartment, 'Clinical encounter started', $actor, 'clinical_encounter_started');
             $this->audit($actor, 'clinical_encounter_started', $encounter);
 
             return $encounter;
@@ -159,8 +152,12 @@ class ClinicalEncounterService
 
             $next = $this->determineNextVisitStatus($encounter);
             $encounter->update(['status' => $encounter->outcome === ClinicalOutcome::Referred ? ClinicalEncounterStatus::Referred : ClinicalEncounterStatus::Completed, 'completed_at' => now(), 'updated_by' => $actor->id]);
-            $encounter->visit->update(['visit_status' => $next, 'completed_at' => $next === VisitStatus::Completed ? now() : null, 'updated_by' => $actor->id]);
-            PatientQueue::query()->where('visit_id', $encounter->visit_id)->where('department_id', $encounter->department_id)->where('queue_status', 'serving')->update(['queue_status' => 'completed', 'service_completed_at' => now()]);
+            if ($queue = PatientQueue::query()->where('visit_id', $encounter->visit_id)->where('department_id', $encounter->department_id)->where('queue_status', 'serving')->latest()->first()) {
+                $this->workflow->completeQueue($queue, $actor);
+            }
+            $next === VisitStatus::Completed
+                ? $this->workflow->completeVisit($encounter->visit, $actor)
+                : $this->workflow->updateVisitStatus($encounter->visit, $next, $actor);
             $this->audit($actor, 'clinical_encounter_completed', $encounter, ['next_visit_status' => $next->value]);
 
             return $encounter->refresh();

@@ -14,7 +14,7 @@ use Illuminate\Validation\ValidationException;
 
 class VisitService
 {
-    public function __construct(private readonly VisitNumberService $numbers) {}
+    public function __construct(private readonly VisitNumberService $numbers, private readonly WorkflowService $workflow) {}
 
     public function createVisit(Patient $patient, array $data, $actor, bool $overrideActive = false): Visit
     {
@@ -44,6 +44,8 @@ class VisitService
             'created_by' => $actor->id,
         ]);
 
+        $this->workflow->createMovement($visit, null, $department, 'Patient registered', $actor, 'registration');
+        /*
         VisitMovement::query()->create([
             'facility_id' => $visit->facility_id,
             'visit_id' => $visit->id,
@@ -54,6 +56,7 @@ class VisitService
             'moved_by' => $actor->id,
             'moved_at' => now(),
         ]);
+        */
 
         return $visit;
     }
@@ -76,19 +79,7 @@ class VisitService
 
     public function transferVisit(Visit $visit, Department $department, string $reason, $actor): Visit
     {
-        VisitMovement::query()->create([
-            'facility_id' => $visit->facility_id,
-            'visit_id' => $visit->id,
-            'patient_id' => $visit->patient_id,
-            'from_department_id' => $visit->current_department_id,
-            'to_department_id' => $department->id,
-            'movement_type' => 'queue_transfer',
-            'status' => 'completed',
-            'reason' => $reason,
-            'moved_by' => $actor->id,
-            'moved_at' => now(),
-        ]);
-        $visit->update(['current_department_id' => $department->id, 'destination_department_id' => $department->id, 'updated_by' => $actor->id]);
+        $this->workflow->transferPatient($visit, $department, $reason, $actor);
         return $visit->refresh();
     }
 }

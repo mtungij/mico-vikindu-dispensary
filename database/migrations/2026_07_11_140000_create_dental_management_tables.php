@@ -80,7 +80,7 @@ return new class extends Migration
             $table->timestamps();
             $table->softDeletes();
             $table->unique(['facility_id', 'dental_encounter_number']);
-            $table->index(['facility_id', 'patient_id', 'visit_id', 'status']);
+            $table->index(['facility_id', 'patient_id', 'visit_id', 'status'], 'dent_enc_pat_visit_status_idx');
         });
 
         Schema::create('dental_tooth_records', function (Blueprint $table): void {
@@ -125,7 +125,7 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'dental_encounter_id', 'finding_type_id']);
+            $table->index(['facility_id', 'dental_encounter_id', 'finding_type_id'], 'dent_find_fac_enc_type_idx');
         });
 
         Schema::create('dental_examinations', function (Blueprint $table): void {
@@ -161,7 +161,7 @@ return new class extends Migration
             $table->text('notes')->nullable();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'patient_id', 'assessment_date']);
+            $table->index(['facility_id', 'patient_id', 'assessment_date'], 'perio_fac_patient_date_idx');
         });
 
         Schema::create('periodontal_measurements', function (Blueprint $table): void {
@@ -202,7 +202,7 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'patient_id', 'diagnosed_at']);
+            $table->index(['facility_id', 'patient_id', 'diagnosed_at'], 'dent_diag_pat_date_idx');
         });
 
         Schema::create('dental_treatment_plans', function (Blueprint $table): void {
@@ -284,7 +284,7 @@ return new class extends Migration
             $table->timestamps();
             $table->softDeletes();
             $table->unique(['facility_id', 'procedure_number']);
-            $table->index(['facility_id', 'patient_id', 'procedure_type', 'completed_at']);
+            $table->index(['facility_id', 'patient_id', 'procedure_type', 'completed_at'], 'dent_proc_pat_type_comp_idx');
         });
 
         Schema::create('dental_materials', function (Blueprint $table): void {
@@ -428,7 +428,7 @@ return new class extends Migration
             $table->text('notes')->nullable();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'patient_id', 'tooth_number']);
+            $table->index(['facility_id', 'patient_id', 'tooth_number'], 'dent_endo_pat_tooth_idx');
         });
 
         Schema::create('dental_cosmetic_procedure_details', function (Blueprint $table): void {
@@ -482,7 +482,7 @@ return new class extends Migration
             $table->foreignId('uploaded_by')->constrained('users')->restrictOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'patient_id', 'attachment_type']);
+            $table->index(['facility_id', 'patient_id', 'attachment_type'], 'dent_attach_pat_type_idx');
         });
 
         Schema::create('dental_lab_orders', function (Blueprint $table): void {

@@ -153,7 +153,7 @@ return new class extends Migration
             $table->date('queue_date');
             $table->unsignedInteger('last_number')->default(0);
             $table->timestamps();
-            $table->unique(['facility_id', 'department_id', 'queue_date']);
+            $table->unique(['facility_id', 'department_id', 'queue_date'], 'qns_fac_dept_date_unq');
         });
 
         Schema::create('patients', function (Blueprint $table): void {
@@ -364,7 +364,7 @@ return new class extends Migration
             $table->text('notes')->nullable();
             $table->foreignId('created_by')->constrained('users')->restrictOnDelete();
             $table->timestamps();
-            $table->unique(['facility_id', 'department_id', 'queue_date', 'queue_number']);
+            $table->unique(['facility_id', 'department_id', 'queue_date', 'queue_number'], 'patient_queue_date_no_unq');
         });
 
         Schema::create('visit_movements', function (Blueprint $table): void {

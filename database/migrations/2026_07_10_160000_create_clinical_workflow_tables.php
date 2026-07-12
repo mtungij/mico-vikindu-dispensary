@@ -98,7 +98,7 @@ return new class extends Migration
             $table->timestamps();
             $table->softDeletes();
             $table->unique(['facility_id', 'encounter_number']);
-            $table->index(['facility_id', 'visit_id', 'provider_user_id', 'status']);
+            $table->index(['facility_id', 'visit_id', 'provider_user_id', 'status'], 'clin_enc_fac_visit_provider_status_idx');
         });
 
         Schema::create('clinical_complaints', function (Blueprint $table): void {
@@ -296,7 +296,7 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'assigned_to_user_id', 'scheduled_start']);
+            $table->index(['facility_id', 'assigned_to_user_id', 'scheduled_start'], 'appt_fac_user_start_idx');
         });
 
         Schema::create('patient_referrals', function (Blueprint $table): void {

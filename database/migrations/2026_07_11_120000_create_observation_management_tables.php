@@ -120,7 +120,7 @@ return new class extends Migration
             $table->text('notes')->nullable();
             $table->timestamps();
             $table->index(['facility_id', 'bed_id', 'assignment_status']);
-            $table->index(['facility_id', 'observation_admission_id', 'assignment_status']);
+            $table->index(['facility_id', 'observation_admission_id', 'assignment_status'], 'bed_assign_fac_adm_status_idx');
         });
 
         Schema::create('bed_reservations', function (Blueprint $table): void {
@@ -172,7 +172,7 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'observation_admission_id', 'recorded_at']);
+            $table->index(['facility_id', 'observation_admission_id', 'recorded_at'], 'nurse_obs_fac_adm_time_idx');
         });
 
         Schema::create('observation_schedules', function (Blueprint $table): void {

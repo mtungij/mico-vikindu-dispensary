@@ -150,7 +150,7 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->index(['facility_id', 'laboratory_test_id', 'is_active']);
+            $table->index(['facility_id', 'laboratory_test_id', 'is_active'], 'lab_ref_rng_active_idx');
         });
 
         Schema::table('laboratory_order_items', function (Blueprint $table): void {
@@ -232,7 +232,7 @@ return new class extends Migration
             $table->foreignId('laboratory_order_item_id')->constrained()->cascadeOnDelete();
             $table->string('status')->default('attached');
             $table->timestamps();
-            $table->unique(['laboratory_sample_id', 'laboratory_order_item_id']);
+            $table->unique(['laboratory_sample_id', 'laboratory_order_item_id'], 'lab_sample_order_item_unq');
         });
 
         Schema::create('laboratory_results', function (Blueprint $table): void {

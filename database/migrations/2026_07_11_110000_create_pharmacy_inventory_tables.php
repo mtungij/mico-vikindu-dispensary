@@ -317,7 +317,7 @@ return new class extends Migration
             $table->foreignId('updated_by')->nullable()->constrained('users')->nullOnDelete();
             $table->timestamps();
             $table->softDeletes();
-            $table->unique(['facility_id', 'medicine_id', 'stock_location_id', 'batch_number']);
+            $table->unique(['facility_id', 'medicine_id', 'stock_location_id', 'batch_number'], 'med_batch_fac_med_loc_no_unq');
             $table->index(['facility_id', 'medicine_id', 'stock_location_id']);
         });
 

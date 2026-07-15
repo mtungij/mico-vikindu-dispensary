@@ -21,6 +21,7 @@ class SessionShow extends Component
     {
         return view('livewire.billing.cashier.session-show', [
             'expected' => $sessions->calculateExpectedCash($this->cashierSession),
+            'totals' => $sessions->paymentTotals($this->cashierSession),
         ])->layout('components.layouts.app', [
             'title' => $this->cashierSession->session_number,
             'description' => 'Cashier session collections and variance.',

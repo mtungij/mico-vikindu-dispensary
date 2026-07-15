@@ -10,7 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-#[Fillable(['facility_id','user_id','session_number','opened_at','opening_float','status','closed_at','expected_cash','declared_cash','variance','notes','opened_by','closed_by','approved_by','approved_at'])]
+#[Fillable(['facility_id','user_id','session_number','shift','opened_at','opening_float','cash_drawer','status','closed_at','expected_cash','declared_cash','variance','notes','opened_by','closed_by','approved_by','approved_at'])]
 class CashierSession extends Model
 {
     use BelongsToCurrentFacility, HasFactory, SoftDeletes;

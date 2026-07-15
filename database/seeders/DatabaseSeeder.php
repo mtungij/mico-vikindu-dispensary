@@ -18,7 +18,7 @@ class DatabaseSeeder extends Seeder
     {
         // Development credentials only. Change these before using the system in production.
         User::query()->updateOrCreate(
-            ['email' => 'admin@dispensary.test'],
+            ['email' => 'admin@gmail.com'],
             [
                 'name' => 'System Administrator',
                 'phone' => '0700000000',
@@ -44,6 +44,12 @@ class DatabaseSeeder extends Seeder
             BillingSettingsSeeder::class,
             ServiceCategorySeeder::class,
             ServiceSeeder::class,
+            RchServiceSeeder::class,
+            PregnancyRiskFactorSeeder::class,
+            FamilyPlanningMethodSeeder::class,
+            VaccineSeeder::class,
+            ImmunizationScheduleSeeder::class,
+            RchSettingsSeeder::class,
             DentalFindingTypeSeeder::class,
             DentalProcedureTypeSeeder::class,
             DentalServiceSeeder::class,

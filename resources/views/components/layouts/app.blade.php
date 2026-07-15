@@ -10,6 +10,13 @@
             ['label' => 'Sajili Mgonjwa', 'icon' => 'user-plus', 'route' => 'patients.index', 'enabled' => $user?->can('patients.create') ?? false],
             ['label' => 'Reception Dashboard', 'icon' => 'clipboard-list', 'route' => 'reception.index', 'enabled' => $user?->can('reception.access') ?? false],
             ['label' => 'Foleni', 'icon' => 'list-ordered', 'route' => 'reception.queue', 'enabled' => $user?->can('reception.manage-queue') ?? false],
+            ['label' => 'Appointments Dashboard', 'icon' => 'calendar-days', 'route' => 'appointments.dashboard', 'active' => 'appointments.dashboard', 'enabled' => ($user?->can('appointments.access') || $user?->can('appointments.view-dashboard') || $user?->can('appointments.view')) ?? false, 'visible' => ($user?->can('appointments.access') || $user?->can('appointments.view-dashboard') || $user?->can('appointments.view')) ?? false],
+            ['label' => 'Calendar', 'icon' => 'calendar', 'route' => 'appointments.calendar', 'active' => 'appointments.calendar', 'enabled' => ($user?->can('appointments.view-calendar') || $user?->can('appointments.view')) ?? false, 'visible' => ($user?->can('appointments.view-calendar') || $user?->can('appointments.view')) ?? false],
+            ['label' => 'All Appointments', 'icon' => 'calendar-check', 'route' => 'appointments.index', 'active' => 'appointments.index', 'enabled' => $user?->can('appointments.view') ?? false, 'visible' => $user?->can('appointments.view') ?? false],
+            ['label' => 'Book Appointment', 'icon' => 'calendar-plus', 'route' => 'appointments.book', 'active' => 'appointments.book', 'enabled' => $user?->can('appointments.create') ?? false, 'visible' => $user?->can('appointments.create') ?? false],
+            ['label' => 'Doctor Schedules', 'icon' => 'clock', 'route' => 'appointments.doctor-schedules', 'active' => 'appointments.doctor-schedules', 'enabled' => $user?->can('appointments.manage-doctor-schedules') ?? false, 'visible' => $user?->can('appointments.manage-doctor-schedules') ?? false],
+            ['label' => 'Department Schedules', 'icon' => 'calendar-sync', 'route' => 'appointments.department-schedules', 'active' => 'appointments.department-schedules', 'enabled' => $user?->can('appointments.manage-department-schedules') ?? false, 'visible' => $user?->can('appointments.manage-department-schedules') ?? false],
+            ['label' => 'Appointment Reports', 'icon' => 'alarm-clock', 'route' => 'appointments.index', 'active' => 'appointments.index', 'enabled' => ($user?->can('appointments.reports.view') || $user?->can('appointments.reports')) ?? false, 'visible' => ($user?->can('appointments.reports.view') || $user?->can('appointments.reports')) ?? false],
             ['label' => 'Triage', 'icon' => 'heart-pulse', 'route' => 'triage.index', 'enabled' => $user?->can('triage.access') ?? false],
             ['label' => 'OPD Dashboard', 'icon' => 'activity', 'route' => 'opd.dashboard', 'enabled' => $user?->can('opd.access') ?? false],
             ['label' => 'Foleni ya OPD', 'icon' => 'stethoscope', 'route' => 'opd.index', 'enabled' => $user?->can('opd.view-queue') ?? false],
@@ -24,7 +31,19 @@
             ['label' => 'Stock Transfers', 'icon' => 'arrow-right-left', 'route' => 'pharmacy.transfers.index', 'enabled' => $user?->can('pharmacy.transfer-stock') ?? false],
             ['label' => 'Dental Dashboard', 'icon' => 'badge-plus', 'route' => 'dental.dashboard', 'active' => 'dental.*', 'enabled' => $user?->can('dental.view-dashboard') ?? false],
             ['label' => 'Dental Queue', 'icon' => 'smile', 'route' => 'dental.index', 'active' => 'dental.*', 'enabled' => $user?->can('dental.view-queue') ?? false],
-            ['label' => 'RCH', 'icon' => 'baby', 'route' => 'coming-soon', 'enabled' => false],
+            ['label' => 'RCH Dashboard', 'icon' => 'baby', 'route' => 'rch.dashboard', 'active' => 'rch.dashboard', 'enabled' => ($user?->can('rch.view-dashboard') || $user?->can('rch.access')) ?? false, 'visible' => ($user?->can('rch.view-dashboard') || $user?->can('rch.access')) ?? false],
+            ['label' => 'RCH Queue', 'icon' => 'list-ordered', 'route' => 'rch.index', 'active' => 'rch.index', 'enabled' => ($user?->can('rch.view-queue') || $user?->can('rch.access')) ?? false, 'visible' => ($user?->can('rch.view-queue') || $user?->can('rch.access')) ?? false],
+            ['label' => 'Active Pregnancies', 'icon' => 'heart-pulse', 'route' => 'rch.pregnancies.index', 'active' => 'rch.pregnancies.*', 'enabled' => $user?->can('rch.pregnancies.view') ?? false, 'visible' => $user?->can('rch.pregnancies.view') ?? false],
+            ['label' => 'ANC Visits', 'icon' => 'clipboard-check', 'route' => 'rch.pregnancies.index', 'active' => 'rch.pregnancies.*', 'enabled' => $user?->can('rch.anc.view') ?? false, 'visible' => $user?->can('rch.anc.view') ?? false],
+            ['label' => 'High-risk Pregnancies', 'icon' => 'triangle-alert', 'route' => 'rch.pregnancies.index', 'active' => 'rch.pregnancies.*', 'enabled' => $user?->can('rch.pregnancies.manage-risk') ?? false, 'visible' => $user?->can('rch.pregnancies.manage-risk') ?? false],
+            ['label' => 'Family Planning', 'icon' => 'users-round', 'route' => 'rch.family-planning.index', 'active' => 'rch.family-planning.*', 'enabled' => $user?->can('rch.family-planning.view') ?? false, 'visible' => $user?->can('rch.family-planning.view') ?? false],
+            ['label' => 'Children', 'icon' => 'baby', 'route' => 'rch.children.index', 'active' => 'rch.children.*', 'enabled' => $user?->can('rch.children.view') ?? false, 'visible' => $user?->can('rch.children.view') ?? false],
+            ['label' => 'Growth Monitoring', 'icon' => 'chart-no-axes-combined', 'route' => 'rch.children.index', 'active' => 'rch.children.*', 'enabled' => $user?->can('rch.growth.view') ?? false, 'visible' => $user?->can('rch.growth.view') ?? false],
+            ['label' => 'Nutrition Alerts', 'icon' => 'activity', 'route' => 'rch.children.nutrition', 'active' => 'rch.children.nutrition', 'enabled' => $user?->can('rch.growth.assess-nutrition') ?? false, 'visible' => $user?->can('rch.growth.assess-nutrition') ?? false],
+            ['label' => 'Immunization', 'icon' => 'syringe', 'route' => 'rch.immunization.index', 'active' => 'rch.immunization.*', 'enabled' => $user?->can('rch.immunization.view') ?? false, 'visible' => $user?->can('rch.immunization.view') ?? false],
+            ['label' => 'Defaulters', 'icon' => 'alarm-clock', 'route' => 'rch.immunization.defaulters', 'active' => 'rch.immunization.defaulters', 'enabled' => $user?->can('rch.immunization.view-defaulters') ?? false, 'visible' => $user?->can('rch.immunization.view-defaulters') ?? false],
+            ['label' => 'RCH Appointments', 'icon' => 'calendar-plus', 'route' => 'appointments.index', 'active' => 'appointments.*', 'enabled' => $user?->can('rch.appointments.view') ?? false, 'visible' => $user?->can('rch.appointments.view') ?? false],
+            ['label' => 'RCH Reports', 'icon' => 'chart-no-axes-combined', 'route' => 'rch.reports', 'active' => 'rch.reports', 'enabled' => $user?->can('rch.reports.view') ?? false, 'visible' => $user?->can('rch.reports.view') ?? false],
             ['label' => 'Bed Rest', 'icon' => 'bed', 'route' => 'observation.index', 'active' => 'observation.*', 'enabled' => $user?->can('observation.access') ?? false],
             ['label' => 'Bed Board', 'icon' => 'layout-grid', 'route' => 'observation.bed-board', 'enabled' => $user?->can('observation.view-bed-board') ?? false],
             ['label' => 'Observation Dashboard', 'icon' => 'heart-pulse', 'route' => 'observation.dashboard', 'enabled' => $user?->can('observation.view-dashboard') ?? false],
@@ -35,6 +54,10 @@
             ['label' => 'Invoices', 'icon' => 'file-text', 'route' => 'billing.invoices.index', 'active' => 'billing.invoices.*', 'enabled' => $user?->can('billing.view-invoice') ?? false],
             ['label' => 'Cashier Dashboard', 'icon' => 'hand-coins', 'route' => 'cashier.dashboard', 'active' => 'cashier.*', 'enabled' => $user?->can('billing.access') ?? false],
             ['label' => 'Cashier Sessions', 'icon' => 'wallet-cards', 'route' => 'cashier.sessions.index', 'active' => 'cashier.sessions.*', 'enabled' => $user?->can('cashier.sessions.view') ?? false],
+            ['label' => 'Open Session', 'icon' => 'badge-plus', 'route' => 'cashier.sessions.index', 'active' => 'cashier.sessions.index', 'enabled' => $user?->can('cashier.sessions.open') ?? false],
+            ['label' => 'Current Session', 'icon' => 'wallet', 'route' => 'cashier.sessions.current', 'active' => 'cashier.sessions.current', 'enabled' => $user?->can('cashier.sessions.view') ?? false],
+            ['label' => 'Close Session', 'icon' => 'badge-x', 'route' => 'cashier.sessions.current', 'active' => 'cashier.sessions.current', 'enabled' => $user?->can('cashier.sessions.close') ?? false],
+            ['label' => 'Session History', 'icon' => 'history', 'route' => 'cashier.sessions.history', 'active' => 'cashier.sessions.history', 'enabled' => $user?->can('cashier.sessions.view') ?? false],
             ['label' => 'Payment Methods', 'icon' => 'credit-card', 'route' => 'settings.billing.payment-methods', 'active' => 'settings.billing.*', 'enabled' => $user?->can('billing.manage-payment-methods') ?? false],
             ['label' => 'Billing Reports', 'icon' => 'chart-no-axes-combined', 'route' => 'reports.billing.collections', 'active' => 'reports.billing.*', 'enabled' => $user?->can('billing.reports.view') ?? false],
             ['label' => 'Uhasibu', 'icon' => 'wallet-cards', 'route' => 'coming-soon', 'enabled' => false],
@@ -77,6 +100,14 @@
             ['label' => 'Dental Rooms', 'icon' => 'door-open', 'route' => 'settings.dental.rooms', 'active' => 'settings.dental.*', 'enabled' => $user?->can('dental.manage-rooms') ?? false],
             ['label' => 'Dental Chairs', 'icon' => 'armchair', 'route' => 'settings.dental.chairs', 'active' => 'settings.dental.*', 'enabled' => $user?->can('dental.manage-chairs') ?? false],
             ['label' => 'Dental Preferences', 'icon' => 'settings', 'route' => 'settings.dental.preferences', 'active' => 'settings.dental.*', 'enabled' => $user?->can('dental.manage-settings') ?? false],
+            ['label' => 'RCH Services', 'icon' => 'heart-handshake', 'route' => 'settings.services.index', 'active' => 'settings.services.*', 'enabled' => $user?->can('rch.manage-settings') ?? false, 'visible' => $user?->can('rch.manage-settings') ?? false],
+            ['label' => 'Pregnancy Risk Factors', 'icon' => 'triangle-alert', 'route' => 'rch.settings.risk-factors', 'active' => 'rch.settings.risk-factors', 'enabled' => $user?->can('rch.manage-settings') ?? false, 'visible' => $user?->can('rch.manage-settings') ?? false],
+            ['label' => 'Family Planning Methods', 'icon' => 'users-round', 'route' => 'rch.settings.family-planning-methods', 'active' => 'rch.settings.family-planning-methods', 'enabled' => $user?->can('rch.family-planning.manage-methods') ?? false, 'visible' => $user?->can('rch.family-planning.manage-methods') ?? false],
+            ['label' => 'Vaccines', 'icon' => 'syringe', 'route' => 'rch.settings.vaccines', 'active' => 'rch.settings.vaccines', 'enabled' => $user?->can('rch.vaccines.manage') ?? false, 'visible' => $user?->can('rch.vaccines.manage') ?? false],
+            ['label' => 'Immunization Schedules', 'icon' => 'calendar-sync', 'route' => 'rch.settings.immunization-schedules', 'active' => 'rch.settings.immunization-schedules', 'enabled' => $user?->can('rch.immunization.manage-schedules') ?? false, 'visible' => $user?->can('rch.immunization.manage-schedules') ?? false],
+            ['label' => 'Growth Standards', 'icon' => 'chart-no-axes-combined', 'route' => 'rch.settings.growth-standards', 'active' => 'rch.settings.growth-standards', 'enabled' => $user?->can('rch.manage-settings') ?? false, 'visible' => $user?->can('rch.manage-settings') ?? false],
+            ['label' => 'RCH Preferences', 'icon' => 'settings', 'route' => 'rch.settings.preferences', 'active' => 'rch.settings.preferences', 'enabled' => $user?->can('rch.manage-settings') ?? false, 'visible' => $user?->can('rch.manage-settings') ?? false],
+            ['label' => 'RCH Report Settings', 'icon' => 'file-sliders', 'route' => 'rch.settings.report-settings', 'active' => 'rch.settings.report-settings', 'enabled' => $user?->can('rch.manage-settings') ?? false, 'visible' => $user?->can('rch.manage-settings') ?? false],
             ['label' => 'Billing Preferences', 'icon' => 'settings', 'route' => 'settings.billing.preferences', 'active' => 'settings.billing.*', 'enabled' => $user?->can('billing.manage-settings') ?? false],
             ['label' => 'Insurance Providers', 'icon' => 'shield-check', 'route' => 'settings.insurance.providers', 'active' => 'settings.insurance.*', 'enabled' => $user?->can('insurance.manage-providers') ?? false],
             ['label' => 'Insurance Schemes', 'icon' => 'badge-check', 'route' => 'settings.insurance.schemes', 'active' => 'settings.insurance.*', 'enabled' => $user?->can('insurance.manage-schemes') ?? false],
@@ -97,7 +128,8 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="csrf-token" content="{{ csrf_token() }}">
+<meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+<meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{{ $title }} - {{ config('app.name') }}</title>
     <script>
         (function () {
@@ -131,6 +163,7 @@
                         <p x-show="!collapsed" class="mb-2 px-3 text-xs font-semibold uppercase text-slate-400">{{ $group }}</p>
                         <div class="space-y-1">
                             @foreach ($items as $item)
+                                @continue(array_key_exists('visible', $item) && ! $item['visible'])
                                 @php($active = $item['enabled'] && request()->routeIs($item['active'] ?? $item['route']))
                                 <a href="{{ $item['enabled'] ? route($item['route']) : '#' }}" title="{{ $item['enabled'] ? $item['label'] : $item['label'].' - Inakuja hivi karibuni' }}" class="group flex h-10 items-center gap-3 rounded-md px-3 text-sm font-medium {{ $active ? 'bg-primary text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800' }} {{ $item['enabled'] ? '' : 'cursor-not-allowed opacity-50' }}">
                                     <x-dynamic-component :component="'lucide-'.$item['icon']" class="h-5 w-5 shrink-0" />
@@ -167,6 +200,7 @@
                     @foreach ($navGroups as $group => $items)
                         <p class="mb-2 mt-3 px-3 text-xs font-semibold uppercase text-slate-400">{{ $group }}</p>
                         @foreach ($items as $item)
+                            @continue(array_key_exists('visible', $item) && ! $item['visible'])
                             <a href="{{ $item['enabled'] ? route($item['route']) : '#' }}" class="flex h-10 items-center gap-3 rounded-md px-3 text-sm {{ $item['enabled'] ? 'text-slate-700 dark:text-slate-200' : 'cursor-not-allowed text-slate-400' }}">
                                 <x-dynamic-component :component="'lucide-'.$item['icon']" class="h-5 w-5" />
                                 {{ $item['label'] }}

@@ -54,6 +54,7 @@ class RoleSeeder extends Seeder
             'pharmacist' => ['Pharmacist', true],
             'dentist' => ['Dentist', true],
             'rch-nurse' => ['RCH Nurse', true],
+            'vaccination-nurse' => ['Vaccination Nurse', true],
             'store-keeper' => ['Store Keeper', true],
             'records-officer' => ['Records Officer', true],
         ];

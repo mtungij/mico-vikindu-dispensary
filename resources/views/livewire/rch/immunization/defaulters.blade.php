@@ -1,0 +1,1 @@
+<x-card><div class="space-y-2">@forelse($children as $child)<a class="block rounded-md border p-3 text-sm dark:border-slate-700" href="{{ route('rch.children.show',$child) }}">{{ $child->patient->fullName() }} · {{ $child->child_rch_number }}</a>@empty<x-empty-state icon="shield-check" title="No immunization defaulters" />@endforelse</div></x-card>

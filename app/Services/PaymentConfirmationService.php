@@ -36,8 +36,8 @@ class PaymentConfirmationService
 
             $session = null;
             if ($method->is_cash || $this->setting('billing_require_session_for_non_cash', false)) {
-                $session = $this->sessions->getActiveSession($actor);
-                if (! $session && $this->setting('billing_require_cashier_session', true)) {
+                $session = $this->sessions->getActiveSession($actor, currentFacility());
+                if (! $session && $this->setting('billing_require_cashier_session', false)) {
                     throw ValidationException::withMessages(['cashier_session' => 'Fungua cashier session kabla ya kupokea malipo.']);
                 }
             }

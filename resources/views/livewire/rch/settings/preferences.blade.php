@@ -1,0 +1,1 @@
+<x-card><h2 class="font-semibold">RCH Preferences</h2><p class="mt-2 text-sm text-slate-500">RCH follows facility workflow settings for triage, payment-first routing, emergency overrides, laboratory, pharmacy and appointment handoffs.</p></x-card>

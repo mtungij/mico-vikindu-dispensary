@@ -14,6 +14,7 @@ use App\Livewire\Billing\Reports\Index as BillingReport;
 use App\Livewire\Billing\Settings\PaymentMethods;
 use App\Livewire\Billing\Settings\Preferences;
 use App\Models\CashierSession;
+use App\Models\FacilitySetting;
 use App\Models\Facility;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
@@ -205,6 +206,173 @@ class Step13BillingCashierTest extends TestCase
         }
     }
 
+    public function test_invoice_receive_payment_modal_submits_to_confirm_payment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-MODAL', 10000);
+
+        Livewire::actingAs($admin)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->call('openPaymentModal')
+            ->assertSet('showPaymentModal', true)
+            ->assertSeeHtml('wire:submit="confirmPayment"')
+            ->assertSeeHtml('type="submit"')
+            ->assertSee('Confirm Payment');
+    }
+
+    public function test_invoice_confirm_payment_creates_payment_allocation_receipt_and_refreshes_modal(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+        app(CashierSessionService::class)->openSession($admin, 0);
+
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-LW-001', 10000);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+
+        Livewire::actingAs($admin)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->call('openPaymentModal')
+            ->set('payment_method_id', $cash->id)
+            ->set('amount', '10000')
+            ->call('confirmPayment')
+            ->assertHasNoErrors()
+            ->assertSet('showPaymentModal', false);
+
+        $this->assertDatabaseHas('payments', [
+            'invoice_id' => $invoice->id,
+            'payment_method_id' => $cash->id,
+            'amount' => 10000,
+            'status' => 'confirmed',
+        ]);
+        $this->assertDatabaseHas('payment_allocations', ['invoice_id' => $invoice->id, 'allocated_amount' => 10000]);
+        $this->assertDatabaseHas('receipts', ['invoice_id' => $invoice->id, 'amount' => 10000]);
+        $this->assertSame('paid', $invoice->refresh()->payment_status);
+        $this->assertSame('0.00', $invoice->balance_amount);
+    }
+
+    public function test_invoice_confirm_payment_validation_errors_remain_visible_in_modal(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-LW-002', 10000);
+
+        Livewire::actingAs($admin)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->call('openPaymentModal')
+            ->set('amount', '')
+            ->call('confirmPayment')
+            ->assertHasErrors(['payment_method_id', 'amount'])
+            ->assertSet('showPaymentModal', true)
+            ->assertSee('payment method id inahitajika.')
+            ->assertSee('amount inahitajika.');
+    }
+
+    public function test_authorized_cashier_can_open_session_with_shift_and_drawer(): void
+    {
+        $admin = $this->bootstrappedFacility();
+
+        Livewire::actingAs($admin)
+            ->test(CashierSessions::class)
+            ->call('create')
+            ->set('openForm.shift', 'afternoon')
+            ->set('openForm.opening_float', '2500')
+            ->set('openForm.cash_drawer', 'Main Counter')
+            ->call('openSession')
+            ->assertHasNoErrors()
+            ->assertSet('showOpen', false);
+
+        $this->assertDatabaseHas('cashier_sessions', [
+            'facility_id' => currentFacility()->id,
+            'user_id' => $admin->id,
+            'shift' => 'afternoon',
+            'cash_drawer' => 'Main Counter',
+            'status' => 'open',
+        ]);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'cashier_session_opened']);
+        $this->assertStringStartsWith('CSH-'.now()->format('Y').'-', CashierSession::query()->firstOrFail()->session_number);
+    }
+
+    public function test_cashier_cannot_open_duplicate_active_session(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        app(CashierSessionService::class)->openSession($admin, 'morning', '0', 'Main Counter');
+
+        Livewire::actingAs($admin)
+            ->test(CashierSessions::class)
+            ->call('create')
+            ->set('openForm.shift', 'afternoon')
+            ->call('openSession')
+            ->assertHasErrors(['session']);
+
+        $this->assertSame(1, CashierSession::query()->where('user_id', $admin->id)->count());
+        $this->assertDatabaseHas('activity_logs', ['event' => 'cashier_session_open_attempt_blocked']);
+    }
+
+    public function test_receive_payment_opens_directly_when_cashier_session_setting_is_off(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-OFF', 10000);
+
+        $this->setBillingSetting('billing_require_cashier_session', 'false');
+
+        Livewire::actingAs($admin)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->call('openPaymentModal')
+            ->assertSet('showOpenSessionPrompt', false)
+            ->assertSet('showPaymentModal', true);
+    }
+
+    public function test_receive_payment_prompts_for_session_and_auto_returns_after_opening(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-ON', 10000);
+
+        $this->setBillingSetting('billing_require_cashier_session', 'true');
+
+        Livewire::actingAs($admin)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->call('openPaymentModal')
+            ->assertSet('showPaymentModal', false)
+            ->assertSet('showOpenSessionPrompt', true)
+            ->call('openCashierSessionFromPaymentPrompt')
+            ->assertSet('showCashierSessionModal', true)
+            ->set('cashierSessionForm.shift', 'morning')
+            ->set('cashierSessionForm.opening_float', '0')
+            ->call('openCashierSession')
+            ->assertHasNoErrors()
+            ->assertSet('showCashierSessionModal', false)
+            ->assertSet('showPaymentModal', true);
+
+        $this->assertDatabaseHas('cashier_sessions', ['user_id' => $admin->id, 'status' => 'open']);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'cashier_session_prompt_shown']);
+    }
+
+    public function test_payment_confirmation_attaches_active_cashier_session_when_required(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+        $this->setBillingSetting('billing_require_cashier_session', 'true');
+
+        $session = app(CashierSessionService::class)->openSession($admin, 'morning', '0', 'Main Counter');
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-PAY', 10000);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+
+        Livewire::actingAs($admin)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->call('openPaymentModal')
+            ->set('payment_method_id', $cash->id)
+            ->set('amount', '10000')
+            ->call('confirmPayment')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('payments', [
+            'invoice_id' => $invoice->id,
+            'cashier_session_id' => $session->id,
+            'amount' => 10000,
+        ]);
+    }
+
     public function test_facility_scoping_hides_other_facility_payment_methods(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -224,5 +392,55 @@ class Step13BillingCashierTest extends TestCase
         }
 
         return $admin;
+    }
+
+    private function createCashInvoice(User $admin, string $number, int $amount): Invoice
+    {
+        $patient = Patient::factory()->create(['facility_id' => currentFacility()->id, 'created_by' => $admin->id]);
+        $invoice = Invoice::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'invoice_number' => $number,
+            'payer_type' => 'cash',
+            'invoice_status' => 'pending',
+            'subtotal' => $amount,
+            'patient_amount' => $amount,
+            'total_amount' => $amount,
+            'balance_amount' => $amount,
+            'status' => 'open',
+            'payment_status' => 'unpaid',
+            'currency' => 'TZS',
+            'issued_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        InvoiceItem::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'invoice_id' => $invoice->id,
+            'item_type' => 'consultation',
+            'description' => 'Consultation',
+            'description_snapshot' => 'Consultation',
+            'quantity' => 1,
+            'unit_price' => $amount,
+            'gross_amount' => $amount,
+            'payer_amount' => $amount,
+            'patient_amount' => $amount,
+            'insurance_amount' => 0,
+            'total_amount' => $amount,
+            'net_amount' => $amount,
+            'status' => 'pending',
+            'created_by' => $admin->id,
+        ]);
+
+        return $invoice;
+    }
+
+    private function setBillingSetting(string $key, string $value): void
+    {
+        FacilitySetting::query()->updateOrCreate(
+            ['facility_id' => currentFacility()->id, 'key' => $key],
+            ['value' => $value, 'type' => 'boolean', 'group' => 'billing', 'is_public' => false],
+        );
     }
 }

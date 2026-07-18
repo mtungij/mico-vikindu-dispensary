@@ -18,7 +18,7 @@ class Dashboard extends Component
         $facilityId = currentFacility()?->id;
         return view('livewire.opd.dashboard', [
             'cards' => [
-                'Waiting patients' => Visit::query()->where('facility_id', $facilityId)->whereIn('visit_status', [VisitStatus::AwaitingDepartment, VisitStatus::InQueue])->count(),
+                'Waiting patients' => Visit::query()->where('facility_id', $facilityId)->whereIn('visit_status', [VisitStatus::AwaitingDepartment, VisitStatus::InQueue, VisitStatus::InProgress])->count(),
                 'In consultation' => Visit::query()->where('facility_id', $facilityId)->where('visit_status', VisitStatus::InConsultation)->count(),
                 'Awaiting lab' => Visit::query()->where('facility_id', $facilityId)->where('visit_status', VisitStatus::AwaitingLab)->count(),
                 'Awaiting pharmacy' => Visit::query()->where('facility_id', $facilityId)->where('visit_status', VisitStatus::AwaitingPharmacy)->count(),

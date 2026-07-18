@@ -36,7 +36,8 @@ class Queue extends Component
     public function render(): View
     {
         $visits = Visit::query()->forCurrentFacility()->with(['patient.primaryPayerProfile', 'destinationDepartment', 'invoice'])
-            ->whereIn('visit_status', [VisitStatus::AwaitingTriage->value, VisitStatus::InQueue->value])
+            ->whereHas('currentDepartment', fn ($query) => $query->where('code', 'TRI'))
+            ->whereIn('visit_status', [VisitStatus::AwaitingTriage->value, VisitStatus::InQueue->value, VisitStatus::InProgress->value])
             ->when($this->priority, fn ($q) => $q->where('priority', $this->priority))
             ->when($this->payerType, fn ($q) => $q->where('payer_type', $this->payerType))
             ->when($this->visitType, fn ($q) => $q->where('visit_type', $this->visitType))

@@ -13,18 +13,36 @@
 
     <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         @foreach ($this->stats() as $stat)
-            <x-card wire:key="stat-{{ $stat['label'] }}">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-sm text-slate-500 dark:text-slate-400">{{ $stat['label'] }}</p>
-                        <p class="mt-2 text-2xl font-semibold">{{ $stat['value'] }}</p>
+            @php($statUrl = $stat['url'] ?? null)
+            @if($statUrl)
+                <a wire:key="stat-{{ $stat['label'] }}" href="{{ $statUrl }}" class="block rounded-lg focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 dark:focus:ring-offset-slate-950">
+                    <x-card class="h-full transition hover:border-primary/40 hover:shadow-sm">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-sm text-slate-500 dark:text-slate-400">{{ $stat['label'] }}</p>
+                                <p class="mt-2 text-2xl font-semibold">{{ $stat['value'] }}</p>
+                            </div>
+                            <div class="rounded-md bg-slate-100 p-3 text-primary dark:bg-slate-800">
+                                <x-dynamic-component :component="'lucide-'.$stat['icon']" class="h-6 w-6" />
+                            </div>
+                        </div>
+                        <div class="mt-4 h-2 rounded bg-slate-100 dark:bg-slate-800"><div class="h-2 w-0 rounded bg-primary"></div></div>
+                    </x-card>
+                </a>
+            @else
+                <x-card wire:key="stat-{{ $stat['label'] }}">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm text-slate-500 dark:text-slate-400">{{ $stat['label'] }}</p>
+                            <p class="mt-2 text-2xl font-semibold">{{ $stat['value'] }}</p>
+                        </div>
+                        <div class="rounded-md bg-slate-100 p-3 text-primary dark:bg-slate-800">
+                            <x-dynamic-component :component="'lucide-'.$stat['icon']" class="h-6 w-6" />
+                        </div>
                     </div>
-                    <div class="rounded-md bg-slate-100 p-3 text-primary dark:bg-slate-800">
-                        <x-dynamic-component :component="'lucide-'.$stat['icon']" class="h-6 w-6" />
-                    </div>
-                </div>
-                <div class="mt-4 h-2 rounded bg-slate-100 dark:bg-slate-800"><div class="h-2 w-0 rounded bg-primary"></div></div>
-            </x-card>
+                    <div class="mt-4 h-2 rounded bg-slate-100 dark:bg-slate-800"><div class="h-2 w-0 rounded bg-primary"></div></div>
+                </x-card>
+            @endif
         @endforeach
     </div>
 

@@ -42,6 +42,11 @@ class ClinicalEncounterForm extends Form
 
     public function validationAttributes(): array { return ['history_of_presenting_illness' => 'historia ya tatizo la sasa']; }
     public function normalize(): array { return $this->all(); }
-    public function fillFromModel(ClinicalEncounter $encounter): void { $this->fill($encounter->only(array_keys($this->normalize()))); }
+    public function fillFromModel(ClinicalEncounter $encounter): void
+    {
+        $data = $encounter->only(array_keys($this->normalize()));
+        $data['follow_up_required'] = (bool) ($data['follow_up_required'] ?? false);
+        $this->fill($data);
+    }
     public function resetForm(): void { $this->reset(); $this->outcome = 'ongoing'; }
 }

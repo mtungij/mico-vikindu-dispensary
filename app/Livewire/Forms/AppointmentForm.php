@@ -14,6 +14,7 @@ class AppointmentForm extends Form
     public string $appointment_type = 'general_consultation';
     public ?string $appointment_date = null;
     public ?string $appointment_time = null;
+    public ?string $scheduled_start = null;
     public string $estimated_duration = '30';
     public string $priority = 'normal';
     public ?string $reason = null;
@@ -28,8 +29,9 @@ class AppointmentForm extends Form
             'assigned_to_user_id' => ['nullable', 'integer'],
             'service_id' => ['nullable', 'integer'],
             'appointment_type' => ['required', 'string'],
-            'appointment_date' => ['required', 'date', 'after_or_equal:today'],
-            'appointment_time' => ['required', 'date_format:H:i'],
+            'appointment_date' => ['nullable', 'required_without:scheduled_start', 'date', 'after_or_equal:today'],
+            'appointment_time' => ['nullable', 'required_without:scheduled_start', 'date_format:H:i'],
+            'scheduled_start' => ['nullable', 'date', 'after_or_equal:now'],
             'estimated_duration' => ['required', 'integer', 'min:5', 'max:480'],
             'priority' => ['required', 'in:normal,urgent,emergency'],
             'reason' => ['nullable', 'string', 'max:1000'],
@@ -50,6 +52,11 @@ class AppointmentForm extends Form
     public function normalize(): array
     {
         $data = $this->all();
+        if ($this->scheduled_start) {
+            $start = \Carbon\Carbon::parse($this->scheduled_start);
+            $data['appointment_date'] = $start->toDateString();
+            $data['appointment_time'] = $start->format('H:i');
+        }
         $data['assigned_to_user_id'] = $this->staff_id ?: $this->assigned_to_user_id;
         $data['estimated_duration'] = (int) $this->estimated_duration;
 

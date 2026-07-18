@@ -4,11 +4,9 @@ namespace App\Livewire\Billing\Invoices;
 
 use App\Livewire\Forms\CashierSessionOpenForm;
 use App\Models\CashierSession;
-use App\Models\FacilitySetting;
 use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\PaymentMethod;
-use App\Services\BillingAuditService;
 use App\Services\CashierSessionService;
 use App\Services\PaymentConfirmationService;
 use Illuminate\Support\Facades\Gate;
@@ -48,26 +46,13 @@ class Show extends Component
         $this->amount = (string) $this->invoice->balance_amount;
     }
 
-    public function openPaymentModal(CashierSessionService $sessions, BillingAuditService $audit): void
+    public function openPaymentModal(): void
     {
         Gate::authorize('create', Payment::class);
 
         $this->resetErrorBag();
         $this->invoice = $this->loadInvoice($this->invoice->refresh());
         $this->amount = (string) $this->invoice->balance_amount;
-
-        if ($this->requiresCashierSession() && ! $sessions->getActiveSession(auth()->user(), currentFacility())) {
-            $this->showOpenSessionPrompt = true;
-            $audit->record('cashier_session_prompt_shown', $this->invoice, [
-                'invoice_id' => $this->invoice->id,
-                'cashier_user_id' => auth()->id(),
-                'facility_id' => currentFacility()?->id,
-                'timestamp' => now()->toISOString(),
-            ]);
-
-            return;
-        }
-
         $this->showPaymentModal = true;
     }
 
@@ -138,7 +123,7 @@ class Show extends Component
         $this->resetErrorBag('transaction_reference');
     }
 
-    public function confirmPayment(PaymentConfirmationService $service, CashierSessionService $sessions): void
+    public function confirmPayment(PaymentConfirmationService $service): void
     {
         Gate::authorize('create', Payment::class);
 
@@ -156,15 +141,6 @@ class Show extends Component
                 ->forCurrentFacility()
                 ->where('is_active', true)
                 ->findOrFail($data['payment_method_id']);
-
-            if ($sessions->requiresSessionForPayment((bool) $method->is_cash) && ! $sessions->getActiveSession(auth()->user(), currentFacility())) {
-                $this->showPaymentModal = false;
-                $this->showOpenSessionPrompt = true;
-                $this->returnToPaymentAfterSessionOpen = true;
-                $this->addError('cashier_session', 'Fungua cashier session kabla ya kupokea malipo.');
-                Notifier::warning('Fungua cashier session kabla ya kupokea malipo.');
-                return;
-            }
 
             $payment = $service->confirmPayment($invoice, $method, (float) $data['amount'], auth()->user(), $data);
 
@@ -200,9 +176,9 @@ class Show extends Component
         }
     }
 
-    public function receivePayment(PaymentConfirmationService $service, CashierSessionService $sessions): void
+    public function receivePayment(PaymentConfirmationService $service): void
     {
-        $this->confirmPayment($service, $sessions);
+        $this->confirmPayment($service);
     }
 
     public function render()
@@ -235,13 +211,4 @@ class Show extends Component
         }
     }
 
-    private function requiresCashierSession(): bool
-    {
-        $value = FacilitySetting::query()
-            ->where('facility_id', currentFacility()?->id)
-            ->where('key', 'billing_require_cashier_session')
-            ->value('value');
-
-        return $value === null ? false : filter_var($value, FILTER_VALIDATE_BOOL);
-    }
 }

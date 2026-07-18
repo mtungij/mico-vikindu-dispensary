@@ -39,6 +39,9 @@ class Step3RbacTest extends TestCase
             ->set('form.department_type', DepartmentType::Clinical->value)
             ->set('form.queue_enabled', true)
             ->set('form.clinical_department', true)
+            ->set('form.can_receive_patients', true)
+            ->set('form.requires_consultation', true)
+            ->set('form.requires_triage', true)
             ->call('save')
             ->assertHasNoErrors();
 
@@ -47,6 +50,9 @@ class Step3RbacTest extends TestCase
             'code' => 'EMG',
             'queue_enabled' => true,
             'clinical_department' => true,
+            'can_receive_patients' => true,
+            'requires_consultation' => true,
+            'requires_triage' => true,
         ]);
     }
 

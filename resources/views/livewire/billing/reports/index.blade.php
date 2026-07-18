@@ -1,1 +1,50 @@
-<x-card><div class="mb-4 flex items-center justify-between"><h3 class="font-semibold">{{ str($type)->replace('-',' ')->title() }}</h3><a href="{{ route('reports.billing.export',['type'=>$type]) }}" class="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white">CSV</a></div><div class="overflow-x-auto"><table class="min-w-full text-sm"><tbody>@foreach($invoices as $invoice)<tr class="border-t border-slate-100 dark:border-slate-800"><td class="px-3 py-3">{{ $invoice->invoice_number }}</td><td class="px-3 py-3">{{ $invoice->patient?->first_name }} {{ $invoice->patient?->last_name }}</td><td class="px-3 py-3">{{ number_format($invoice->total_amount,2) }}</td><td class="px-3 py-3">{{ number_format($invoice->balance_amount,2) }}</td></tr>@endforeach</tbody></table></div></x-card>
+<x-card>
+    <div class="mb-4 flex items-center justify-between">
+        <h3 class="font-semibold">{{ $type === 'cashiers' ? 'Payments by Cashier' : str($type)->replace('-', ' ')->title() }}</h3>
+        <a href="{{ route('reports.billing.export', ['type' => $type]) }}" class="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white">CSV</a>
+    </div>
+
+    @if($type === 'cashiers')
+        <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+                <thead>
+                    <tr class="text-left text-xs uppercase text-slate-500">
+                        <th class="px-3 py-2">Cashier</th>
+                        <th class="px-3 py-2">Payments</th>
+                        <th class="px-3 py-2">Total</th>
+                        <th class="px-3 py-2">First Payment</th>
+                        <th class="px-3 py-2">Last Payment</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @forelse($cashierTotals as $row)
+                        <tr class="border-t border-slate-100 dark:border-slate-800">
+                            <td class="px-3 py-3">{{ $row->receivedBy?->name ?? 'Unknown' }}</td>
+                            <td class="px-3 py-3">{{ number_format((int) $row->payments_count) }}</td>
+                            <td class="px-3 py-3">{{ number_format((float) $row->total_amount, 2) }}</td>
+                            <td class="px-3 py-3">{{ $row->first_payment_at }}</td>
+                            <td class="px-3 py-3">{{ $row->last_payment_at }}</td>
+                        </tr>
+                    @empty
+                        <tr><td colspan="5" class="px-3 py-8 text-center text-slate-500">Hakuna malipo.</td></tr>
+                    @endforelse
+                </tbody>
+            </table>
+        </div>
+    @else
+        <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+                <tbody>
+                    @foreach($invoices as $invoice)
+                        <tr class="border-t border-slate-100 dark:border-slate-800">
+                            <td class="px-3 py-3">{{ $invoice->invoice_number }}</td>
+                            <td class="px-3 py-3">{{ $invoice->patient?->first_name }} {{ $invoice->patient?->last_name }}</td>
+                            <td class="px-3 py-3">{{ number_format($invoice->total_amount, 2) }}</td>
+                            <td class="px-3 py-3">{{ number_format($invoice->balance_amount, 2) }}</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+        </div>
+    @endif
+</x-card>

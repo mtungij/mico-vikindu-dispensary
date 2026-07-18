@@ -14,14 +14,17 @@ use App\Livewire\Billing\Reports\Index as BillingReport;
 use App\Livewire\Billing\Settings\PaymentMethods;
 use App\Livewire\Billing\Settings\Preferences;
 use App\Models\CashierSession;
+use App\Models\Department;
 use App\Models\FacilitySetting;
 use App\Models\Facility;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Patient;
+use App\Models\PatientQueue;
 use App\Models\PaymentMethod;
 use App\Models\Permission;
 use App\Models\User;
+use App\Models\Visit;
 use App\Services\CashierSessionService;
 use App\Services\PaymentConfirmationService;
 use Database\Seeders\BillingSettingsSeeder;
@@ -250,6 +253,140 @@ class Step13BillingCashierTest extends TestCase
         $this->assertSame('0.00', $invoice->balance_amount);
     }
 
+    public function test_full_payment_routes_opd_to_triage_when_destination_requires_triage(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $opd->update(['queue_enabled' => true, 'requires_triage' => true]);
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-TRIAGE-ON', 10000, $opd);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $triage->id, 'queue_status' => 'waiting']);
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => Department::query()->forCurrentFacility()->where('code', 'BIL')->value('id'), 'queue_status' => 'transferred']);
+        $this->assertSame('in_progress', Visit::query()->findOrFail($invoice->visit_id)->visit_status->value);
+    }
+
+    public function test_full_payment_routes_opd_directly_when_triage_is_disabled(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $opd->update(['queue_enabled' => true, 'requires_triage' => false]);
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-TRIAGE-OFF', 10000, $opd);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $opd->id, 'queue_status' => 'waiting']);
+        $this->assertDatabaseMissing('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $triage->id, 'queue_status' => 'waiting']);
+        $this->assertSame('in_progress', Visit::query()->findOrFail($invoice->visit_id)->visit_status->value);
+    }
+
+    public function test_cash_patient_full_payment_changes_waiting_visit_to_in_progress(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $opd->update(['queue_enabled' => true, 'requires_triage' => false]);
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-WAITING-INPROG', 10000, $opd, 'waiting');
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $visit = Visit::query()->findOrFail($invoice->visit_id);
+        $this->assertSame('in_progress', $visit->visit_status->value);
+        $this->assertSame($opd->id, $visit->current_department_id);
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $visit->id, 'department_id' => $opd->id, 'queue_status' => 'waiting']);
+    }
+
+    public function test_partial_payment_does_not_release_patient_from_billing(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $opd->update(['queue_enabled' => true, 'requires_triage' => true]);
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-PARTIAL-STAYS', 10000, $opd, 'waiting');
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 4000, $admin);
+
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => Department::query()->forCurrentFacility()->where('code', 'BIL')->value('id'), 'queue_status' => 'waiting']);
+        $this->assertSame('waiting', Visit::query()->findOrFail($invoice->visit_id)->visit_status->value);
+    }
+
+    public function test_dental_uses_its_own_triage_setting_after_payment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail()->update(['requires_triage' => true]);
+        $dental = Department::query()->forCurrentFacility()->where('code', 'DEN')->firstOrFail();
+        $dental->update(['queue_enabled' => true, 'requires_triage' => false]);
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-DENTAL', 10000, $dental);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $dental->id, 'queue_status' => 'waiting']);
+        $this->assertDatabaseMissing('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $triage->id, 'queue_status' => 'waiting']);
+        $this->assertSame('in_progress', Visit::query()->findOrFail($invoice->visit_id)->visit_status->value);
+    }
+
+    public function test_laboratory_full_payment_routes_to_laboratory_in_progress_without_triage(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $laboratory = Department::query()->forCurrentFacility()->where('code', 'LAB')->firstOrFail();
+        $laboratory->update(['queue_enabled' => true, 'requires_triage' => false]);
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-LAB', 10000, $laboratory, 'waiting');
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $laboratory->id, 'queue_status' => 'waiting']);
+        $this->assertDatabaseMissing('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $triage->id, 'queue_status' => 'waiting']);
+        $this->assertSame('in_progress', Visit::query()->findOrFail($invoice->visit_id)->visit_status->value);
+    }
+
+    public function test_rch_uses_its_own_triage_setting_after_payment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $rch = Department::query()->forCurrentFacility()->where('code', 'RCH')->firstOrFail();
+        $rch->update(['queue_enabled' => true, 'requires_triage' => true]);
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-RCH', 10000, $rch);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $this->assertDatabaseHas('patient_queues', ['visit_id' => $invoice->visit_id, 'department_id' => $triage->id, 'queue_status' => 'waiting']);
+        $this->assertSame('in_progress', Visit::query()->findOrFail($invoice->visit_id)->visit_status->value);
+    }
+
+    public function test_insurance_payment_release_uses_existing_destination_workflow(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $opd->update(['queue_enabled' => true, 'requires_triage' => false]);
+        $invoice = $this->createCashInvoiceForVisit($admin, 'INV-BIL-INSURANCE', 10000, $opd, 'waiting', 'insurance');
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, PaymentMethod::query()->where('code', 'CASH')->firstOrFail(), 10000, $admin);
+
+        $visit = Visit::query()->findOrFail($invoice->visit_id);
+        $this->assertSame('insurance', $visit->payer_type->value);
+        $this->assertSame('in_progress', $visit->visit_status->value);
+        $this->assertSame($opd->id, $visit->current_department_id);
+    }
+
     public function test_invoice_confirm_payment_validation_errors_remain_visible_in_modal(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -309,12 +446,12 @@ class Step13BillingCashierTest extends TestCase
         $this->assertDatabaseHas('activity_logs', ['event' => 'cashier_session_open_attempt_blocked']);
     }
 
-    public function test_receive_payment_opens_directly_when_cashier_session_setting_is_off(): void
+    public function test_receive_payment_opens_directly_without_cashier_session_even_when_legacy_setting_is_on(): void
     {
         $admin = $this->bootstrappedFacility();
-        $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-OFF', 10000);
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-NO-SESSION', 10000);
 
-        $this->setBillingSetting('billing_require_cashier_session', 'false');
+        $this->setBillingSetting('billing_require_cashier_session', 'true');
 
         Livewire::actingAs($admin)
             ->test(InvoiceShow::class, ['invoice' => $invoice])
@@ -323,36 +460,58 @@ class Step13BillingCashierTest extends TestCase
             ->assertSet('showPaymentModal', true);
     }
 
-    public function test_receive_payment_prompts_for_session_and_auto_returns_after_opening(): void
+    public function test_payment_confirmation_without_open_session_saves_receiver_and_null_session(): void
     {
         $admin = $this->bootstrappedFacility();
-        $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-ON', 10000);
+        $this->actingAs($admin);
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-NULL', 10000);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
 
         $this->setBillingSetting('billing_require_cashier_session', 'true');
 
         Livewire::actingAs($admin)
             ->test(InvoiceShow::class, ['invoice' => $invoice])
             ->call('openPaymentModal')
-            ->assertSet('showPaymentModal', false)
-            ->assertSet('showOpenSessionPrompt', true)
-            ->call('openCashierSessionFromPaymentPrompt')
-            ->assertSet('showCashierSessionModal', true)
-            ->set('cashierSessionForm.shift', 'morning')
-            ->set('cashierSessionForm.opening_float', '0')
-            ->call('openCashierSession')
+            ->set('payment_method_id', $cash->id)
+            ->set('amount', '10000')
+            ->call('confirmPayment')
             ->assertHasNoErrors()
-            ->assertSet('showCashierSessionModal', false)
-            ->assertSet('showPaymentModal', true);
+            ->assertSet('showPaymentModal', false);
 
-        $this->assertDatabaseHas('cashier_sessions', ['user_id' => $admin->id, 'status' => 'open']);
-        $this->assertDatabaseHas('activity_logs', ['event' => 'cashier_session_prompt_shown']);
+        $this->assertDatabaseHas('payments', [
+            'invoice_id' => $invoice->id,
+            'cashier_session_id' => null,
+            'received_by' => $admin->id,
+            'confirmed_by' => $admin->id,
+            'amount' => 10000,
+        ]);
+        $this->assertDatabaseHas('receipts', ['invoice_id' => $invoice->id, 'cashier_name_snapshot' => $admin->name]);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'payment_confirmed', 'subject_type' => \App\Models\Payment::class]);
+
+        $payment = \App\Models\Payment::query()->where('invoice_id', $invoice->id)->firstOrFail();
+        $this->get(route('billing.receipts.print', $payment->receipt))->assertOk()->assertSee('Received By')->assertSee($admin->name);
     }
 
-    public function test_payment_confirmation_attaches_active_cashier_session_when_required(): void
+    public function test_billing_cashier_report_groups_payments_by_receiver(): void
     {
         $admin = $this->bootstrappedFacility();
         $this->actingAs($admin);
-        $this->setBillingSetting('billing_require_cashier_session', 'true');
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+
+        app(PaymentConfirmationService::class)->confirmPayment($this->createCashInvoice($admin, 'INV-BIL-CASHIER-RPT-1', 3000), $cash, 3000, $admin);
+        app(PaymentConfirmationService::class)->confirmPayment($this->createCashInvoice($admin, 'INV-BIL-CASHIER-RPT-2', 2000), $cash, 2000, $admin);
+
+        $this->get(route('reports.billing.cashiers'))
+            ->assertOk()
+            ->assertSee('Payments by Cashier')
+            ->assertSee($admin->name)
+            ->assertSee('5,000.00');
+    }
+
+    public function test_payment_confirmation_attaches_active_cashier_session_when_one_exists(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
 
         $session = app(CashierSessionService::class)->openSession($admin, 'morning', '0', 'Main Counter');
         $invoice = $this->createCashInvoice($admin, 'INV-BIL-SESSION-PAY', 10000);
@@ -371,6 +530,41 @@ class Step13BillingCashierTest extends TestCase
             'cashier_session_id' => $session->id,
             'amount' => 10000,
         ]);
+    }
+
+    public function test_unauthorized_user_cannot_confirm_payment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-UNAUTH', 10000);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        $user = User::factory()->create();
+        $user->givePermissionTo('invoices.view');
+
+        Livewire::actingAs($user)
+            ->test(InvoiceShow::class, ['invoice' => $invoice])
+            ->set('payment_method_id', $cash->id)
+            ->set('amount', '10000')
+            ->call('confirmPayment')
+            ->assertForbidden();
+    }
+
+    public function test_duplicate_payment_submission_does_not_create_duplicate_payment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+        $invoice = $this->createCashInvoice($admin, 'INV-BIL-DUPLICATE', 10000);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 10000, $admin);
+
+        try {
+            app(PaymentConfirmationService::class)->confirmPayment($invoice->refresh(), $cash, 10000, $admin);
+            $this->fail('Duplicate payment was not blocked.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('amount', $exception->errors());
+        }
+
+        $this->assertSame(1, \App\Models\Payment::query()->where('invoice_id', $invoice->id)->count());
     }
 
     public function test_facility_scoping_hides_other_facility_payment_methods(): void
@@ -402,6 +596,78 @@ class Step13BillingCashierTest extends TestCase
             'patient_id' => $patient->id,
             'invoice_number' => $number,
             'payer_type' => 'cash',
+            'invoice_status' => 'pending',
+            'subtotal' => $amount,
+            'patient_amount' => $amount,
+            'total_amount' => $amount,
+            'balance_amount' => $amount,
+            'status' => 'open',
+            'payment_status' => 'unpaid',
+            'currency' => 'TZS',
+            'issued_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        InvoiceItem::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'invoice_id' => $invoice->id,
+            'item_type' => 'consultation',
+            'description' => 'Consultation',
+            'description_snapshot' => 'Consultation',
+            'quantity' => 1,
+            'unit_price' => $amount,
+            'gross_amount' => $amount,
+            'payer_amount' => $amount,
+            'patient_amount' => $amount,
+            'insurance_amount' => 0,
+            'total_amount' => $amount,
+            'net_amount' => $amount,
+            'status' => 'pending',
+            'created_by' => $admin->id,
+        ]);
+
+        return $invoice;
+    }
+
+    private function createCashInvoiceForVisit(User $admin, string $number, int $amount, Department $destination, string $visitStatus = 'awaiting_payment', string $payerType = 'cash'): Invoice
+    {
+        $patient = Patient::factory()->create(['facility_id' => currentFacility()->id, 'created_by' => $admin->id]);
+        $billing = Department::query()->forCurrentFacility()->where('code', 'BIL')->firstOrFail();
+        $visit = Visit::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'visit_number' => 'VIS-BIL-'.fake()->unique()->numerify('######'),
+            'visit_type' => 'new_patient',
+            'payer_type' => $payerType,
+            'destination_department_id' => $destination->id,
+            'current_department_id' => $billing->id,
+            'visit_status' => $visitStatus,
+            'priority' => 'normal',
+            'registered_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        PatientQueue::query()->create([
+            'facility_id' => currentFacility()->id,
+            'visit_id' => $visit->id,
+            'patient_id' => $patient->id,
+            'department_id' => $billing->id,
+            'queue_number' => 'BIL-TST-'.fake()->unique()->numerify('###'),
+            'queue_date' => today(),
+            'queue_status' => 'waiting',
+            'priority' => 'normal',
+            'position' => 1,
+            'checked_in_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        $invoice = Invoice::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'visit_id' => $visit->id,
+            'invoice_number' => $number,
+            'payer_type' => $payerType,
             'invoice_status' => 'pending',
             'subtotal' => $amount,
             'patient_amount' => $amount,

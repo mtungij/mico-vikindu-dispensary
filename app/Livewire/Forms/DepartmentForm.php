@@ -22,6 +22,9 @@ class DepartmentForm extends Form
     public bool $billing_enabled = false;
     public bool $clinical_department = false;
     public bool $stock_location_enabled = false;
+    public bool $can_receive_patients = true;
+    public bool $requires_consultation = false;
+    public bool $requires_triage = false;
     public bool $is_active = true;
     public int $sort_order = 0;
 
@@ -40,6 +43,9 @@ class DepartmentForm extends Form
         $this->billing_enabled = $department->billing_enabled;
         $this->clinical_department = $department->clinical_department;
         $this->stock_location_enabled = $department->stock_location_enabled;
+        $this->can_receive_patients = $department->can_receive_patients;
+        $this->requires_consultation = $department->requires_consultation;
+        $this->requires_triage = $department->requires_triage;
         $this->is_active = $department->is_active;
         $this->sort_order = $department->sort_order;
     }
@@ -74,6 +80,9 @@ class DepartmentForm extends Form
             'billing_enabled' => ['boolean'],
             'clinical_department' => ['boolean'],
             'stock_location_enabled' => ['boolean'],
+            'can_receive_patients' => ['boolean'],
+            'requires_consultation' => ['boolean'],
+            'requires_triage' => ['boolean'],
             'is_active' => ['boolean'],
             'sort_order' => ['integer', 'min:0', 'max:9999'],
         ];

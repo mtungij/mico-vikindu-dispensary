@@ -9,7 +9,7 @@
 <div class="row"><span>Patient</span><strong>{{ $receipt->invoice?->patient?->first_name }} {{ $receipt->invoice?->patient?->last_name }}</strong></div>
 <div class="row"><span>Method</span><strong>{{ $receipt->payment_method_snapshot }}</strong></div>
 <div class="row"><span>Reference</span><strong>{{ $receipt->transaction_reference_snapshot }}</strong></div>
-<div class="row"><span>Cashier</span><strong>{{ $receipt->cashier_name_snapshot }}</strong></div>
+<div class="row"><span>Received By</span><strong>{{ $receipt->cashier_name_snapshot }}</strong></div>
 <div class="row"><span>Amount</span><strong>{{ number_format($receipt->amount, 2) }}</strong></div>
 </div>
 </body>

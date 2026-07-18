@@ -5,6 +5,7 @@ namespace App\Livewire\Departments;
 use App\Enums\DepartmentType;
 use App\Livewire\Forms\DepartmentForm;
 use App\Models\Department;
+use App\Models\WorkflowSetting;
 use App\Services\DepartmentService;
 use App\Support\Notifier;
 use Illuminate\Contracts\View\View;
@@ -146,9 +147,32 @@ class Index extends Component
         return view('livewire.departments.index', [
             'departments' => $departments,
             'types' => DepartmentType::cases(),
+            'workflowFlags' => [
+                'payment_before_consultation' => $this->workflowFlag('payment_before_consultation', true),
+                'auto_queue_after_payment' => true,
+                'allow_emergency_bypass' => $this->workflowFlag('allow_emergency_override', true),
+            ],
         ])->layout('components.layouts.app', [
             'title' => 'Departments',
             'description' => 'Dhibiti vitengo vya huduma, fedha, na utawala.',
         ]);
+    }
+
+    private function workflowFlag(string $key, bool $default): bool
+    {
+        $value = WorkflowSetting::query()
+            ->forCurrentFacility()
+            ->where('key', $key)
+            ->value('value');
+
+        if ($value === null) {
+            return $default;
+        }
+
+        if (is_array($value)) {
+            return (bool) ($value[0] ?? reset($value));
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOL);
     }
 }

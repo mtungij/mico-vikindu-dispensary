@@ -16,6 +16,7 @@ class PaymentConfirmationService
         private readonly ReceiptService $receipts,
         private readonly CashierSessionService $sessions,
         private readonly BillingAuditService $audit,
+        private readonly BillingWorkflowService $workflow,
     ) {}
 
     public function confirmPayment(Invoice $invoice, PaymentMethod $method, float $amount, $actor, array $data = []): Payment
@@ -34,13 +35,7 @@ class PaymentConfirmationService
                 throw ValidationException::withMessages(['transaction_reference' => 'Reference ya malipo inahitajika.']);
             }
 
-            $session = null;
-            if ($method->is_cash || $this->setting('billing_require_session_for_non_cash', false)) {
-                $session = $this->sessions->getActiveSession($actor, currentFacility());
-                if (! $session && $this->setting('billing_require_cashier_session', false)) {
-                    throw ValidationException::withMessages(['cashier_session' => 'Fungua cashier session kabla ya kupokea malipo.']);
-                }
-            }
+            $session = $this->sessions->getActiveSession($actor, currentFacility());
 
             $payment = Payment::query()->create([
                 'facility_id' => $invoice->facility_id,
@@ -68,7 +63,20 @@ class PaymentConfirmationService
             $payment->allocations()->create(['facility_id' => $invoice->facility_id, 'invoice_id' => $invoice->id, 'allocated_amount' => $amount, 'allocation_type' => 'invoice', 'allocated_by' => $actor->id, 'allocated_at' => now()]);
             $this->statuses->recalculate($invoice);
             $this->receipts->createForPayment($payment);
-            $this->audit->record('payment_confirmed', $payment);
+            $this->audit->record('payment_confirmed', $payment, [
+                'payment_id' => $payment->id,
+                'invoice_id' => $invoice->id,
+                'patient_id' => $invoice->patient_id,
+                'amount' => (float) $payment->amount,
+                'payment_method_id' => $method->id,
+                'payment_method' => $method->name,
+                'received_by' => $actor->id,
+                'received_by_name' => $actor->name,
+                'payment_date' => $payment->payment_date?->toISOString(),
+                'facility_id' => $invoice->facility_id,
+                'cashier_session_id' => $payment->cashier_session_id,
+            ]);
+            $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);
 
             return $payment->refresh();
         });

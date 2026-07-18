@@ -84,10 +84,6 @@
                         <p class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">{{ $message }}</p>
                     @enderror
 
-                    @error('cashier_session')
-                        <p class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">{{ $message }}</p>
-                    @enderror
-
                     <label class="block">
                         <span class="text-sm">Method</span>
                         <select wire:model.live="payment_method_id" class="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900">
@@ -125,22 +121,6 @@
                         </x-primary-button>
                     </div>
                 </form>
-            </div>
-        </div>
-    @endif
-
-    @if($showOpenSessionPrompt)
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true">
-            <div class="w-full max-w-md rounded-md bg-white p-5 shadow-xl dark:bg-card-dark">
-                <h3 class="font-semibold">Cashier Session Required</h3>
-                <p class="mt-2 text-sm text-slate-600 dark:text-slate-300">Hujaanza cashier session. Fungua session kabla ya kupokea malipo.</p>
-                @error('cashier_session')
-                    <p class="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">{{ $message }}</p>
-                @enderror
-                <div class="mt-5 flex justify-end gap-2">
-                    <button type="button" wire:click="cancelOpenSessionPrompt" class="rounded-md border border-slate-300 px-4 py-2 text-sm dark:border-slate-700">Cancel</button>
-                    <x-primary-button type="button" wire:click="openCashierSessionFromPaymentPrompt">Open Cashier Session</x-primary-button>
-                </div>
             </div>
         </div>
     @endif

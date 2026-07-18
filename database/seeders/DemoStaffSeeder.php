@@ -20,8 +20,18 @@ class DemoStaffSeeder extends Seeder
         }
 
         $facility = Facility::query()->first();
-        $actor = User::query()->where('email', 'admin@dispensary.test')->first();
-        if (! $facility || ! $actor) {
+        $actor = User::query()->where('is_super_admin', true)->first()
+            ?? User::query()->whereIn('email', ['admin@gmail.com', 'admin@dispensary.test'])->first();
+
+        if (! $facility) {
+            $this->command?->warn('DemoStaffSeeder skipped because no facility exists.');
+
+            return;
+        }
+
+        if (! $actor) {
+            $this->command?->warn('DemoStaffSeeder skipped because no admin user exists.');
+
             return;
         }
 

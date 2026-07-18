@@ -28,6 +28,7 @@ use App\Models\IvFluidAdministration;
 use App\Models\MedicationAdministration;
 use App\Models\NursingTask;
 use App\Models\ObservationAdmission;
+use App\Models\Invoice;
 use App\Services\FacilitySetupService;
 use Illuminate\Contracts\View\View;
 use Livewire\Component;
@@ -35,16 +36,18 @@ use Livewire\Component;
 class Index extends Component
 {
     /**
-     * @return array<int, array<string, string|int>>
+     * @return array<int, array<string, string|int|null>>
      */
     public function stats(): array
     {
+        $user = auth()->user();
+
         return [
             ['label' => 'Wagonjwa Leo', 'value' => 0, 'icon' => 'users', 'tone' => 'teal'],
             ['label' => 'Total Staff', 'value' => StaffProfile::query()->forCurrentFacility()->count(), 'icon' => 'users', 'tone' => 'blue'],
             ['label' => 'Patients Today', 'value' => Patient::query()->forCurrentFacility()->whereDate('registered_at', today())->count(), 'icon' => 'user-plus', 'tone' => 'green'],
             ['label' => 'Active Visits', 'value' => Visit::query()->forCurrentFacility()->whereNotIn('visit_status', ['completed','cancelled','discharged'])->count(), 'icon' => 'clipboard-list', 'tone' => 'amber'],
-            ['label' => 'Awaiting Payment', 'value' => Visit::query()->forCurrentFacility()->where('visit_status', 'awaiting_payment')->count(), 'icon' => 'receipt', 'tone' => 'red'],
+            ['label' => 'Awaiting Payment', 'value' => Invoice::query()->forCurrentFacility()->where('balance_amount', '>', 0)->count(), 'icon' => 'receipt', 'tone' => 'red', 'url' => $user?->can('billing.view-queue') ? route('billing.index', ['tab' => 'awaiting']) : null],
             ['label' => 'Reception Queue', 'value' => PatientQueue::query()->forCurrentFacility()->whereDate('queue_date', today())->where('queue_status', 'waiting')->count(), 'icon' => 'list-ordered', 'tone' => 'indigo'],
             ['label' => 'Awaiting Triage', 'value' => Visit::query()->forCurrentFacility()->where('visit_status', 'awaiting_triage')->count(), 'icon' => 'heart-pulse', 'tone' => 'amber'],
             ['label' => 'OPD Waiting', 'value' => Visit::query()->forCurrentFacility()->whereIn('visit_status', ['awaiting_department', 'in_queue'])->count(), 'icon' => 'stethoscope', 'tone' => 'blue'],

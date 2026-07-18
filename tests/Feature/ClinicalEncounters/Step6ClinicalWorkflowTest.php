@@ -4,26 +4,40 @@ namespace Tests\Feature\ClinicalEncounters;
 
 use App\Enums\FacilityType;
 use App\Enums\OwnershipType;
+use App\Enums\QueueStatus;
 use App\Enums\VisitStatus;
+use App\Livewire\Opd\Consultation as OpdConsultation;
 use App\Livewire\Opd\Queue as OpdQueue;
 use App\Livewire\Triage\Queue as TriageQueue;
 use App\Models\ClinicalAlert;
+use App\Models\ClinicalEncounter;
 use App\Models\Department;
 use App\Models\Facility;
 use App\Models\Icd10Code;
+use App\Models\Invoice;
+use App\Models\InvoiceItem;
+use App\Models\Medicine;
+use App\Models\MedicineUnit;
 use App\Models\Patient;
+use App\Models\PatientQueue;
+use App\Models\PaymentMethod;
 use App\Models\Permission;
+use App\Models\Role;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
+use App\Models\StaffProfile;
 use App\Models\User;
 use App\Models\Visit;
+use App\Services\PaymentConfirmationService;
 use App\Services\ClinicalEncounterService;
 use App\Services\PrescriptionService;
 use App\Services\TriageService;
 use Database\Seeders\DepartmentSeeder;
 use Database\Seeders\MinimalIcd10Seeder;
 use Database\Seeders\PermissionSeeder;
+use Database\Seeders\RolePermissionSeeder;
+use Database\Seeders\RoleSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -44,6 +58,205 @@ class Step6ClinicalWorkflowTest extends TestCase
         $admin = $this->bootstrappedFacility();
         Livewire::actingAs($admin)->test(TriageQueue::class)->assertOk();
         Livewire::actingAs($admin)->test(OpdQueue::class)->assertOk();
+    }
+
+    public function test_assigned_opd_provider_can_open_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InConsultation);
+
+        ClinicalEncounter::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $visit->patient_id,
+            'visit_id' => $visit->id,
+            'department_id' => $visit->current_department_id,
+            'encounter_type' => 'opd',
+            'encounter_number' => 'ENC-TEST-001',
+            'provider_user_id' => $doctor->id,
+            'started_at' => now(),
+            'status' => 'in_progress',
+            'created_by' => $doctor->id,
+        ]);
+
+        $this->actingAs($doctor)->get(route('opd.consultation', $visit))->assertOk();
+    }
+
+    public function test_authorized_opd_provider_from_same_facility_can_open_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+
+        $this->actingAs($doctor)->get(route('opd.consultation', $visit))
+            ->assertOk()
+            ->assertSee('Visit Information')
+            ->assertSee('Payment / Insurance')
+            ->assertDontSee('Doctor Notes')
+            ->assertDontSee('wire:model.live.debounce.2000ms="form.clinical_summary"', false);
+
+        $this->assertDatabaseHas('clinical_encounters', [
+            'visit_id' => $visit->id,
+            'department_id' => $visit->current_department_id,
+            'provider_user_id' => $doctor->id,
+        ]);
+    }
+
+    public function test_cashier_cannot_open_opd_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $cashier = $this->staffUser('cashier');
+        $visit = $this->opdVisit($admin);
+
+        $this->actingAs($cashier)->get(route('opd.consultation', $visit))->assertForbidden();
+    }
+
+    public function test_receptionist_cannot_open_opd_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $receptionist = $this->staffUser('receptionist');
+        $visit = $this->opdVisit($admin);
+
+        $this->actingAs($receptionist)->get(route('opd.consultation', $visit))->assertForbidden();
+    }
+
+    public function test_cross_facility_user_receives_403_for_opd_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $otherFacility = Facility::query()->create([
+            'name' => 'Other Dispensary',
+            'code' => 'OTH',
+            'facility_type' => FacilityType::Dispensary,
+            'ownership_type' => OwnershipType::Private,
+            'phone_primary' => '+255700000001',
+            'region' => 'Dar es Salaam',
+            'district' => 'Ilala',
+            'ward' => 'Upanga',
+            'physical_address' => 'Upanga',
+            'setup_completed_at' => now(),
+            'created_by' => $admin->id,
+            'updated_by' => $admin->id,
+        ]);
+        $doctor = $this->staffUser('doctor', $otherFacility);
+        $visit = $this->opdVisit($admin);
+
+        $this->actingAs($doctor)->get(route('opd.consultation', $visit))->assertForbidden();
+    }
+
+    public function test_patient_routed_to_opd_after_full_payment_can_be_opened(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $opd->update(['requires_triage' => false, 'queue_enabled' => true]);
+        $invoice = $this->cashInvoiceForBillingVisit($admin, $opd, 10000);
+        $cash = PaymentMethod::query()->create(['name' => 'Cash', 'code' => 'CASH_TEST', 'type' => 'cash', 'is_active' => true]);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 10000, $admin);
+
+        $visit = $invoice->visit->refresh();
+        $this->assertSame(VisitStatus::InProgress, $visit->visit_status);
+        $this->assertSame($opd->id, $visit->current_department_id);
+
+        $this->actingAs($doctor)->get(route('opd.consultation', $visit))->assertOk();
+    }
+
+    public function test_visit_still_in_billing_cannot_open_opd_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $billing = Department::query()->forCurrentFacility()->where('code', 'BIL')->firstOrFail();
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $visit = $this->visitInDepartment($admin, $billing, $opd, VisitStatus::Waiting);
+
+        $this->actingAs($doctor)->get(route('opd.consultation', $visit))->assertForbidden();
+    }
+
+    public function test_opd_summary_is_read_only_and_doctor_notes_are_in_plan_tab(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->assertSee('Patient Demographics')
+            ->assertSee('Visit Information')
+            ->assertSee('Latest Triage Vitals')
+            ->assertSee('Payment / Insurance')
+            ->assertDontSee('Doctor Plan')
+            ->assertDontSee('wire:model.live.debounce.2000ms="form.clinical_summary"', false)
+            ->set('activeTab', 'plan')
+            ->assertSee('Doctor Plan')
+            ->assertSee('Doctor notes / clinical summary');
+    }
+
+    public function test_orders_tab_separates_lab_catalogue_from_ordered_laboratory_tests(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $labService = $this->service('Full Blood Picture', 'FBP', 'laboratory_test', $admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+
+        app(ClinicalEncounterService::class)->addLabOrder($encounter->refresh(), [
+            'service_ids' => [$labService->id],
+            'clinical_notes' => 'Rule out infection',
+        ], $doctor);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit->refresh()])
+            ->set('activeTab', 'orders')
+            ->assertSee('Laboratory Test Catalogue')
+            ->assertSee('Available Tests')
+            ->assertSee('Ordered Laboratory Tests')
+            ->assertSee('Full Blood Picture');
+    }
+
+    public function test_orders_tab_uses_medicine_catalogue_and_contains_referral_orders(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $medicine = $this->medicine($admin);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee('Medication Orders')
+            ->assertSee('Select medicine')
+            ->assertSee($medicine->name)
+            ->assertSee('Referral Orders')
+            ->set('activeTab', 'follow')
+            ->assertSee('Follow-up Appointment')
+            ->assertDontSee('Referral Orders');
+    }
+
+    public function test_adding_lab_order_keeps_encounter_in_consultation_until_completion(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin, VisitStatus::InQueue);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $labService = $this->service('Malaria MRDT', 'MRDT', 'laboratory_test', $admin);
+
+        app(ClinicalEncounterService::class)->addLabOrder($encounter->refresh(), [
+            'service_ids' => [$labService->id],
+            'clinical_notes' => 'Fever',
+        ], $admin);
+
+        $this->assertSame('in_progress', $encounter->refresh()->status->value);
+        $this->assertSame(VisitStatus::InConsultation, $visit->refresh()->visit_status);
+    }
+
+    public function test_missing_opd_consult_permission_returns_403(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['facility_id' => currentFacility()->id, 'user_id' => $user->id]);
+        $user->givePermissionTo('opd.view-queue');
+        $visit = $this->opdVisit($admin);
+
+        $this->actingAs($user)->get(route('opd.consultation', $visit))->assertForbidden();
     }
 
     public function test_triage_assessment_calculates_bmi_creates_alert_and_moves_visit_to_opd_queue(): void
@@ -157,7 +370,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->assertStringStartsWith('LAB-', $lab->order_number);
         $this->assertStringStartsWith('RX-', $rx->prescription_number);
         $this->assertSame('Dressing', $proc->procedure_name_snapshot);
-        $this->assertSame('scheduled', $appt->status->value);
+        $this->assertSame('booked', $appt->status->value);
         $this->assertStringStartsWith('REF-', $ref->referral_number);
     }
 
@@ -193,11 +406,21 @@ class Step6ClinicalWorkflowTest extends TestCase
             'created_by' => $admin->id,
             'updated_by' => $admin->id,
         ]);
-        $this->seed([PermissionSeeder::class, DepartmentSeeder::class, MinimalIcd10Seeder::class]);
+        $this->seed([PermissionSeeder::class, DepartmentSeeder::class, MinimalIcd10Seeder::class, RoleSeeder::class, RolePermissionSeeder::class]);
         foreach (Permission::query()->pluck('name') as $permission) {
             $admin->givePermissionTo($permission);
         }
         return $admin;
+    }
+
+    private function staffUser(string $roleName, ?Facility $facility = null): User
+    {
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['facility_id' => ($facility ?? currentFacility())->id, 'user_id' => $user->id]);
+        $role = Role::query()->where('name', $roleName)->firstOrFail();
+        $user->assignRole($role);
+
+        return $user;
     }
 
     private function patient(User $admin): Patient
@@ -212,11 +435,151 @@ class Step6ClinicalWorkflowTest extends TestCase
         return Visit::query()->create(['facility_id' => currentFacility()->id, 'patient_id' => $this->patient($admin)->id, 'visit_number' => 'VIS-2026-'.fake()->unique()->numerify('######'), 'visit_type' => 'new_patient', 'payer_type' => 'insurance', 'destination_department_id' => $department->id, 'current_department_id' => $department->id, 'visit_status' => $status, 'priority' => 'normal', 'registered_at' => now(), 'created_by' => $admin->id]);
     }
 
+    private function opdVisit(User $admin, VisitStatus $status = VisitStatus::InProgress): Visit
+    {
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+
+        return $this->visitInDepartment($admin, $opd, $opd, $status);
+    }
+
+    private function visitInDepartment(User $admin, Department $currentDepartment, Department $destination, VisitStatus $status): Visit
+    {
+        $patient = $this->patient($admin);
+        $visit = Visit::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'visit_number' => 'VIS-2026-'.fake()->unique()->numerify('######'),
+            'visit_type' => 'new_patient',
+            'payer_type' => 'cash',
+            'destination_department_id' => $destination->id,
+            'current_department_id' => $currentDepartment->id,
+            'visit_status' => $status,
+            'priority' => 'normal',
+            'registered_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        if ($currentDepartment->code === 'OPD') {
+            $queue = PatientQueue::query()->create([
+                'facility_id' => currentFacility()->id,
+                'visit_id' => $visit->id,
+                'patient_id' => $patient->id,
+                'department_id' => $currentDepartment->id,
+                'queue_number' => 'OPD-TST-'.fake()->unique()->numerify('###'),
+                'queue_date' => today(),
+                'queue_status' => $status === VisitStatus::InConsultation ? QueueStatus::Serving : QueueStatus::Waiting,
+                'priority' => 'normal',
+                'position' => 1,
+                'checked_in_at' => now(),
+                'created_by' => $admin->id,
+            ]);
+            $visit->update(['current_queue_id' => $queue->id]);
+        }
+
+        return $visit->refresh();
+    }
+
+    private function cashInvoiceForBillingVisit(User $admin, Department $destination, int $amount): Invoice
+    {
+        $billing = Department::query()->forCurrentFacility()->where('code', 'BIL')->firstOrFail();
+        $patient = $this->patient($admin);
+        $visit = Visit::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'visit_number' => 'VIS-BIL-'.fake()->unique()->numerify('######'),
+            'visit_type' => 'new_patient',
+            'payer_type' => 'cash',
+            'destination_department_id' => $destination->id,
+            'current_department_id' => $billing->id,
+            'visit_status' => VisitStatus::Waiting,
+            'priority' => 'normal',
+            'registered_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        PatientQueue::query()->create([
+            'facility_id' => currentFacility()->id,
+            'visit_id' => $visit->id,
+            'patient_id' => $patient->id,
+            'department_id' => $billing->id,
+            'queue_number' => 'BIL-TST-'.fake()->unique()->numerify('###'),
+            'queue_date' => today(),
+            'queue_status' => QueueStatus::Waiting,
+            'priority' => 'normal',
+            'position' => 1,
+            'checked_in_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        $invoice = Invoice::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'visit_id' => $visit->id,
+            'invoice_number' => 'INV-OPD-AUTH-'.fake()->unique()->numerify('######'),
+            'payer_type' => 'cash',
+            'invoice_status' => 'pending',
+            'subtotal' => $amount,
+            'patient_amount' => $amount,
+            'total_amount' => $amount,
+            'balance_amount' => $amount,
+            'status' => 'open',
+            'payment_status' => 'unpaid',
+            'currency' => 'TZS',
+            'issued_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+
+        InvoiceItem::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $patient->id,
+            'invoice_id' => $invoice->id,
+            'item_type' => 'consultation',
+            'description' => 'Consultation',
+            'description_snapshot' => 'Consultation',
+            'quantity' => 1,
+            'unit_price' => $amount,
+            'gross_amount' => $amount,
+            'payer_amount' => $amount,
+            'patient_amount' => $amount,
+            'insurance_amount' => 0,
+            'total_amount' => $amount,
+            'net_amount' => $amount,
+            'status' => 'pending',
+            'created_by' => $admin->id,
+        ]);
+
+        return $invoice;
+    }
+
     private function service(string $name, string $code, string $type, User $admin): Service
     {
         $category = ServiceCategory::query()->first() ?: ServiceCategory::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Clinical', 'code' => 'CLIN', 'category_type' => 'consultation', 'is_active' => true, 'created_by' => $admin->id]);
         $service = Service::query()->create(['facility_id' => currentFacility()->id, 'service_category_id' => $category->id, 'name' => $name, 'code' => $code, 'service_type' => $type, 'requires_payment' => true, 'is_active' => true, 'created_by' => $admin->id]);
         ServicePrice::query()->create(['facility_id' => currentFacility()->id, 'service_id' => $service->id, 'payer_type' => 'insurance', 'amount' => 1000, 'currency' => 'TZS', 'is_active' => true, 'created_by' => $admin->id]);
         return $service;
+    }
+
+    private function medicine(User $admin): Medicine
+    {
+        $unit = MedicineUnit::query()->create([
+            'facility_id' => currentFacility()->id,
+            'name' => 'Tablet',
+            'symbol' => 'tab',
+            'is_active' => true,
+            'created_by' => $admin->id,
+        ]);
+
+        return Medicine::query()->create([
+            'facility_id' => currentFacility()->id,
+            'purchase_unit_id' => $unit->id,
+            'dispensing_unit_id' => $unit->id,
+            'name' => 'Paracetamol',
+            'code' => 'PCM-TEST',
+            'strength' => '500mg',
+            'pack_size' => 1,
+            'purchase_to_dispensing_factor' => 1,
+            'is_active' => true,
+            'created_by' => $admin->id,
+        ]);
     }
 }

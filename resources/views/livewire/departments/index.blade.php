@@ -114,6 +114,27 @@
                 <label class="flex items-center gap-2 text-sm"><x-checkbox wire:model="form.stock_location_enabled" /> Stock</label>
                 <label class="flex items-center gap-2 text-sm"><x-checkbox wire:model="form.is_active" /> Active</label>
             </div>
+            <div class="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+                <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100">Workflow Configuration</h3>
+                <div class="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <label class="flex items-center gap-2 text-sm"><x-checkbox wire:model="form.queue_enabled" /> Queue Enabled</label>
+                    <label class="flex items-center gap-2 text-sm"><x-checkbox wire:model="form.can_receive_patients" /> Can Receive Patients</label>
+                    <label class="flex items-center gap-2 text-sm"><x-checkbox wire:model="form.requires_consultation" /> Requires Consultation</label>
+                    <label class="flex items-center gap-2 text-sm"><x-checkbox wire:model="form.requires_triage" /> Requires Triage</label>
+                    <div class="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
+                        <span>Payment Before Consultation</span>
+                        <x-badge :tone="$workflowFlags['payment_before_consultation'] ? 'success' : 'warning'">{{ $workflowFlags['payment_before_consultation'] ? 'Enabled' : 'Disabled' }}</x-badge>
+                    </div>
+                    <div class="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
+                        <span>Auto Queue After Payment</span>
+                        <x-badge :tone="$workflowFlags['auto_queue_after_payment'] ? 'success' : 'warning'">{{ $workflowFlags['auto_queue_after_payment'] ? 'Enabled' : 'Disabled' }}</x-badge>
+                    </div>
+                    <div class="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800">
+                        <span>Allow Emergency Bypass</span>
+                        <x-badge :tone="$workflowFlags['allow_emergency_bypass'] ? 'success' : 'warning'">{{ $workflowFlags['allow_emergency_bypass'] ? 'Enabled' : 'Disabled' }}</x-badge>
+                    </div>
+                </div>
+            </div>
             <div class="flex justify-end gap-2 pt-2">
                 <x-secondary-button wire:click="closeFormModal">Ghairi</x-secondary-button>
                 <x-primary-button><x-lucide-save class="h-4 w-4" /> Hifadhi</x-primary-button>

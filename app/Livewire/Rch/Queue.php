@@ -32,7 +32,7 @@ class Queue extends Component
         $visits = Visit::query()->forCurrentFacility()->with(['patient','destinationDepartment','currentQueue','invoice','currentAssignedUser'])
             ->whereHas('destinationDepartment', fn($q) => $q->where('code', 'RCH'))
             ->when($this->status, fn($q) => $q->where('visit_status', $this->status))
-            ->when(! $this->status, fn($q) => $q->whereIn('visit_status', [VisitStatus::AwaitingPayment->value, VisitStatus::AwaitingDepartment->value, VisitStatus::InQueue->value, VisitStatus::Waiting->value, VisitStatus::InConsultation->value, VisitStatus::AwaitingLab->value, VisitStatus::AwaitingPharmacy->value, VisitStatus::Completed->value, VisitStatus::Referred->value]))
+            ->when(! $this->status, fn($q) => $q->whereIn('visit_status', [VisitStatus::AwaitingPayment->value, VisitStatus::AwaitingDepartment->value, VisitStatus::InQueue->value, VisitStatus::InProgress->value, VisitStatus::Waiting->value, VisitStatus::InConsultation->value, VisitStatus::AwaitingLab->value, VisitStatus::AwaitingPharmacy->value, VisitStatus::Completed->value, VisitStatus::Referred->value]))
             ->when($this->payer, fn($q) => $q->where('payer_type', $this->payer))
             ->when($this->priority, fn($q) => $q->where('priority', $this->priority))
             ->when($this->search, fn($q) => $q->whereHas('patient', fn($p) => $p->where('first_name','like',"%{$this->search}%")->orWhere('last_name','like',"%{$this->search}%")->orWhere('patient_number','like',"%{$this->search}%")))

@@ -9,6 +9,7 @@ enum VisitStatus: string
     case AwaitingTriage = 'awaiting_triage';
     case AwaitingDepartment = 'awaiting_department';
     case InQueue = 'in_queue';
+    case InProgress = 'in_progress';
     case Waiting = 'waiting';
     case Called = 'called';
     case Serving = 'serving';
@@ -34,7 +35,7 @@ enum VisitStatus: string
             self::Completed, self::Discharged => 'success',
             self::Cancelled => 'danger',
             self::AwaitingPayment, self::AwaitingTriage, self::AwaitingDepartment, self::InQueue, self::Waiting, self::Called => 'warning',
-            self::Serving, self::InConsultation, self::Processing, self::UnderObservation => 'info',
+            self::InProgress, self::Serving, self::InConsultation, self::Processing, self::UnderObservation => 'info',
             default => 'info',
         };
     }

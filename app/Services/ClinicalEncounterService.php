@@ -113,7 +113,7 @@ class ClinicalEncounterService
     }
 
     public function addDiagnosis(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->diagnoses->addDiagnosis($encounter, $data, $actor); }
-    public function addLabOrder(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); $order = $this->laboratoryOrders->createOrder($encounter, $data, $actor); $encounter->update(['status' => ClinicalEncounterStatus::AwaitingLab]); return $order; }
+    public function addLabOrder(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->laboratoryOrders->createOrder($encounter, $data, $actor); }
     public function addPrescription(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->prescriptions->createPrescription($encounter, $data, $actor); }
     public function addProcedureOrder(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->procedures->createOrder($encounter, $data, $actor); }
     public function createFollowUp(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->appointments->createFollowUp($encounter, $data, $actor); }

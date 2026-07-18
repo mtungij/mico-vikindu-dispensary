@@ -33,7 +33,7 @@
             <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div>
                     <h3 class="font-semibold">Huna cashier session iliyo wazi.</h3>
-                    <p class="mt-1 text-sm text-slate-500">Fungua session kabla ya kupokea malipo kama kituo kimewasha sharti la cashier session.</p>
+                    <p class="mt-1 text-sm text-slate-500">Unaweza kufungua session kwa ufuatiliaji wa shift na cash drawer. Malipo yanaweza kupokelewa bila session.</p>
                 </div>
                 @can('create', \App\Models\CashierSession::class)
                     <button type="button" wire:click="create" class="rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white">Fungua Cashier Session</button>

@@ -151,14 +151,16 @@ class WorkflowService
         return $queue->refresh();
     }
 
-    public function transferPatient(Visit $visit, Department $toDepartment, string $reason, $actor, ?VisitStatus $status = null, bool $emergencyOverride = false, $authorizedBy = null): ?PatientQueue
+    public function transferPatient(Visit $visit, Department $toDepartment, string $reason, $actor, ?VisitStatus $status = null, bool $emergencyOverride = false, $authorizedBy = null, bool $skipValidation = false): ?PatientQueue
     {
-        return DB::transaction(function () use ($visit, $toDepartment, $reason, $actor, $status, $emergencyOverride, $authorizedBy): ?PatientQueue {
+        return DB::transaction(function () use ($visit, $toDepartment, $reason, $actor, $status, $emergencyOverride, $authorizedBy, $skipValidation): ?PatientQueue {
             $visit = Visit::query()->lockForUpdate()->findOrFail($visit->id);
-            $this->validateWorkflow($visit, $toDepartment, $reason, $emergencyOverride);
+            if (! $skipValidation) {
+                $this->validateWorkflow($visit, $toDepartment, $reason, $emergencyOverride);
+            }
             PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', [QueueStatus::Waiting->value, QueueStatus::Called->value, QueueStatus::Serving->value])->update(['queue_status' => QueueStatus::Transferred->value, 'service_completed_at' => now()]);
             $this->createMovement($visit, $visit->currentDepartment, $toDepartment, $reason, $actor, 'department_transfer', $emergencyOverride, $authorizedBy);
-            return $this->createQueue($visit->refresh(), $toDepartment, $actor, $status ?? VisitStatus::Waiting, $reason, $emergencyOverride);
+            return $this->createQueue($visit->refresh(), $toDepartment, $actor, $status ?? VisitStatus::Waiting, $reason, $skipValidation);
         });
     }
 

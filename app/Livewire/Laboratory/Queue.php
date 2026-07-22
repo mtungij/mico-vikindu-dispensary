@@ -42,6 +42,7 @@ class Queue extends Component
         $this->resetErrorBag();
         $this->selectedOrder = $order;
         $this->sampleForm->resetForm();
+        $this->sampleForm->order_item_ids = $order->items()->pluck('id')->map(fn ($id): int => (int) $id)->all();
         $this->showCollectModal = true;
     }
 

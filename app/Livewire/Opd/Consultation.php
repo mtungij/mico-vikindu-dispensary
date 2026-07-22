@@ -23,6 +23,7 @@ use App\Services\ClinicalEncounterService;
 use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\On;
 use Livewire\Component;
@@ -257,7 +258,33 @@ class Consultation extends Component
             'currentAssignedUser',
             'currentQueue',
         ]);
-        $this->encounter->load(['provider', 'complaints', 'examinations', 'diagnoses', 'laboratoryOrders.items.results', 'prescriptions.items.medicine', 'procedureOrders', 'appointments', 'referrals', 'amendments']);
+        $canViewLaboratoryResults = auth()->user()->can('laboratory-results.view');
+        $relations = [
+            'provider',
+            'complaints',
+            'examinations',
+            'diagnoses',
+            'laboratoryOrders' => fn ($query) => $query->where('facility_id', currentFacility()?->id),
+            'laboratoryOrders.items',
+            'prescriptions.items.medicine',
+            'procedureOrders',
+            'appointments',
+            'referrals',
+            'amendments',
+        ];
+        if ($canViewLaboratoryResults) {
+            $relations['laboratoryOrders.items.results'] = fn ($query) => $query
+                ->where('facility_id', currentFacility()?->id)
+                ->with(['values', 'verifier', 'releaser'])
+                ->orderByDesc('result_version');
+        }
+        $this->encounter->load($relations);
+
+        if (! $canViewLaboratoryResults) {
+            $this->encounter->laboratoryOrders->each(
+                fn ($order) => $order->items->each(fn ($item) => $item->setRelation('results', new EloquentCollection)),
+            );
+        }
 
         return view('livewire.opd.consultation', [
             'labTests' => LaboratoryTest::query()->forCurrentFacility()->with(['service', 'category', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get(),
@@ -265,6 +292,7 @@ class Consultation extends Component
             'procedureServices' => Service::query()->forCurrentFacility()->where('service_type', 'procedure')->where('is_active', true)->get(),
             'medicines' => Medicine::query()->forCurrentFacility()->with(['generic', 'dosageForm', 'route'])->where('is_active', true)->orderBy('name')->get(),
             'outcomes' => ClinicalOutcome::cases(),
+            'canViewLaboratoryResults' => $canViewLaboratoryResults,
         ])->layout('components.layouts.app', ['title' => 'OPD Consultation', 'description' => $this->visit->patient->fullName().' - '.$this->visit->visit_number]);
     }
 }

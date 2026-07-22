@@ -9,6 +9,7 @@ use App\Models\LaboratoryOrder;
 use App\Models\LaboratorySample;
 use App\Models\LaboratorySampleRejectionReason;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class LaboratorySampleService
@@ -45,37 +46,49 @@ class LaboratorySampleService
                     'order' => "Order hii haipo tayari kwa ukusanyaji wa sampuli (status: {$order->status->value}).",
                 ]);
             }
-            $itemIds = collect($data['order_item_ids'] ?? $order->items()->pluck('id')->all())
+            $itemIds = collect($data['order_item_ids'] ?? [])
                 ->map(fn ($id): int => (int) $id)
+                ->filter()
                 ->unique()
                 ->values();
             if ($itemIds->isEmpty()) {
-                throw ValidationException::withMessages(['order_item_ids' => 'Order haina vipimo vya sample.']);
+                $itemIds = $order->items()->pluck('id')->map(fn ($id): int => (int) $id)->values();
+            }
+            if ($itemIds->isEmpty()) {
+                $storedItems = $order->items()->withTrashed()->get(['id', 'status', 'deleted_at']);
+                $message = $storedItems->isEmpty()
+                    ? 'Order hii haina vipimo vilivyohifadhiwa. Tafadhali futa order hii na daktari aagize vipimo upya.'
+                    : 'Vipimo vya order hii vimefutwa.';
+                $this->collectionError($order, $actor, 'order_item_ids', $message, $storedItems);
             }
             $items = $order->items()->whereIn('id', $itemIds)->with('laboratoryTest.specimenType')->lockForUpdate()->get();
             if ($items->count() !== $itemIds->count()) {
-                throw ValidationException::withMessages(['order_item_ids' => 'Kila kipimo kilichochaguliwa lazima kiwe kwenye order hii.']);
+                $this->collectionError($order, $actor, 'order_item_ids', 'Kitambulisho cha kipimo hakilingani na order hii.', $items);
             }
             if ($items->contains(fn ($item): bool => $item->status === 'cancelled')) {
-                throw ValidationException::withMessages(['order_item_ids' => 'Kipimo hiki kimefutwa.']);
+                $this->collectionError($order, $actor, 'order_item_ids', 'Vipimo vya order hii vimefutwa.', $items);
             }
             if ($items->contains(fn ($item): bool => $item->sample_id !== null)) {
-                throw ValidationException::withMessages(['order_item_ids' => 'Sampuli ya kipimo hiki tayari imekusanywa.']);
+                $this->collectionError($order, $actor, 'order_item_ids', 'Vipimo vya order hii tayari vimekusanywa.', $items);
+            }
+            $eligibleItemStatuses = ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'];
+            if ($items->contains(fn ($item): bool => ! in_array($item->status, $eligibleItemStatuses, true))) {
+                $this->collectionError($order, $actor, 'order_item_ids', 'Hakuna kipimo kilicho tayari kukusanywa sampuli.', $items);
             }
             $firstItem = $items->firstOrFail();
             if (! $firstItem->laboratory_test_id) {
                 throw ValidationException::withMessages(['laboratory_test_id' => 'Test haijasanidiwa kwa service hii.']);
             }
-            $specimenTypeId = $data['specimen_type_id'] ?? $firstItem->specimen_type_id ?? $firstItem->laboratoryTest?->specimen_type_id;
-            if (! $specimenTypeId) {
-                throw ValidationException::withMessages(['specimen_type_id' => 'Specimen inayohitajika haijawekwa.']);
+            if ($items->contains(fn ($item): bool => ! ($item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id))) {
+                $this->collectionError($order, $actor, 'specimen_type_id', 'Aina ya sampuli haijawekwa kwenye huduma ya kipimo.', $items);
             }
+            $specimenTypeId = $data['specimen_type_id'] ?? $firstItem->specimen_type_id ?? $firstItem->laboratoryTest?->specimen_type_id;
             if ($items->contains(function ($item) use ($specimenTypeId): bool {
                 $required = $item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id;
 
-                return ! $required || (int) $required !== (int) $specimenTypeId;
+                return (int) $required !== (int) $specimenTypeId;
             })) {
-                throw ValidationException::withMessages(['specimen_type_id' => 'Vipimo vilivyochaguliwa vinahitaji specimen tofauti; kusanya kila specimen kivyake.']);
+                $this->collectionError($order, $actor, 'specimen_type_id', 'Vipimo vilivyochaguliwa vinahitaji specimen tofauti; kusanya kila specimen kivyake.', $items);
             }
             $sample = LaboratorySample::query()->create([
                 'facility_id' => $order->facility_id,
@@ -174,5 +187,29 @@ class LaboratorySampleService
     private function auditOrder($actor, string $event, LaboratoryOrder $order): void
     {
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => $event, 'subject_type' => $order::class, 'subject_id' => $order->id, 'new_values' => ['facility_id' => $order->facility_id, 'visit_id' => $order->visit_id, 'laboratory_order_id' => $order->id]]);
+    }
+
+    private function collectionError(LaboratoryOrder $order, $actor, string $field, string $message, $items): never
+    {
+        Log::warning('Laboratory sample collection rejected.', [
+            'laboratory_order_id' => $order->id,
+            'facility_id' => $order->facility_id,
+            'current_facility_id' => currentFacility()?->id,
+            'user_id' => $actor->id,
+            'order_status' => $order->status->value,
+            'payment_status' => $order->payment_status->value,
+            'item_count' => $order->items()->withTrashed()->count(),
+            'eligible_item_count' => collect($items)->filter(fn ($item): bool => ! $item->deleted_at && in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true) && ! $item->sample_id)->count(),
+            'items' => collect($items)->map(fn ($item): array => [
+                'id' => $item->id,
+                'status' => $item->status,
+                'service_id' => $item->service_id ?? null,
+                'specimen_type_id' => $item->specimen_type_id ?? null,
+                'sample_id' => $item->sample_id ?? null,
+                'deleted_at' => $item->deleted_at,
+            ])->values()->all(),
+        ]);
+
+        throw ValidationException::withMessages([$field => $message]);
     }
 }

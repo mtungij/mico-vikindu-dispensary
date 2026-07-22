@@ -18,6 +18,10 @@ use App\Models\Icd10Code;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\LaboratoryOrder;
+use App\Models\LaboratoryResult;
+use App\Models\LaboratoryResultValue;
+use App\Models\LaboratoryTest;
+use App\Models\LaboratoryTestCategory;
 use App\Models\Medicine;
 use App\Models\MedicineUnit;
 use App\Models\Patient;
@@ -28,6 +32,7 @@ use App\Models\Role;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
+use App\Models\SpecimenType;
 use App\Models\StaffProfile;
 use App\Models\TriageAssessment;
 use App\Models\User;
@@ -218,6 +223,125 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->assertSee('Available Tests')
             ->assertSee('Ordered Laboratory Tests')
             ->assertSee('Full Blood Picture');
+    }
+
+    public function test_opd_displays_released_single_value_with_verification_and_release_metadata(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        [$visit, $result] = $this->laboratoryResultFixture($admin, $doctor, 'released', [
+            ['parameter' => 'HIV Result', 'type' => 'reactive_non_reactive', 'selected_value' => 'non_reactive', 'flag' => 'normal'],
+        ], 'HIV Rapid Test');
+
+        $component = Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee('Released')
+            ->assertSee('Non-Reactive')
+            ->assertSee('Laboratory remarks')
+            ->assertSee('Reviewed by laboratory')
+            ->assertSee('Verified by')
+            ->assertSee($admin->name)
+            ->assertSee($result->verified_at->format('d/m/Y H:i'))
+            ->assertSee('Released at')
+            ->assertSee($result->released_at->format('d/m/Y H:i'));
+
+        $loadedItem = $component->get('encounter')->laboratoryOrders->first()->items->first();
+        $this->assertTrue($loadedItem->relationLoaded('results'));
+        $this->assertTrue($loadedItem->results->first()->relationLoaded('values'));
+        $this->assertTrue($loadedItem->results->first()->relationLoaded('verifier'));
+        $this->assertTrue($loadedItem->results->first()->relationLoaded('releaser'));
+    }
+
+    public function test_opd_displays_every_verified_parameter_unit_range_and_abnormal_flag(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        [$visit] = $this->laboratoryResultFixture($admin, $doctor, 'verified', [
+            ['parameter' => 'Haemoglobin', 'type' => 'numeric', 'numeric_value' => 7.5, 'unit' => 'g/dL', 'range' => '12 - 16 g/dL', 'flag' => 'low'],
+            ['parameter' => 'White Blood Cells', 'type' => 'numeric', 'numeric_value' => 18.2, 'unit' => '10^9/L', 'range' => '4 - 11 10^9/L', 'flag' => 'critical_high', 'critical' => true],
+        ], 'Full Blood Picture');
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'results')
+            ->assertSee('Verified')
+            ->assertSee('Haemoglobin')
+            ->assertSee('7.5')
+            ->assertSee('g/dL')
+            ->assertSee('12 - 16 g/dL')
+            ->assertSee('Low')
+            ->assertSee('White Blood Cells')
+            ->assertSee('18.2')
+            ->assertSee('10^9/L')
+            ->assertSee('Critical High');
+    }
+
+    public function test_opd_hides_pending_verification_values_and_uses_workflow_status(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        [$visit] = $this->laboratoryResultFixture($admin, $doctor, 'pending_verification', [
+            ['parameter' => 'Confidential Result', 'type' => 'text', 'text_value' => 'SECRET-PENDING-VALUE', 'flag' => 'normal'],
+        ], 'Pending Test');
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee('Awaiting Verification')
+            ->assertDontSee('SECRET-PENDING-VALUE')
+            ->assertDontSee('Result Ready');
+    }
+
+    public function test_opd_hides_cross_facility_results(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        [$visit, $result] = $this->laboratoryResultFixture($admin, $doctor, 'verified', [
+            ['parameter' => 'Private Result', 'type' => 'text', 'text_value' => 'FACILITY-SECRET', 'flag' => 'normal'],
+        ], 'Facility Test');
+        $foreignFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
+        $result->update(['facility_id' => $foreignFacility->id]);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertDontSee('FACILITY-SECRET');
+    }
+
+    public function test_opd_hides_result_values_from_doctor_without_permission(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        [$visit] = $this->laboratoryResultFixture($admin, $doctor, 'verified', [
+            ['parameter' => 'Private Result', 'type' => 'text', 'text_value' => 'PERMISSION-SECRET', 'flag' => 'normal'],
+        ], 'Permission Test');
+        $restrictedDoctor = User::factory()->create();
+        StaffProfile::factory()->create(['facility_id' => currentFacility()->id, 'user_id' => $restrictedDoctor->id]);
+        $restrictedDoctor->givePermissionTo(['opd.consult', 'opd.view-clinical-history']);
+
+        Livewire::actingAs($restrictedDoctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee('Huna ruhusa ya kuona matokeo ya maabara.')
+            ->assertDontSee('PERMISSION-SECRET');
+    }
+
+    public function test_result_ready_order_without_saved_result_is_shown_as_processing(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $service = $this->service('No Saved Result', 'NO-RESULT', 'laboratory_test', $admin);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter->refresh(), ['service_ids' => [$service->id]], $doctor);
+        $order->update(['status' => 'result_ready']);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee('In Processing')
+            ->assertDontSee('Result Ready');
     }
 
     public function test_orders_tab_uses_medicine_catalogue_and_contains_referral_orders(): void
@@ -1212,6 +1336,69 @@ class Step6ClinicalWorkflowTest extends TestCase
         }
 
         return $service;
+    }
+
+    /** @return array{Visit, LaboratoryResult} */
+    private function laboratoryResultFixture(User $admin, User $doctor, string $status, array $values, string $testName): array
+    {
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $service = $this->service($testName, 'LAB-'.fake()->unique()->numerify('######'), 'laboratory_test', $admin);
+        $category = LaboratoryTestCategory::factory()->create(['facility_id' => currentFacility()->id, 'created_by' => $admin->id]);
+        $specimen = SpecimenType::factory()->create(['facility_id' => currentFacility()->id, 'created_by' => $admin->id]);
+        $test = LaboratoryTest::factory()->create([
+            'facility_id' => currentFacility()->id,
+            'service_id' => $service->id,
+            'laboratory_test_category_id' => $category->id,
+            'specimen_type_id' => $specimen->id,
+            'name' => $testName,
+            'code' => 'TST'.fake()->unique()->numerify('######'),
+            'created_by' => $admin->id,
+        ]);
+        $order = app(ClinicalEncounterService::class)->addLabOrder(
+            $encounter->refresh(),
+            ['service_ids' => [$service->id]],
+            $doctor,
+        );
+        $order->update(['status' => 'result_ready']);
+        $item = $order->items()->firstOrFail();
+        $item->update(['status' => 'sample_accepted', 'result_status' => $status, 'result_entered_at' => now()->subMinutes(10)]);
+        $result = LaboratoryResult::query()->create([
+            'facility_id' => currentFacility()->id,
+            'laboratory_order_id' => $order->id,
+            'laboratory_order_item_id' => $item->id,
+            'laboratory_test_id' => $test->id,
+            'result_version' => 1,
+            'result_status' => $status,
+            'comments' => 'Reviewed by laboratory',
+            'entered_by' => $admin->id,
+            'entered_at' => now()->subMinutes(10),
+            'verified_by' => in_array($status, ['verified', 'released'], true) ? $admin->id : null,
+            'verified_at' => in_array($status, ['verified', 'released'], true) ? now()->subMinutes(5) : null,
+            'released_by' => $status === 'released' ? $admin->id : null,
+            'released_at' => $status === 'released' ? now() : null,
+            'created_by' => $admin->id,
+        ]);
+
+        foreach ($values as $index => $value) {
+            LaboratoryResultValue::query()->create([
+                'laboratory_result_id' => $result->id,
+                'parameter_name_snapshot' => $value['parameter'],
+                'parameter_code_snapshot' => 'P'.($index + 1),
+                'result_type' => $value['type'],
+                'numeric_value' => $value['numeric_value'] ?? null,
+                'text_value' => $value['text_value'] ?? null,
+                'selected_value' => $value['selected_value'] ?? null,
+                'unit_snapshot' => $value['unit'] ?? null,
+                'reference_range_snapshot' => $value['range'] ?? null,
+                'abnormal_flag' => $value['flag'],
+                'is_critical' => $value['critical'] ?? false,
+                'sort_order' => $index,
+                'created_by' => $admin->id,
+            ]);
+        }
+
+        return [$visit->refresh(), $result->refresh()];
     }
 
     private function medicine(User $admin): Medicine

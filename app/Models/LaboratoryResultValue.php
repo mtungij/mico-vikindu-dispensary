@@ -14,14 +14,25 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class LaboratoryResultValue extends Model
 {
     use HasFactory, SoftDeletes;
-    protected function casts(): array { return ['result_type' => LaboratoryResultType::class, 'abnormal_flag' => LaboratoryAbnormalFlag::class, 'numeric_value' => 'decimal:6', 'lower_limit_snapshot' => 'decimal:4', 'upper_limit_snapshot' => 'decimal:4', 'boolean_value' => 'boolean', 'is_critical' => 'boolean']; }
-    public function result(): BelongsTo { return $this->belongsTo(LaboratoryResult::class, 'laboratory_result_id'); }
+
+    protected function casts(): array
+    {
+        return ['result_type' => LaboratoryResultType::class, 'abnormal_flag' => LaboratoryAbnormalFlag::class, 'numeric_value' => 'decimal:6', 'lower_limit_snapshot' => 'decimal:4', 'upper_limit_snapshot' => 'decimal:4', 'boolean_value' => 'boolean', 'is_critical' => 'boolean'];
+    }
+
+    public function result(): BelongsTo
+    {
+        return $this->belongsTo(LaboratoryResult::class, 'laboratory_result_id');
+    }
 
     public function displayValue(): string
     {
         return match ($this->result_type) {
             LaboratoryResultType::Numeric => rtrim(rtrim((string) $this->numeric_value, '0'), '.'),
-            LaboratoryResultType::Choice, LaboratoryResultType::PositiveNegative, LaboratoryResultType::ReactiveNonReactive, LaboratoryResultType::DetectedNotDetected => (string) $this->selected_value,
+            LaboratoryResultType::PositiveNegative => $this->selected_value === 'positive' ? 'Positive' : 'Negative',
+            LaboratoryResultType::ReactiveNonReactive => $this->selected_value === 'reactive' ? 'Reactive' : 'Non-Reactive',
+            LaboratoryResultType::DetectedNotDetected => $this->selected_value === 'detected' ? 'Detected' : 'Not Detected',
+            LaboratoryResultType::Choice => (string) $this->selected_value,
             LaboratoryResultType::Boolean => $this->boolean_value ? 'Yes' : 'No',
             default => (string) $this->text_value,
         };

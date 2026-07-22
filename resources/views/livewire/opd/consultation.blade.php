@@ -22,6 +22,11 @@
         $statusValue = fn ($status) => $status instanceof \BackedEnum ? $status->value : (string) ($status ?? '');
         $statusLabel = fn ($status) => str($statusValue($status))->replace('_', ' ')->title();
         $badge = fn ($status) => $statusTone[$statusValue($status)] ?? 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200';
+        $laboratoryStatusLabel = fn ($status) => match ($statusValue($status)) {
+            'pending_verification' => 'Awaiting Verification',
+            'sample_pending', 'sample_collected', 'sample_accepted', 'processing', 'draft', 'entered', 'result_ready' => 'In Processing',
+            default => $statusLabel($status),
+        };
         $labServiceIdsWithTests = $labTests->pluck('service_id')->filter()->all();
         $catalogueOnlyServices = $labServices->whereNotIn('id', $labServiceIdsWithTests);
     @endphp
@@ -204,7 +209,7 @@
                         <div class="space-y-2">
                             @forelse($encounter->laboratoryOrders as $order)
                                 @foreach($order->items as $item)
-                                    <div class="flex items-center justify-between gap-3 rounded-md border border-slate-200 p-3 text-sm dark:border-slate-700"><div><p class="font-medium">{{ $item->test_name_snapshot }}</p><p class="text-xs text-slate-500">{{ $order->order_number }} · {{ $order->ordered_at?->format('d/m/Y H:i') }}</p></div><span class="rounded-full px-2 py-1 text-xs font-semibold {{ $badge($order->status) }}">{{ $statusLabel($order->status) }}</span></div>
+                                    @include('livewire.opd.partials.laboratory-result-card', ['order' => $order, 'item' => $item, 'canViewLaboratoryResults' => $canViewLaboratoryResults])
                                 @endforeach
                             @empty
                                 <p class="text-sm text-slate-500">No laboratory tests ordered yet.</p>
@@ -242,12 +247,7 @@
                         <div class="space-y-2">
                             @forelse($encounter->laboratoryOrders as $order)
                                 @foreach($order->items as $item)
-                                    @php $result = $item->results->sortByDesc('created_at')->first(); @endphp
-                                    <div class="rounded-md border border-slate-200 p-3 text-sm dark:border-slate-700">
-                                        <div class="flex items-center justify-between gap-3"><p class="font-medium">{{ $item->test_name_snapshot }}</p><span class="rounded-full px-2 py-1 text-xs font-semibold {{ $badge($result?->result_status ?? $item->result_status ?? $order->status) }}">{{ $statusLabel($result?->result_status ?? $item->result_status ?? $order->status) }}</span></div>
-                                        <p class="mt-1 text-xs text-slate-500">Requested {{ $order->ordered_at?->format('d/m/Y H:i') }} · {{ $item->result_entered_at ? 'Completed '.$item->result_entered_at->format('d/m/Y H:i') : 'Result pending' }}</p>
-                                        @if($result)<p class="mt-2">{{ $result->overall_result ?? $result->interpretation ?? 'Result available' }}</p>@endif
-                                    </div>
+                                    @include('livewire.opd.partials.laboratory-result-card', ['order' => $order, 'item' => $item, 'canViewLaboratoryResults' => $canViewLaboratoryResults])
                                 @endforeach
                             @empty
                                 <p class="text-sm text-slate-500">No laboratory results for this consultation.</p>
@@ -274,7 +274,7 @@
             <x-card>
                 <h3 class="mb-3 font-semibold">Active Orders</h3>
                 <div class="space-y-3 text-sm">
-                    <div><p class="font-medium">Laboratory</p>@forelse($encounter->laboratoryOrders as $order)<p class="text-xs text-slate-500">{{ $order->order_number }} · {{ $statusLabel($order->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
+                    <div><p class="font-medium">Laboratory</p>@forelse($encounter->laboratoryOrders as $order)@php($activeLaboratoryStatus = $order->items->pluck('result_status')->filter()->first() ?: $order->status)<p class="text-xs text-slate-500">{{ $order->order_number }} · {{ $laboratoryStatusLabel($activeLaboratoryStatus) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
                     <div><p class="font-medium">Procedures</p>@forelse($encounter->procedureOrders as $procedure)<p class="text-xs text-slate-500">{{ $procedure->procedure_name_snapshot }} · {{ $statusLabel($procedure->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
                     <div><p class="font-medium">Medicines</p>@forelse($encounter->prescriptions as $prescription)<p class="text-xs text-slate-500">{{ $prescription->prescription_number }} · {{ $statusLabel($prescription->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
                     <div><p class="font-medium">Referrals</p>@forelse($encounter->referrals as $referral)<p class="text-xs text-slate-500">{{ $referral->destination_facility_name }} · {{ $statusLabel($referral->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>

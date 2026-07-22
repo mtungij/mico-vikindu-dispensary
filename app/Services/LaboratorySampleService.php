@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\ClinicalOrderStatus;
 use App\Enums\LaboratorySampleStatus;
 use App\Models\ActivityLog;
 use App\Models\LaboratoryOrder;
@@ -20,12 +21,30 @@ class LaboratorySampleService
     public function collectSample(LaboratoryOrder $order, array $data, $actor, bool $accept = false): LaboratorySample
     {
         return DB::transaction(function () use ($order, $data, $actor, $accept) {
-            abort_unless($actor->can('laboratory.collect-sample'), 403);
+            abort_unless($actor->can('laboratory.collect-sample'), 403, 'Huna ruhusa ya kukusanya sampuli.');
             if ($accept) {
-                abort_unless($actor->can('laboratory.accept-sample'), 403);
+                abort_unless($actor->can('laboratory.accept-sample'), 403, 'Huna ruhusa ya kukubali sampuli.');
+            }
+
+            $order = LaboratoryOrder::query()->lockForUpdate()->findOrFail($order->id);
+            abort_unless(
+                $order->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(),
+                403,
+                'Order hii ni ya facility nyingine.',
+            );
+            if ($order->items()->whereNotNull('sample_id')->lockForUpdate()->exists()) {
+                throw ValidationException::withMessages(['order_item_ids' => 'Sampuli ya kipimo hiki tayari imekusanywa.']);
             }
             $this->paymentGuard->ensureProcessable($order, $actor, 'collect_sample');
-
+            $eligibleStatuses = [ClinicalOrderStatus::Ordered];
+            if ($actor->can('laboratory.override-payment')) {
+                $eligibleStatuses[] = ClinicalOrderStatus::AwaitingPayment;
+            }
+            if (! in_array($order->status, $eligibleStatuses, true)) {
+                throw ValidationException::withMessages([
+                    'order' => "Order hii haipo tayari kwa ukusanyaji wa sampuli (status: {$order->status->value}).",
+                ]);
+            }
             $itemIds = collect($data['order_item_ids'] ?? $order->items()->pluck('id')->all())
                 ->map(fn ($id): int => (int) $id)
                 ->unique()
@@ -33,9 +52,15 @@ class LaboratorySampleService
             if ($itemIds->isEmpty()) {
                 throw ValidationException::withMessages(['order_item_ids' => 'Order haina vipimo vya sample.']);
             }
-            $items = $order->items()->whereIn('id', $itemIds)->with('laboratoryTest.specimenType')->get();
+            $items = $order->items()->whereIn('id', $itemIds)->with('laboratoryTest.specimenType')->lockForUpdate()->get();
             if ($items->count() !== $itemIds->count()) {
-                throw ValidationException::withMessages(['order_item_ids' => 'Every selected item must belong to this laboratory order.']);
+                throw ValidationException::withMessages(['order_item_ids' => 'Kila kipimo kilichochaguliwa lazima kiwe kwenye order hii.']);
+            }
+            if ($items->contains(fn ($item): bool => $item->status === 'cancelled')) {
+                throw ValidationException::withMessages(['order_item_ids' => 'Kipimo hiki kimefutwa.']);
+            }
+            if ($items->contains(fn ($item): bool => $item->sample_id !== null)) {
+                throw ValidationException::withMessages(['order_item_ids' => 'Sampuli ya kipimo hiki tayari imekusanywa.']);
             }
             $firstItem = $items->firstOrFail();
             if (! $firstItem->laboratory_test_id) {
@@ -43,7 +68,14 @@ class LaboratorySampleService
             }
             $specimenTypeId = $data['specimen_type_id'] ?? $firstItem->specimen_type_id ?? $firstItem->laboratoryTest?->specimen_type_id;
             if (! $specimenTypeId) {
-                throw ValidationException::withMessages(['specimen_type_id' => 'Specimen type inahitajika.']);
+                throw ValidationException::withMessages(['specimen_type_id' => 'Specimen inayohitajika haijawekwa.']);
+            }
+            if ($items->contains(function ($item) use ($specimenTypeId): bool {
+                $required = $item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id;
+
+                return ! $required || (int) $required !== (int) $specimenTypeId;
+            })) {
+                throw ValidationException::withMessages(['specimen_type_id' => 'Vipimo vilivyochaguliwa vinahitaji specimen tofauti; kusanya kila specimen kivyake.']);
             }
             $sample = LaboratorySample::query()->create([
                 'facility_id' => $order->facility_id,
@@ -56,6 +88,8 @@ class LaboratorySampleService
                 'container_type' => $data['container_type'] ?? $firstItem->laboratoryTest?->specimenType?->container_type,
                 'collected_by' => $actor->id,
                 'collected_at' => $data['collected_at'] ?? now(),
+                'accepted_by' => $accept ? $actor->id : null,
+                'accepted_at' => $accept ? now() : null,
                 'collection_location' => $data['collection_location'] ?? null,
                 'volume_collected' => $data['volume_collected'] ?? null,
                 'volume_unit' => $data['volume_unit'] ?? null,
@@ -67,7 +101,7 @@ class LaboratorySampleService
             $sample->update(['barcode_value' => $sample->sample_number]);
             $this->attachOrderItems($sample, $itemIds->all());
             $order->items()->whereIn('id', $itemIds)->update(['sample_id' => $sample->id, 'status' => $accept ? 'sample_accepted' : 'sample_collected']);
-            $order->update(['status' => $accept ? 'processing' : 'sample_pending']);
+            $order->update(['status' => $accept ? ClinicalOrderStatus::Processing : ClinicalOrderStatus::SamplePending, 'updated_by' => $actor->id]);
             $this->audit($actor, $accept ? 'sample_accepted' : 'sample_collected', $sample);
             if ($accept) {
                 $this->auditOrder($actor, 'laboratory_processing_started', $order);
@@ -91,7 +125,7 @@ class LaboratorySampleService
     {
         abort_unless($actor->can('laboratory.accept-sample'), 403);
         $this->paymentGuard->ensureProcessable($sample->order, $actor, 'accept_sample');
-        $sample->update(['sample_status' => LaboratorySampleStatus::Accepted, 'quality_status' => 'acceptable', 'updated_by' => $actor->id]);
+        $sample->update(['sample_status' => LaboratorySampleStatus::Accepted, 'quality_status' => 'acceptable', 'accepted_by' => $actor->id, 'accepted_at' => now(), 'updated_by' => $actor->id]);
         $this->audit($actor, 'sample_accepted', $sample);
         $this->auditOrder($actor, 'laboratory_processing_started', $sample->order);
 

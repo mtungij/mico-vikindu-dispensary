@@ -28,7 +28,7 @@ class LaboratoryPaymentGuard
 
         if (! $actor->can('laboratory.override-payment')) {
             throw ValidationException::withMessages([
-                'payment' => 'Full payment or approved coverage is required before laboratory processing.',
+                'payment' => 'Malipo ya vipimo bado hayajakamilika.',
             ]);
         }
 

@@ -6,10 +6,15 @@ use App\Livewire\Forms\LaboratorySampleCollectionForm;
 use App\Models\LaboratoryOrder;
 use App\Services\LaboratorySampleService;
 use App\Support\Notifier;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Validation\ValidationException;
 use Livewire\Component;
 use Livewire\WithPagination;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
+use Throwable;
 
 class Queue extends Component
 {
@@ -34,6 +39,7 @@ class Queue extends Component
     {
         Gate::authorize('laboratory.collect-sample');
         abort_unless($order->facility_id === currentFacility()?->id, 404);
+        $this->resetErrorBag();
         $this->selectedOrder = $order;
         $this->sampleForm->resetForm();
         $this->showCollectModal = true;
@@ -41,11 +47,35 @@ class Queue extends Component
 
     public function collectAndAccept(LaboratorySampleService $service): void
     {
-        Gate::authorize('laboratory.collect-sample');
-        $this->sampleForm->validate();
-        $service->collectSample($this->selectedOrder, $this->sampleForm->normalize(), auth()->user(), true);
-        $this->showCollectModal = false;
-        Notifier::success('samples.collected');
+        try {
+            Gate::authorize('laboratory.collect-sample');
+            Gate::authorize('laboratory.accept-sample');
+            if (! $this->selectedOrder) {
+                throw ValidationException::withMessages(['order' => 'Mgonjwa hana order inayoweza kushughulikiwa.']);
+            }
+            $this->sampleForm->validate();
+            $service->collectSample($this->selectedOrder, $this->sampleForm->normalize(), auth()->user(), true);
+            $this->showCollectModal = false;
+            $this->selectedOrder = null;
+            $this->resetPage();
+            Notifier::success('Sampuli imekusanywa na kukubaliwa kikamilifu.');
+        } catch (ValidationException $exception) {
+            $this->dispatch('laboratory-validation-failed', field: array_key_first($exception->errors()));
+            throw $exception;
+        } catch (Throwable $exception) {
+            Log::error('Laboratory sample collection failed.', [
+                'order_id' => $this->selectedOrder?->id,
+                'user_id' => auth()->id(),
+                'exception' => $exception,
+            ]);
+            $authorizationFailure = $exception instanceof AuthorizationException
+                || ($exception instanceof HttpExceptionInterface && $exception->getStatusCode() === 403);
+            $message = $authorizationFailure
+                ? ($exception->getMessage() ?: 'Huna ruhusa ya kukusanya sampuli.')
+                : 'Sampuli haikuweza kukusanywa. Tafadhali jaribu tena au wasiliana na msimamizi.';
+            $this->addError('action', $message);
+            Notifier::error($message);
+        }
     }
 
     public function render(): View

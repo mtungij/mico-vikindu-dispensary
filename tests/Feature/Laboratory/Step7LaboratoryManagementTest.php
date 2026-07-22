@@ -5,7 +5,9 @@ namespace Tests\Feature\Laboratory;
 use App\Enums\FacilityType;
 use App\Enums\LaboratoryResultType;
 use App\Enums\OwnershipType;
+use App\Livewire\Laboratory\Dashboard;
 use App\Livewire\Laboratory\Queue as LaboratoryQueue;
+use App\Livewire\Laboratory\ResultEntry;
 use App\Models\ClinicalEncounter;
 use App\Models\Department;
 use App\Models\Facility;
@@ -22,12 +24,12 @@ use App\Models\StaffProfile;
 use App\Models\StaffSignature;
 use App\Models\User;
 use App\Models\Visit;
+use App\Services\LaboratoryOrderService;
 use App\Services\LaboratoryResultReleaseService;
 use App\Services\LaboratoryResultService;
 use App\Services\LaboratoryResultVerificationService;
 use App\Services\LaboratorySampleService;
 use App\Services\LaboratoryTestService;
-use App\Services\LaboratoryOrderService;
 use Database\Seeders\DepartmentSeeder;
 use Database\Seeders\LaboratorySampleRejectionReasonSeeder;
 use Database\Seeders\LaboratoryTestCategorySeeder;
@@ -148,6 +150,74 @@ class Step7LaboratoryManagementTest extends TestCase
 
         $this->expectException(ValidationException::class);
         app(LaboratoryResultService::class)->createDraft($order->items()->first()->refresh(), $admin);
+    }
+
+    public function test_collect_and_accept_is_atomic_and_cannot_be_repeated(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $test = $this->configuredTest($admin);
+        $order = app(LaboratoryOrderService::class)->createOrder(
+            $this->encounter($admin),
+            ['service_ids' => [$test->service_id]],
+            $admin,
+        );
+
+        $sample = app(LaboratorySampleService::class)->collectSample($order, [], $admin, true);
+
+        $this->assertSame('accepted', $sample->sample_status->value);
+        $this->assertSame($admin->id, $sample->accepted_by);
+        $this->assertNotNull($sample->accepted_at);
+        $this->assertSame('sample_accepted', $order->items()->firstOrFail()->status);
+        $this->assertSame('processing', $order->refresh()->status->value);
+
+        try {
+            app(LaboratorySampleService::class)->collectSample($order->refresh(), [], $admin, true);
+            $this->fail('Duplicate collection was accepted.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('order_item_ids', $exception->errors());
+        }
+
+        $this->assertDatabaseCount('laboratory_samples', 1);
+    }
+
+    public function test_result_submission_shows_field_error_preserves_value_and_enters_verification_queue(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $test = $this->configuredTest($admin);
+        $order = app(LaboratoryOrderService::class)->createOrder(
+            $this->encounter($admin),
+            ['service_ids' => [$test->service_id]],
+            $admin,
+        );
+        app(LaboratorySampleService::class)->collectSample($order, [], $admin, true);
+        $parameter = $test->parameters()->firstOrFail();
+        $field = "values.{$parameter->id}.value";
+
+        $component = Livewire::actingAs($admin)
+            ->test(ResultEntry::class, ['laboratoryOrder' => $order->refresh()])
+            ->set($field, 'not-a-number')
+            ->call('submitForVerification')
+            ->assertHasErrors([$field])
+            ->assertSet($field, 'not-a-number')
+            ->assertDispatched('laboratory-validation-failed');
+
+        $this->assertDatabaseCount('laboratory_results', 0);
+
+        $component->set($field, '13.2')
+            ->call('submitForVerification')
+            ->assertHasNoErrors();
+
+        $result = $order->results()->firstOrFail();
+        $this->assertSame('pending_verification', $result->result_status->value);
+        $this->assertNull($result->verified_at);
+        $this->assertSame('sample_accepted', $order->items()->firstOrFail()->status);
+        $this->assertSame('pending_verification', $order->items()->firstOrFail()->result_status);
+        $this->assertSame('result_ready', $order->refresh()->status->value);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'result_submitted', 'subject_id' => $result->id]);
+
+        Livewire::actingAs($admin)
+            ->test(Dashboard::class)
+            ->assertSee($test->name);
     }
 
     public function test_laboratory_reports_and_clinician_review_routes_render(): void

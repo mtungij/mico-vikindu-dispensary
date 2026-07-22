@@ -2,82 +2,51 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Icd10Code;
+use App\Services\Icd10ImportService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 
 class ImportIcd10Codes extends Command
 {
-    protected $signature = 'icd10:import {file}';
-    protected $description = 'Import ICD-10 foundation CSV columns: code,title,description,chapter,category.';
+    protected $signature = 'icd10:import
+        {file : Absolute path or project-relative path to the CSV file}
+        {--dry-run : Validate and report changes without writing ICD-10 records}
+        {--source= : Approved catalogue source name}
+        {--source-version= : Catalogue source version}';
 
-    public function handle(): int
+    protected $description = 'Safely import an approved ICD-10 CSV catalogue.';
+
+    public function handle(Icd10ImportService $importer): int
     {
-        $file = $this->argument('file');
-        if (! is_readable($file)) {
-            $this->error('File haijasomeka.');
+        try {
+            $result = $importer->import(
+                path: $this->argument('file'),
+                source: $this->option('source'),
+                version: $this->option('source-version'),
+                dryRun: (bool) $this->option('dry-run'),
+            );
+        } catch (InvalidArgumentException $exception) {
+            $this->error($exception->getMessage());
+
             return self::FAILURE;
         }
 
-        $handle = fopen($file, 'r');
-        $header = fgetcsv($handle);
-        if (! $header) {
-            $this->error('CSV haina header.');
-            return self::FAILURE;
-        }
-        $header = array_map(fn ($value) => str($value)->lower()->trim()->toString(), $header);
-        foreach (['code', 'title'] as $required) {
-            if (! in_array($required, $header, true)) {
-                $this->error("Column {$required} inahitajika.");
-                return self::FAILURE;
-            }
-        }
+        $this->components->info($result['dry_run'] ? 'ICD-10 dry run completed.' : 'ICD-10 import completed.');
+        $this->line('Source file: '.$result['source_file']);
+        $this->line('Detected headers: '.implode(', ', $result['detected_headers']));
+        $this->table(['Metric', 'Count'], [
+            ['Total rows processed', $result['total']],
+            ['Inserted', $result['inserted']],
+            ['Updated', $result['updated']],
+            ['Unchanged', $result['unchanged']],
+            ['Skipped', $result['skipped']],
+            ['Failed', $result['failed']],
+        ]);
 
-        $rows = [];
-        $imported = 0;
-        $errors = 0;
-        while (($row = fgetcsv($handle)) !== false) {
-            $data = array_combine($header, $row);
-            if (blank($data['code'] ?? null) || blank($data['title'] ?? null)) {
-                $errors++;
-                continue;
-            }
-            $rows[] = $data;
-            if (count($rows) === 500) {
-                $imported += $this->importChunk($rows);
-                $rows = [];
-                $this->output->write('.');
-            }
-        }
-        fclose($handle);
-        if ($rows) {
-            $imported += $this->importChunk($rows);
+        foreach ($result['failures'] as $failure) {
+            $this->warn("Row {$failure['row']}: {$failure['reason']}");
         }
 
-        $this->newLine();
-        $this->info("Imported/updated {$imported} ICD-10 rows. Skipped errors: {$errors}.");
-
-        return self::SUCCESS;
-    }
-
-    private function importChunk(array $rows): int
-    {
-        return DB::transaction(function () use ($rows): int {
-            foreach ($rows as $row) {
-                Icd10Code::query()->updateOrCreate(
-                    ['code' => trim($row['code'])],
-                    [
-                        'title' => trim($row['title']),
-                        'description' => $row['description'] ?? null,
-                        'chapter' => $row['chapter'] ?? null,
-                        'category' => $row['category'] ?? null,
-                        'is_active' => true,
-                        'is_billable' => true,
-                    ],
-                );
-            }
-
-            return count($rows);
-        });
+        return $result['failed'] > 0 ? self::FAILURE : self::SUCCESS;
     }
 }

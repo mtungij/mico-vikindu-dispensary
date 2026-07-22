@@ -105,6 +105,32 @@ class Step3RbacTest extends TestCase
         $this->assertTrue($role->hasPermissionTo('departments.create'));
     }
 
+    public function test_lab_order_create_permission_is_preselected_only_for_default_clinician_roles(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->seed(RolePermissionSeeder::class);
+
+        foreach (['doctor', 'clinical-officer'] as $roleName) {
+            $role = Role::query()->where('name', $roleName)->firstOrFail();
+
+            $this->assertTrue($role->hasPermissionTo('laboratory-orders.create'));
+            $this->assertSame(1, $role->permissions()->where('permissions.name', 'laboratory-orders.create')->count());
+
+            Livewire::actingAs($admin)
+                ->test(ManagePermissions::class, ['role' => $role])
+                ->assertSet(
+                    'selectedPermissions',
+                    fn (array $permissions): bool => in_array('laboratory-orders.create', $permissions, true),
+                );
+        }
+
+        foreach (['receptionist', 'cashier', 'laboratory-technician', 'pharmacist'] as $roleName) {
+            $role = Role::query()->where('name', $roleName)->firstOrFail();
+
+            $this->assertFalse($role->hasPermissionTo('laboratory-orders.create'));
+        }
+    }
+
     public function test_user_without_department_permission_cannot_access_department_settings(): void
     {
         $this->bootstrappedFacility();

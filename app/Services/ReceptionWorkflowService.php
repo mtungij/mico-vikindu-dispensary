@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Enums\PayerType;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\Department;
@@ -106,7 +105,14 @@ class ReceptionWorkflowService
         $status = $paymentFirst && $patientAmount > 0
             ? VisitStatus::AwaitingPayment
             : ($destination->requires_triage ? VisitStatus::AwaitingTriage : VisitStatus::AwaitingDepartment);
-        $toDepartment = $status === VisitStatus::AwaitingPayment ? ($billing ?? $destination) : $destination;
+        $triage = $status === VisitStatus::AwaitingTriage
+            ? Department::query()->where('facility_id', $visit->facility_id)->where('code', 'TRI')->first()
+            : null;
+        $toDepartment = match ($status) {
+            VisitStatus::AwaitingPayment => $billing ?? $destination,
+            VisitStatus::AwaitingTriage => $triage ?? $destination,
+            default => $destination,
+        };
 
         if ($visit->current_department_id !== $toDepartment->id || $visit->visit_status !== $status) {
             VisitMovement::query()->create([

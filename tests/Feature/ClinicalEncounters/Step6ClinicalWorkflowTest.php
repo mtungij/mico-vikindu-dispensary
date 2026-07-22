@@ -6,16 +6,18 @@ use App\Enums\FacilityType;
 use App\Enums\OwnershipType;
 use App\Enums\QueueStatus;
 use App\Enums\VisitStatus;
+use App\Livewire\Clinical\Icd10Search;
 use App\Livewire\Opd\Consultation as OpdConsultation;
 use App\Livewire\Opd\Queue as OpdQueue;
+use App\Livewire\Triage\Assessment as TriageAssessmentComponent;
 use App\Livewire\Triage\Queue as TriageQueue;
-use App\Models\ClinicalAlert;
 use App\Models\ClinicalEncounter;
 use App\Models\Department;
 use App\Models\Facility;
 use App\Models\Icd10Code;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
+use App\Models\LaboratoryOrder;
 use App\Models\Medicine;
 use App\Models\MedicineUnit;
 use App\Models\Patient;
@@ -27,20 +29,25 @@ use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
 use App\Models\StaffProfile;
+use App\Models\TriageAssessment;
 use App\Models\User;
 use App\Models\Visit;
-use App\Services\PaymentConfirmationService;
 use App\Services\ClinicalEncounterService;
-use App\Services\PrescriptionService;
+use App\Services\DiagnosisService;
+use App\Services\PaymentConfirmationService;
 use App\Services\TriageService;
+use App\Services\VitalSignAssessmentService;
+use App\Services\WorkflowService;
 use Database\Seeders\DepartmentSeeder;
 use Database\Seeders\MinimalIcd10Seeder;
 use Database\Seeders\PermissionSeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\RoleSeeder;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -232,10 +239,206 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->assertDontSee('Referral Orders');
     }
 
+    public function test_doctor_and_clinical_officer_can_submit_selected_laboratory_tests(): void
+    {
+        $admin = $this->bootstrappedFacility();
+
+        foreach (['doctor', 'clinical-officer'] as $index => $role) {
+            $clinician = $this->staffUser($role);
+            $visit = $this->opdVisit($admin);
+            $labService = $this->service("Laboratory Test {$index}", "LAB-AUTH-{$index}", 'laboratory_test', $admin);
+
+            Livewire::actingAs($clinician)
+                ->test(OpdConsultation::class, ['visit' => $visit])
+                ->set('labForm.service_ids', [$labService->id])
+                ->set('labForm.clinical_notes', 'Clinical indication')
+                ->call('addLabOrder')
+                ->assertHasNoErrors();
+
+            $this->assertDatabaseHas('laboratory_orders', [
+                'visit_id' => $visit->id,
+                'ordered_by' => $clinician->id,
+            ]);
+            $this->assertDatabaseHas('laboratory_order_items', [
+                'service_id' => $labService->id,
+            ]);
+            $this->assertDatabaseHas('invoice_items', [
+                'visit_id' => $visit->id,
+                'service_id' => $labService->id,
+            ]);
+        }
+    }
+
+    public function test_lab_order_role_permissions_follow_clinical_separation_of_duties(): void
+    {
+        $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $clinicalOfficer = $this->staffUser('clinical-officer');
+        $receptionist = $this->staffUser('receptionist');
+        $cashier = $this->staffUser('cashier');
+        $laboratoryTechnician = $this->staffUser('laboratory-technician');
+
+        foreach ([$doctor, $clinicalOfficer] as $clinician) {
+            $this->assertTrue($clinician->can('opd.consult'));
+            $this->assertTrue($clinician->can('diagnoses.create'));
+            $this->assertTrue($clinician->can('laboratory-orders.create'));
+            $this->assertTrue($clinician->can('laboratory-orders.view'));
+            $this->assertFalse($clinician->can('services.view'));
+            $this->assertTrue($clinician->can('laboratory-results.release'));
+        }
+
+        $this->assertFalse($receptionist->can('laboratory-orders.create'));
+        $this->assertFalse($cashier->can('laboratory-orders.create'));
+        $this->assertFalse($laboratoryTechnician->can('laboratory-orders.create'));
+        $this->assertTrue($laboratoryTechnician->can('laboratory-orders.view'));
+        $this->assertTrue($laboratoryTechnician->can('laboratory.receive-sample'));
+        $this->assertTrue($laboratoryTechnician->can('laboratory-results.enter'));
+        $this->assertTrue($laboratoryTechnician->can('laboratory-results.verify'));
+        $this->assertTrue($laboratoryTechnician->can('laboratory-results.release'));
+    }
+
+    public function test_opd_user_without_lab_order_permission_gets_an_inline_error_and_no_partial_order(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['facility_id' => currentFacility()->id, 'user_id' => $user->id]);
+        $user->givePermissionTo(['opd.consult', 'opd.view-clinical-history']);
+        $visit = $this->opdVisit($admin);
+        $labService = $this->service('Unauthorized Test', 'LAB-NO-AUTH', 'laboratory_test', $admin);
+
+        Livewire::actingAs($user)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('labForm.service_ids', [$labService->id])
+            ->call('addLabOrder')
+            ->assertHasErrors(['labForm.service_ids']);
+
+        $this->assertDatabaseMissing('laboratory_orders', ['visit_id' => $visit->id]);
+        $this->assertDatabaseMissing('invoice_items', ['visit_id' => $visit->id, 'service_id' => $labService->id]);
+    }
+
+    public function test_cross_facility_doctor_cannot_create_an_opd_laboratory_order(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $otherFacility = Facility::query()->create([
+            'name' => 'Other Laboratory Facility',
+            'code' => 'OLF',
+            'facility_type' => FacilityType::Dispensary,
+            'ownership_type' => OwnershipType::Private,
+            'phone_primary' => '+255700000002',
+            'region' => 'Dar es Salaam',
+            'district' => 'Ilala',
+            'ward' => 'Upanga',
+            'physical_address' => 'Upanga',
+            'setup_completed_at' => now(),
+            'created_by' => $admin->id,
+            'updated_by' => $admin->id,
+        ]);
+        $otherDoctor = $this->staffUser('doctor', $otherFacility);
+        $labService = $this->service('Facility Scoped Test', 'LAB-SCOPE', 'laboratory_test', $admin);
+
+        try {
+            app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$labService->id]], $otherDoctor);
+            $this->fail('A cross-facility clinician was allowed to create a laboratory order.');
+        } catch (AuthorizationException) {
+            $this->assertDatabaseMissing('laboratory_orders', ['visit_id' => $visit->id]);
+        }
+    }
+
+    public function test_doctor_cannot_order_laboratory_tests_for_a_completed_encounter(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $encounter->update(['status' => 'completed', 'completed_at' => now()]);
+        $labService = $this->service('Completed Visit Test', 'LAB-COMPLETE', 'laboratory_test', $admin);
+
+        try {
+            app(ClinicalEncounterService::class)->addLabOrder($encounter->refresh(), ['service_ids' => [$labService->id]], $doctor);
+            $this->fail('A completed encounter was allowed to receive a laboratory order.');
+        } catch (ValidationException $exception) {
+            $this->assertSame(
+                'Laboratory orders cannot be added because this consultation is already completed.',
+                $exception->errors()['encounter'][0],
+            );
+            $this->assertDatabaseMissing('laboratory_orders', ['visit_id' => $visit->id]);
+        }
+    }
+
+    public function test_inactive_or_cross_facility_services_cannot_create_partial_lab_orders(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $validService = $this->service('Valid Laboratory Test', 'LAB-VALID', 'laboratory_test', $admin);
+        $inactiveService = $this->service('Inactive Laboratory Test', 'LAB-INACTIVE', 'laboratory_test', $admin);
+        $inactiveService->update(['is_active' => false]);
+
+        try {
+            app(ClinicalEncounterService::class)->addLabOrder($encounter, [
+                'service_ids' => [$validService->id, $inactiveService->id],
+            ], $doctor);
+            $this->fail('An inactive service was allowed into a laboratory order.');
+        } catch (ValidationException) {
+            $this->assertDatabaseMissing('laboratory_orders', ['visit_id' => $visit->id]);
+            $this->assertDatabaseMissing('invoice_items', ['visit_id' => $visit->id, 'service_id' => $validService->id]);
+        }
+
+        $otherFacility = Facility::query()->create([
+            'name' => 'External Service Facility',
+            'code' => 'ESF',
+            'facility_type' => FacilityType::Dispensary,
+            'ownership_type' => OwnershipType::Private,
+            'phone_primary' => '+255700000003',
+            'region' => 'Dar es Salaam',
+            'district' => 'Ilala',
+            'ward' => 'Upanga',
+            'physical_address' => 'Upanga',
+            'setup_completed_at' => now(),
+            'created_by' => $admin->id,
+            'updated_by' => $admin->id,
+        ]);
+        $foreignService = Service::query()->create([
+            'facility_id' => $otherFacility->id,
+            'service_category_id' => $validService->service_category_id,
+            'name' => 'Foreign Laboratory Test',
+            'code' => 'LAB-FOREIGN',
+            'service_type' => 'laboratory_test',
+            'requires_payment' => true,
+            'is_active' => true,
+            'created_by' => $admin->id,
+        ]);
+
+        try {
+            app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$foreignService->id]], $doctor);
+            $this->fail('A cross-facility service was allowed into a laboratory order.');
+        } catch (ValidationException) {
+            $this->assertDatabaseMissing('laboratory_orders', ['visit_id' => $visit->id]);
+            $this->assertDatabaseMissing('invoice_items', ['visit_id' => $visit->id, 'service_id' => $foreignService->id]);
+        }
+    }
+
+    public function test_laboratory_order_policy_requires_an_active_opd_encounter(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+
+        $this->assertTrue(Gate::forUser($doctor)->allows('create', [LaboratoryOrder::class, $encounter]));
+
+        $encounter->update(['encounter_type' => 'dental']);
+
+        $this->assertFalse(Gate::forUser($doctor)->allows('create', [LaboratoryOrder::class, $encounter->refresh()]));
+    }
+
     public function test_adding_lab_order_keeps_encounter_in_consultation_until_completion(): void
     {
         $admin = $this->bootstrappedFacility();
-        $visit = $this->visit($admin, VisitStatus::InQueue);
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
         $labService = $this->service('Malaria MRDT', 'MRDT', 'laboratory_test', $admin);
 
@@ -257,6 +460,150 @@ class Step6ClinicalWorkflowTest extends TestCase
         $visit = $this->opdVisit($admin);
 
         $this->actingAs($user)->get(route('opd.consultation', $visit))->assertForbidden();
+    }
+
+    public function test_icd10_search_matches_code_description_and_keywords_without_loading_on_empty_query(): void
+    {
+        Icd10Code::factory()->create([
+            'code' => 'J18.9',
+            'title' => 'Pneumonia, unspecified organism',
+            'description' => 'Acute infection of the lung',
+            'metadata' => ['keywords' => ['chest infection']],
+            'is_active' => true,
+        ]);
+        Icd10Code::factory()->create([
+            'code' => 'I10',
+            'title' => 'Essential hypertension',
+            'description' => 'High blood pressure',
+            'is_active' => true,
+        ]);
+
+        Livewire::test(Icd10Search::class)
+            ->assertDontSee('J18.9')
+            ->set('query', 'J18')
+            ->assertSee('J18.9')
+            ->set('query', 'blood pressure')
+            ->assertSee('Essential hypertension')
+            ->set('query', 'chest infection')
+            ->assertSee('Pneumonia, unspecified organism');
+    }
+
+    public function test_icd10_exact_code_and_prefix_results_are_ranked_first(): void
+    {
+        Icd10Code::factory()->create(['code' => 'AJ18', 'title' => 'Mentions J18', 'is_active' => true]);
+        Icd10Code::factory()->create(['code' => 'J18.9', 'title' => 'Pneumonia', 'is_active' => true]);
+        Icd10Code::factory()->create(['code' => 'J18', 'title' => 'Pneumonia exact category', 'is_active' => true]);
+
+        $codes = Icd10Code::query()->search('j18')->pluck('code')->all();
+
+        $this->assertSame(['J18', 'J18.9', 'AJ18'], $codes);
+    }
+
+    public function test_selecting_icd10_result_dispatches_values_and_fills_diagnosis_form(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $code = Icd10Code::query()->where('code', 'B54')->firstOrFail();
+
+        Livewire::test(Icd10Search::class)
+            ->set('query', 'malaria')
+            ->call('selectCode', $code->id)
+            ->assertSet('query', 'B54 — Unspecified malaria')
+            ->assertSet('showResults', false)
+            ->assertDispatched('icd10-selected', code: 'B54', title: 'Unspecified malaria');
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->dispatch('icd10-selected', code: 'B54', title: 'Unspecified malaria')
+            ->assertSet('diagnosisForm.icd10_code', 'B54')
+            ->assertSet('diagnosisForm.diagnosis_name', 'Unspecified malaria');
+    }
+
+    public function test_doctor_can_save_selected_icd10_diagnosis_and_primary_logic_is_preserved(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $component = Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit]);
+
+        $component
+            ->dispatch('icd10-selected', code: 'B54', title: 'Unspecified malaria')
+            ->set('diagnosisForm.diagnosis_type', 'provisional')
+            ->set('diagnosisForm.certainty', 'probable')
+            ->set('diagnosisForm.is_primary', true)
+            ->call('addDiagnosis')
+            ->assertHasNoErrors();
+
+        $component
+            ->dispatch('icd10-selected', code: 'I10', title: 'Essential hypertension')
+            ->set('diagnosisForm.diagnosis_type', 'confirmed')
+            ->set('diagnosisForm.certainty', 'confirmed')
+            ->set('diagnosisForm.is_primary', true)
+            ->call('addDiagnosis')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('diagnoses', [
+            'visit_id' => $visit->id,
+            'icd10_code' => 'I10',
+            'diagnosis_name' => 'Essential hypertension',
+            'diagnosis_type' => 'confirmed',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ]);
+        $this->assertDatabaseHas('diagnoses', [
+            'visit_id' => $visit->id,
+            'icd10_code' => 'B54',
+            'is_primary' => false,
+        ]);
+
+        $component
+            ->set('diagnosisForm.icd10_code', null)
+            ->set('diagnosisForm.diagnosis_name', 'Manual clinical diagnosis')
+            ->set('diagnosisForm.diagnosis_type', 'provisional')
+            ->set('diagnosisForm.certainty', 'suspected')
+            ->set('diagnosisForm.is_primary', false)
+            ->assertSet('icd10Selected', false)
+            ->call('addDiagnosis')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('diagnoses', [
+            'visit_id' => $visit->id,
+            'icd10_code' => null,
+            'diagnosis_name' => 'Manual clinical diagnosis',
+        ]);
+    }
+
+    public function test_user_without_diagnosis_create_permission_cannot_add_diagnosis(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['facility_id' => currentFacility()->id, 'user_id' => $user->id]);
+        $user->givePermissionTo('opd.consult');
+        $this->opdVisit($admin);
+        $this->actingAs($user);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(OpdConsultation::class)->addDiagnosis(app(ClinicalEncounterService::class));
+    }
+
+    public function test_diagnoses_tab_renders_search_dropdown_and_empty_catalogue_message(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'diagnoses')
+            ->assertSee('Search ICD-10 code or diagnosis...')
+            ->assertSeeLivewire(Icd10Search::class);
+
+        Icd10Code::query()->delete();
+
+        Livewire::test(Icd10Search::class)
+            ->assertSee('No ICD-10 codes are available. Ask the administrator to import the ICD-10 catalogue.');
     }
 
     public function test_triage_assessment_calculates_bmi_creates_alert_and_moves_visit_to_opd_queue(): void
@@ -285,11 +632,287 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->assertDatabaseHas('patient_queues', ['visit_id' => $visit->id, 'queue_status' => 'waiting']);
     }
 
+    public function test_triage_form_hydrates_enum_casts_as_select_values(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $assessment = app(TriageService::class)->startAssessment($visit, $admin);
+        $assessment->update([
+            'triage_level' => 'urgent',
+            'consciousness_level' => 'alert',
+            'pregnancy_status' => 'not_applicable',
+        ]);
+
+        Livewire::actingAs($admin)
+            ->test(TriageAssessmentComponent::class, ['visit' => $visit])
+            ->assertSet('form.triage_level', 'urgent')
+            ->assertSet('form.consciousness_level', 'alert')
+            ->assertSet('form.pregnancy_status', 'not_applicable')
+            ->assertSet('form.danger_signs', [])
+            ->assertSet('form.allergies_confirmed', false);
+    }
+
+    public function test_nurse_can_open_triage_page(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $nurse = $this->staffUser('nurse');
+        $visit = $this->visit($admin);
+
+        Livewire::actingAs($nurse)
+            ->test(TriageAssessmentComponent::class, ['visit' => $visit])
+            ->assertOk()
+            ->assertSee('Kamilisha Triage');
+    }
+
+    public function test_completion_shows_inline_errors_preserves_values_and_dispatches_first_invalid_field(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $nurse = $this->staffUser('nurse');
+        $visit = $this->visit($admin);
+
+        Livewire::actingAs($nurse)
+            ->test(TriageAssessmentComponent::class, ['visit' => $visit])
+            ->set('form.chief_complaint_summary', 'Persistent fever')
+            ->set('form.temperature', 'invalid')
+            ->call('complete')
+            ->assertHasErrors([
+                'form.temperature' => 'numeric',
+                'form.systolic_bp' => 'required',
+                'form.diastolic_bp' => 'required',
+                'form.pulse_rate' => 'required',
+                'form.respiratory_rate' => 'required',
+                'form.oxygen_saturation' => 'required',
+                'form.pain_score' => 'required',
+                'form.consciousness_level' => 'required',
+                'form.allergies_confirmed' => 'accepted',
+            ])
+            ->assertSet('form.chief_complaint_summary', 'Persistent fever')
+            ->assertSet('form.temperature', 'invalid')
+            ->assertDispatched('triage-validation-failed')
+            ->assertSee('Hatukuweza kukamilisha Triage.')
+            ->assertSee('Joto la mwili lazima liwe namba.');
+
+        $this->assertDatabaseHas('triage_assessments', [
+            'visit_id' => $visit->id,
+            'status' => 'draft',
+        ]);
+    }
+
+    public function test_valid_triage_completion_records_completion_and_moves_patient_queue(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $nurse = $this->staffUser('nurse');
+        $visit = $this->visit($admin);
+        $component = Livewire::actingAs($nurse)->test(TriageAssessmentComponent::class, ['visit' => $visit]);
+
+        foreach ($this->validTriageData() as $field => $value) {
+            $component->set("form.{$field}", $value);
+        }
+
+        $component->call('complete')->assertRedirect(route('triage.index'));
+
+        $assessment = TriageAssessment::query()->where('visit_id', $visit->id)->firstOrFail();
+        $this->assertSame('completed', $assessment->status->value);
+        $this->assertSame($nurse->id, $assessment->completed_by);
+        $this->assertNotNull($assessment->completed_at);
+        $this->assertDatabaseHas('activity_logs', [
+            'event' => 'triage_completed',
+            'subject_id' => $assessment->id,
+        ]);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'queue_status' => 'waiting',
+        ]);
+    }
+
+    public function test_unauthorized_user_cannot_complete_triage(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['facility_id' => currentFacility()->id, 'user_id' => $user->id]);
+        $user->givePermissionTo('triage.record-vitals');
+        $visit = $this->visit($admin);
+        $component = Livewire::actingAs($user)->test(TriageAssessmentComponent::class, ['visit' => $visit]);
+
+        foreach ($this->validTriageData() as $field => $value) {
+            $component->set("form.{$field}", $value);
+        }
+
+        $component->call('complete')->assertNoRedirect();
+
+        $this->assertDatabaseHas('triage_assessments', [
+            'visit_id' => $visit->id,
+            'status' => 'draft',
+            'completed_by' => null,
+        ]);
+    }
+
+    public function test_completed_triage_cannot_be_completed_twice(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $assessment = app(TriageService::class)->startAssessment($this->visit($admin), $admin);
+        app(TriageService::class)->completeAssessment($assessment, $this->validTriageData(), $admin);
+        $queueCount = PatientQueue::query()->count();
+
+        $this->expectException(ValidationException::class);
+
+        try {
+            app(TriageService::class)->completeAssessment($assessment->refresh(), $this->validTriageData(), $admin);
+        } finally {
+            $this->assertSame($queueCount, PatientQueue::query()->count());
+        }
+    }
+
+    public function test_incomplete_triage_can_be_saved_as_draft(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $nurse = $this->staffUser('nurse');
+        $visit = $this->visit($admin);
+
+        Livewire::actingAs($nurse)
+            ->test(TriageAssessmentComponent::class, ['visit' => $visit])
+            ->set('form.chief_complaint_summary', 'Assessment is still in progress')
+            ->call('saveDraft')
+            ->assertHasNoErrors()
+            ->assertNoRedirect();
+
+        $this->assertDatabaseHas('triage_assessments', [
+            'visit_id' => $visit->id,
+            'chief_complaint_summary' => 'Assessment is still in progress',
+            'status' => 'draft',
+            'completed_at' => null,
+        ]);
+    }
+
+    public function test_cross_facility_triage_page_is_rejected(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $otherFacility = Facility::query()->create([
+            'name' => 'Other Triage Facility',
+            'code' => 'TRI-OTHER',
+            'facility_type' => FacilityType::Dispensary,
+            'ownership_type' => OwnershipType::Private,
+            'phone_primary' => '+255700000099',
+            'region' => 'Dar es Salaam',
+            'district' => 'Ilala',
+            'ward' => 'Upanga',
+            'physical_address' => 'Upanga',
+            'setup_completed_at' => now(),
+            'created_by' => $admin->id,
+            'updated_by' => $admin->id,
+        ]);
+        $visit->update(['facility_id' => $otherFacility->id]);
+
+        $this->actingAs($admin)
+            ->get(route('triage.assessment', $visit))
+            ->assertNotFound();
+    }
+
+    public function test_database_failure_rolls_back_triage_completion_and_workflow(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $assessment = app(TriageService::class)->startAssessment($visit, $admin);
+        $workflow = $this->mock(WorkflowService::class);
+        $workflow->shouldReceive('transferPatient')->once()->andThrow(new \RuntimeException('Simulated workflow failure'));
+
+        try {
+            app(TriageService::class)->completeAssessment($assessment, $this->validTriageData(), $admin);
+            $this->fail('The simulated workflow failure was not raised.');
+        } catch (\RuntimeException $exception) {
+            $this->assertSame('Simulated workflow failure', $exception->getMessage());
+        }
+
+        $assessment->refresh();
+        $this->assertSame('draft', $assessment->status->value);
+        $this->assertNull($assessment->completed_by);
+        $this->assertNull($assessment->completed_at);
+        $this->assertDatabaseMissing('activity_logs', [
+            'event' => 'triage_completed',
+            'subject_id' => $assessment->id,
+        ]);
+    }
+
+    public function test_completed_triage_leaves_triage_and_enters_opd_queue_for_immediate_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $nurse = $this->staffUser('nurse');
+        $doctor = $this->staffUser('doctor');
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $triage->update(['queue_enabled' => true]);
+        $opd->update(['queue_enabled' => true, 'requires_triage' => true]);
+        $visit = $this->visitInDepartment($admin, $triage, $opd, VisitStatus::AwaitingTriage);
+        $triageQueue = app(WorkflowService::class)->createQueue(
+            $visit,
+            $triage,
+            $admin,
+            VisitStatus::AwaitingTriage,
+            'Triage required before OPD'
+        );
+        $assessment = app(TriageService::class)->startAssessment($visit->refresh(), $nurse);
+
+        app(TriageService::class)->completeAssessment($assessment, $this->validTriageData(), $nurse);
+
+        $visit->refresh();
+        $this->assertSame(VisitStatus::InQueue, $visit->visit_status);
+        $this->assertSame($opd->id, $visit->current_department_id);
+        $this->assertSame($opd->id, $visit->destination_department_id);
+        $this->assertSame('completed', $triageQueue->refresh()->queue_status->value);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $opd->id,
+            'queue_status' => 'waiting',
+        ]);
+        $this->assertSame(1, PatientQueue::query()
+            ->where('visit_id', $visit->id)
+            ->whereIn('queue_status', ['waiting', 'called', 'serving'])
+            ->count());
+        $this->assertDatabaseMissing('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $triage->id,
+            'queue_status' => 'waiting',
+        ]);
+
+        Livewire::actingAs($nurse)
+            ->test(TriageQueue::class)
+            ->assertDontSee($visit->patient->patient_number);
+        Livewire::actingAs($doctor)
+            ->test(OpdQueue::class)
+            ->assertSee($visit->patient->patient_number);
+        $this->actingAs($doctor)
+            ->get(route('opd.consultation', $visit))
+            ->assertOk();
+    }
+
+    public function test_legacy_triage_destination_is_repaired_to_opd_on_completion(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $triage = Department::query()->forCurrentFacility()->where('code', 'TRI')->firstOrFail();
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $visit = $this->visitInDepartment($admin, $triage, $triage, VisitStatus::AwaitingTriage);
+        $queue = app(WorkflowService::class)->createQueue($visit, $triage, $admin, VisitStatus::AwaitingTriage, 'Legacy triage queue');
+        $assessment = app(TriageService::class)->startAssessment($visit->refresh(), $admin);
+
+        app(TriageService::class)->completeAssessment($assessment, $this->validTriageData(), $admin);
+
+        $visit->refresh();
+        $this->assertSame($opd->id, $visit->destination_department_id);
+        $this->assertSame($opd->id, $visit->current_department_id);
+        $this->assertSame('completed', $queue->refresh()->queue_status->value);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $opd->id,
+            'queue_status' => 'waiting',
+        ]);
+    }
+
     public function test_invalid_pain_score_and_oxygen_saturation_are_rejected(): void
     {
         $this->bootstrappedFacility();
-        $this->expectException(\Illuminate\Validation\ValidationException::class);
-        app(\App\Services\VitalSignAssessmentService::class)->validateVitalRanges(['pain_score' => 11, 'oxygen_saturation' => 101]);
+        $this->expectException(ValidationException::class);
+        app(VitalSignAssessmentService::class)->validateVitalRanges(['pain_score' => 11, 'oxygen_saturation' => 101]);
     }
 
     public function test_clinician_can_start_save_signoff_and_complete_encounter(): void
@@ -314,7 +937,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         $visit = $this->visit($admin, VisitStatus::InQueue);
         app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
 
-        $this->expectException(\Illuminate\Validation\ValidationException::class);
+        $this->expectException(ValidationException::class);
         app(ClinicalEncounterService::class)->startEncounter($visit->refresh(), User::factory()->create());
     }
 
@@ -330,7 +953,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         $completed = $service->completeEncounter($encounter->refresh(), $admin);
 
         $user = User::factory()->create();
-        $this->expectException(\Illuminate\Validation\ValidationException::class);
+        $this->expectException(ValidationException::class);
         $service->saveDraft($completed, ['clinical_summary' => 'Changed'], $user);
     }
 
@@ -338,7 +961,7 @@ class Step6ClinicalWorkflowTest extends TestCase
     {
         $admin = $this->bootstrappedFacility();
         $encounter = app(ClinicalEncounterService::class)->startEncounter($this->visit($admin, VisitStatus::InQueue), $admin);
-        $service = app(\App\Services\DiagnosisService::class);
+        $service = app(DiagnosisService::class);
         $first = $service->addDiagnosis($encounter, ['diagnosis_type' => 'provisional', 'diagnosis_name' => 'Malaria', 'certainty' => 'probable', 'is_primary' => true], $admin);
         $second = $service->addDiagnosis($encounter, ['diagnosis_type' => 'final', 'diagnosis_name' => 'Fever', 'certainty' => 'confirmed', 'is_primary' => true], $admin);
 
@@ -355,7 +978,7 @@ class Step6ClinicalWorkflowTest extends TestCase
     public function test_lab_order_prescription_procedure_followup_and_referral_foundations_work(): void
     {
         $admin = $this->bootstrappedFacility();
-        $visit = $this->visit($admin, VisitStatus::InQueue);
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
         $labService = $this->service('Malaria MRDT', 'LAB001', 'laboratory_test', $admin);
         $procedure = $this->service('Dressing', 'PROC001', 'procedure', $admin);
@@ -410,6 +1033,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         foreach (Permission::query()->pluck('name') as $permission) {
             $admin->givePermissionTo($permission);
         }
+
         return $admin;
     }
 
@@ -432,6 +1056,7 @@ class Step6ClinicalWorkflowTest extends TestCase
     {
         $department = Department::query()->forCurrentFacility()->firstOrFail();
         $department->update(['clinical_department' => true, 'queue_enabled' => true]);
+
         return Visit::query()->create(['facility_id' => currentFacility()->id, 'patient_id' => $this->patient($admin)->id, 'visit_number' => 'VIS-2026-'.fake()->unique()->numerify('######'), 'visit_type' => 'new_patient', 'payer_type' => 'insurance', 'destination_department_id' => $department->id, 'current_department_id' => $department->id, 'visit_status' => $status, 'priority' => 'normal', 'registered_at' => now(), 'created_by' => $admin->id]);
     }
 
@@ -551,11 +1176,41 @@ class Step6ClinicalWorkflowTest extends TestCase
         return $invoice;
     }
 
+    private function validTriageData(): array
+    {
+        return [
+            'triage_level' => 'urgent',
+            'chief_complaint_summary' => 'Fever and shortness of breath',
+            'temperature' => '39.5',
+            'systolic_bp' => 120,
+            'diastolic_bp' => 80,
+            'pulse_rate' => 110,
+            'respiratory_rate' => 24,
+            'oxygen_saturation' => '94',
+            'weight_kg' => '70',
+            'height_cm' => '170',
+            'blood_glucose' => null,
+            'muac_cm' => null,
+            'pain_score' => 6,
+            'consciousness_level' => 'alert',
+            'pregnancy_status' => 'not_applicable',
+            'gestational_age_weeks' => null,
+            'danger_signs' => [],
+            'allergies_confirmed' => true,
+            'fall_risk' => 'low',
+            'infection_risk' => 'suspected',
+            'notes' => 'Patient requires prompt clinical review.',
+        ];
+    }
+
     private function service(string $name, string $code, string $type, User $admin): Service
     {
         $category = ServiceCategory::query()->first() ?: ServiceCategory::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Clinical', 'code' => 'CLIN', 'category_type' => 'consultation', 'is_active' => true, 'created_by' => $admin->id]);
         $service = Service::query()->create(['facility_id' => currentFacility()->id, 'service_category_id' => $category->id, 'name' => $name, 'code' => $code, 'service_type' => $type, 'requires_payment' => true, 'is_active' => true, 'created_by' => $admin->id]);
-        ServicePrice::query()->create(['facility_id' => currentFacility()->id, 'service_id' => $service->id, 'payer_type' => 'insurance', 'amount' => 1000, 'currency' => 'TZS', 'is_active' => true, 'created_by' => $admin->id]);
+        foreach (['cash', 'insurance'] as $payerType) {
+            ServicePrice::query()->create(['facility_id' => currentFacility()->id, 'service_id' => $service->id, 'payer_type' => $payerType, 'amount' => 1000, 'currency' => 'TZS', 'is_active' => true, 'created_by' => $admin->id]);
+        }
+
         return $service;
     }
 

@@ -19,8 +19,13 @@ class BillingChargeService
 
     public function addServiceCharge(Invoice $invoice, Service $service, $actor, ?Model $source = null, float $quantity = 1, array $metadata = []): InvoiceItem
     {
-        if ($source && $this->preventDuplicateCharge($invoice, $source)) {
-            return InvoiceItem::query()->where('invoice_id', $invoice->id)->where('reference_type', $source::class)->where('reference_id', $source->getKey())->firstOrFail();
+        if ($source && $this->preventDuplicateCharge($invoice, $source, $service)) {
+            return InvoiceItem::query()
+                ->where('invoice_id', $invoice->id)
+                ->where('reference_type', $source::class)
+                ->where('reference_id', $source->getKey())
+                ->where('service_id', $service->id)
+                ->firstOrFail();
         }
 
         $price = $this->pricing->getCurrentPrice($service, $invoice->payer_type, $invoice->insurance_provider_id ?? $invoice->patientPayerProfile?->insurance_provider_id, $invoice->corporate_account_id ?? $invoice->patientPayerProfile?->corporate_account_id);
@@ -55,7 +60,7 @@ class BillingChargeService
             'net_amount' => $split['net_amount'],
             'status' => 'pending',
             'service_date' => today(),
-            'price_snapshot' => $price?->only(['id','amount','currency','payer_type','effective_from','effective_to']),
+            'price_snapshot' => $price?->only(['id', 'amount', 'currency', 'payer_type', 'effective_from', 'effective_to']),
             'metadata' => $metadata,
             'created_by' => $actor->id,
         ]);
@@ -66,9 +71,15 @@ class BillingChargeService
         return $item;
     }
 
-    public function preventDuplicateCharge(Invoice $invoice, Model $source): bool
+    public function preventDuplicateCharge(Invoice $invoice, Model $source, ?Service $service = null): bool
     {
-        return InvoiceItem::query()->where('invoice_id', $invoice->id)->where('reference_type', $source::class)->where('reference_id', $source->getKey())->whereNotIn('status', ['cancelled', 'reversed'])->exists();
+        return InvoiceItem::query()
+            ->where('invoice_id', $invoice->id)
+            ->where('reference_type', $source::class)
+            ->where('reference_id', $source->getKey())
+            ->when($service, fn ($query) => $query->where('service_id', $service->id))
+            ->whereNotIn('status', ['cancelled', 'reversed'])
+            ->exists();
     }
 
     public function cancelCharge(InvoiceItem $item, $actor, string $reason): void

@@ -15,12 +15,13 @@ use App\Livewire\Billing\Settings\PaymentMethods;
 use App\Livewire\Billing\Settings\Preferences;
 use App\Models\CashierSession;
 use App\Models\Department;
-use App\Models\FacilitySetting;
 use App\Models\Facility;
+use App\Models\FacilitySetting;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\Patient;
 use App\Models\PatientQueue;
+use App\Models\Payment;
 use App\Models\PaymentMethod;
 use App\Models\Permission;
 use App\Models\User;
@@ -399,8 +400,8 @@ class Step13BillingCashierTest extends TestCase
             ->call('confirmPayment')
             ->assertHasErrors(['payment_method_id', 'amount'])
             ->assertSet('showPaymentModal', true)
-            ->assertSee('payment method id inahitajika.')
-            ->assertSee('amount inahitajika.');
+            ->assertSee('The payment method id field is required.')
+            ->assertSee('The amount field is required.');
     }
 
     public function test_authorized_cashier_can_open_session_with_shift_and_drawer(): void
@@ -486,9 +487,9 @@ class Step13BillingCashierTest extends TestCase
             'amount' => 10000,
         ]);
         $this->assertDatabaseHas('receipts', ['invoice_id' => $invoice->id, 'cashier_name_snapshot' => $admin->name]);
-        $this->assertDatabaseHas('activity_logs', ['event' => 'payment_confirmed', 'subject_type' => \App\Models\Payment::class]);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'payment_confirmed', 'subject_type' => Payment::class]);
 
-        $payment = \App\Models\Payment::query()->where('invoice_id', $invoice->id)->firstOrFail();
+        $payment = Payment::query()->where('invoice_id', $invoice->id)->firstOrFail();
         $this->get(route('billing.receipts.print', $payment->receipt))->assertOk()->assertSee('Received By')->assertSee($admin->name);
     }
 
@@ -564,14 +565,14 @@ class Step13BillingCashierTest extends TestCase
             $this->assertArrayHasKey('amount', $exception->errors());
         }
 
-        $this->assertSame(1, \App\Models\Payment::query()->where('invoice_id', $invoice->id)->count());
+        $this->assertSame(1, Payment::query()->where('invoice_id', $invoice->id)->count());
     }
 
     public function test_facility_scoping_hides_other_facility_payment_methods(): void
     {
         $admin = $this->bootstrappedFacility();
-        $other = Facility::query()->create(['name'=>'Other Facility','code'=>'OTH','facility_type'=>FacilityType::Dispensary,'ownership_type'=>OwnershipType::Private,'phone_primary'=>'+255700000111','region'=>'Dar es Salaam','district'=>'Ilala','ward'=>'Upanga','physical_address'=>'Upanga','setup_completed_at'=>now(),'created_by'=>$admin->id,'updated_by'=>$admin->id]);
-        PaymentMethod::query()->create(['facility_id'=>$other->id,'name'=>'Other Wallet','code'=>'OTHER_WALLET','type'=>'mobile_money','is_active'=>true]);
+        $other = Facility::query()->create(['name' => 'Other Facility', 'code' => 'OTH', 'facility_type' => FacilityType::Dispensary, 'ownership_type' => OwnershipType::Private, 'phone_primary' => '+255700000111', 'region' => 'Dar es Salaam', 'district' => 'Ilala', 'ward' => 'Upanga', 'physical_address' => 'Upanga', 'setup_completed_at' => now(), 'created_by' => $admin->id, 'updated_by' => $admin->id]);
+        PaymentMethod::query()->create(['facility_id' => $other->id, 'name' => 'Other Wallet', 'code' => 'OTHER_WALLET', 'type' => 'mobile_money', 'is_active' => true]);
 
         $this->assertFalse(PaymentMethod::query()->forCurrentFacility()->where('code', 'OTHER_WALLET')->exists());
     }
@@ -579,7 +580,7 @@ class Step13BillingCashierTest extends TestCase
     private function bootstrappedFacility(): User
     {
         $admin = User::factory()->superAdmin()->create(['email' => fake()->unique()->safeEmail()]);
-        Facility::query()->create(['name'=>'Vikindu Dispensary','code'=>'VDP','facility_type'=>FacilityType::Dispensary,'ownership_type'=>OwnershipType::Private,'phone_primary'=>'+255700000000','region'=>'Dar es Salaam','district'=>'Temeke','ward'=>'Vikindu','physical_address'=>'Vikindu','setup_completed_at'=>now(),'created_by'=>$admin->id,'updated_by'=>$admin->id]);
+        Facility::query()->create(['name' => 'Vikindu Dispensary', 'code' => 'VDP', 'facility_type' => FacilityType::Dispensary, 'ownership_type' => OwnershipType::Private, 'phone_primary' => '+255700000000', 'region' => 'Dar es Salaam', 'district' => 'Temeke', 'ward' => 'Vikindu', 'physical_address' => 'Vikindu', 'setup_completed_at' => now(), 'created_by' => $admin->id, 'updated_by' => $admin->id]);
         $this->seed([PermissionSeeder::class, DepartmentSeeder::class, PaymentMethodSeeder::class, BillingSettingsSeeder::class]);
         foreach (Permission::query()->pluck('name') as $permission) {
             $admin->givePermissionTo($permission);

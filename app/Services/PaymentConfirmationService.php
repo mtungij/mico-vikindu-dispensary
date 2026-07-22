@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Events\LaboratoryPaymentConfirmed;
+use App\Models\FacilitySetting;
 use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\PaymentMethod;
@@ -23,13 +25,28 @@ class PaymentConfirmationService
     {
         return DB::transaction(function () use ($invoice, $method, $amount, $actor, $data): Payment {
             $invoice = Invoice::query()->lockForUpdate()->findOrFail($invoice->id);
-            abort_unless($invoice->facility_id === currentFacility()?->id, 403);
+            abort_unless($invoice->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+            abort_unless(
+                $actor->can('billing.receive-payment') && $actor->can('billing.confirm-payment'),
+                403
+            );
             $this->statuses->recalculate($invoice);
             $invoice = $invoice->refresh();
 
-            if ($amount <= 0) throw ValidationException::withMessages(['amount' => 'Kiasi cha malipo lazima kiwe zaidi ya sifuri.']);
+            if ($amount <= 0) {
+                throw ValidationException::withMessages(['amount' => 'Kiasi cha malipo lazima kiwe zaidi ya sifuri.']);
+            }
+            if ((float) $invoice->balance_amount <= 0) {
+                throw ValidationException::withMessages(['amount' => 'Invoice hii tayari imelipwa kikamilifu.']);
+            }
+            if ($amount < (float) $invoice->balance_amount && ! $actor->can('billing.receive-partial-payment')) {
+                throw ValidationException::withMessages(['amount' => 'Huna ruhusa ya kupokea malipo ya sehemu.']);
+            }
             if ($amount > (float) $invoice->balance_amount && ! $this->setting('billing_allow_overpayment', false)) {
                 throw ValidationException::withMessages(['amount' => 'Malipo hayawezi kuzidi salio la invoice.']);
+            }
+            if (! $method->is_active || ($method->facility_id !== null && $method->facility_id !== $invoice->facility_id)) {
+                throw ValidationException::withMessages(['payment_method_id' => 'Njia ya malipo haipatikani kwa facility hii.']);
             }
             if ($method->requires_reference && blank($data['transaction_reference'] ?? null)) {
                 throw ValidationException::withMessages(['transaction_reference' => 'Reference ya malipo inahitajika.']);
@@ -61,7 +78,7 @@ class PaymentConfirmationService
             ]);
 
             $payment->allocations()->create(['facility_id' => $invoice->facility_id, 'invoice_id' => $invoice->id, 'allocated_amount' => $amount, 'allocation_type' => 'invoice', 'allocated_by' => $actor->id, 'allocated_at' => now()]);
-            $this->statuses->recalculate($invoice);
+            $invoice = $this->statuses->recalculate($invoice);
             $this->receipts->createForPayment($payment);
             $this->audit->record('payment_confirmed', $payment, [
                 'payment_id' => $payment->id,
@@ -76,6 +93,11 @@ class PaymentConfirmationService
                 'facility_id' => $invoice->facility_id,
                 'cashier_session_id' => $payment->cashier_session_id,
             ]);
+
+            if ((float) $invoice->balance_amount === 0.0 && $invoice->payment_status === 'paid') {
+                LaboratoryPaymentConfirmed::dispatch($invoice->refresh(), $actor);
+            }
+
             $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);
 
             return $payment->refresh();
@@ -84,7 +106,8 @@ class PaymentConfirmationService
 
     protected function setting(string $key, bool $default): bool
     {
-        $value = \App\Models\FacilitySetting::query()->where('facility_id', currentFacility()?->id)->where('key', $key)->value('value');
+        $value = FacilitySetting::query()->where('facility_id', currentFacility()?->id)->where('key', $key)->value('value');
+
         return $value === null ? $default : filter_var($value, FILTER_VALIDATE_BOOL);
     }
 }

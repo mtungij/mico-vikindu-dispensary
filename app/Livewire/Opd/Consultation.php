@@ -21,6 +21,7 @@ use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
 use App\Support\Notifier;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Attributes\On;
@@ -29,18 +30,32 @@ use Livewire\Component;
 class Consultation extends Component
 {
     public Visit $visit;
+
     public ClinicalEncounter $encounter;
+
     public ClinicalEncounterForm $form;
+
     public ClinicalComplaintForm $complaintForm;
+
     public PhysicalExaminationForm $examForm;
+
     public DiagnosisForm $diagnosisForm;
+
     public LaboratoryOrderForm $labForm;
+
     public PrescriptionItemForm $prescriptionItemForm;
+
     public ProcedureOrderForm $procedureForm;
+
     public AppointmentForm $appointmentForm;
+
     public ReferralForm $referralForm;
+
     public string $activeTab = 'summary';
+
     public string $saveState = '';
+
+    public bool $icd10Selected = false;
 
     public function mount(Visit $visit, ClinicalEncounterService $service): void
     {
@@ -129,6 +144,7 @@ class Consultation extends Component
         $this->diagnosisForm->validate();
         $service->addDiagnosis($this->encounter, $this->diagnosisForm->normalize(), auth()->user());
         $this->diagnosisForm->resetForm();
+        $this->icd10Selected = false;
         Notifier::success('Diagnosis imeongezwa.');
     }
 
@@ -137,13 +153,32 @@ class Consultation extends Component
     {
         $this->diagnosisForm->icd10_code = $code;
         $this->diagnosisForm->diagnosis_name = $title;
+        $this->icd10Selected = true;
+    }
+
+    public function updatedDiagnosisFormIcd10Code(): void
+    {
+        $this->icd10Selected = false;
+    }
+
+    public function updatedDiagnosisFormDiagnosisName(): void
+    {
+        $this->icd10Selected = false;
     }
 
     public function addLabOrder(ClinicalEncounterService $service): void
     {
-        Gate::authorize('laboratory-orders.create');
         $this->labForm->validate();
-        $service->addLabOrder($this->encounter, $this->labForm->normalize(), auth()->user());
+
+        try {
+            $service->addLabOrder($this->encounter, $this->labForm->normalize(), auth()->user());
+        } catch (AuthorizationException) {
+            $message = 'You are not authorized to create laboratory orders.';
+            $this->addError('labForm.service_ids', $message);
+
+            return;
+        }
+
         $this->labForm->resetForm();
         Notifier::success('Lab order imeundwa.');
     }
@@ -205,6 +240,7 @@ class Consultation extends Component
         Gate::authorize('complete', $this->encounter);
         $this->encounter = $service->completeEncounter($this->encounter, auth()->user());
         Notifier::success('Consultation imekamilishwa.');
+
         return redirect()->route('opd.index');
     }
 

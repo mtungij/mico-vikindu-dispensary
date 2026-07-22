@@ -9,22 +9,28 @@ use App\Enums\LaboratorySampleStatus;
 use App\Models\ActivityLog;
 use App\Models\LaboratoryOrderItem;
 use App\Models\LaboratoryResult;
-use App\Models\LaboratoryResultValue;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class LaboratoryResultService
 {
-    public function __construct(private readonly LaboratoryReferenceRangeService $ranges, private readonly LaboratoryCriticalResultService $criticalResults) {}
+    public function __construct(
+        private readonly LaboratoryReferenceRangeService $ranges,
+        private readonly LaboratoryCriticalResultService $criticalResults,
+        private readonly LaboratoryPaymentGuard $paymentGuard,
+    ) {}
 
     public function createDraft(LaboratoryOrderItem $item, $actor): LaboratoryResult
     {
+        $this->paymentGuard->ensureProcessable($item->order, $actor, 'result_entry');
+
         if (! $item->laboratory_test_id) {
             throw ValidationException::withMessages(['laboratory_test_id' => 'Order item haina configured laboratory test.']);
         }
         if (! $item->sample || $item->sample->sample_status !== LaboratorySampleStatus::Accepted) {
             throw ValidationException::withMessages(['sample' => 'Sample lazima iwe accepted kabla ya kuweka results.']);
         }
+
         return LaboratoryResult::query()->firstOrCreate([
             'laboratory_order_item_id' => $item->id,
             'result_status' => LaboratoryResultStatus::Draft,
@@ -72,6 +78,7 @@ class LaboratoryResultService
             $result->update(['result_status' => $submit ? LaboratoryResultStatus::PendingVerification : LaboratoryResultStatus::Entered, 'entered_by' => $actor->id, 'entered_at' => now(), 'abnormal_flag' => $flag, 'overall_result' => $values['overall_result'] ?? null, 'comments' => $values['comments'] ?? null, 'updated_by' => $actor->id]);
             $result->orderItem->update(['result_status' => $result->result_status->value, 'result_entered_at' => now()]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => $submit ? 'result_submitted' : 'result_draft_saved', 'subject_type' => $result::class, 'subject_id' => $result->id]);
+
             return $result->refresh();
         });
     }
@@ -84,6 +91,7 @@ class LaboratoryResultService
         $result->update(['result_status' => LaboratoryResultStatus::PendingVerification, 'updated_by' => $actor->id]);
         $result->orderItem->update(['result_status' => 'pending_verification']);
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_submitted', 'subject_type' => $result::class, 'subject_id' => $result->id]);
+
         return $result->refresh();
     }
 
@@ -99,6 +107,7 @@ class LaboratoryResultService
         }
         $result->update(['result_status' => LaboratoryResultStatus::EnteredInError, 'amendment_reason' => $reason, 'updated_by' => $actor->id]);
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_marked_error', 'subject_type' => $result::class, 'subject_id' => $result->id]);
+
         return $result->refresh();
     }
 
@@ -110,6 +119,7 @@ class LaboratoryResultService
         if ($type === LaboratoryResultType::Choice && $parameter->allowed_values && ! in_array($raw, $parameter->allowed_values, true)) {
             throw ValidationException::withMessages(['values' => 'Choice value hairuhusiwi.']);
         }
+
         return [
             'laboratory_test_parameter_id' => $parameter->id,
             'parameter_name_snapshot' => $parameter->name,
@@ -132,8 +142,13 @@ class LaboratoryResultService
 
     private function overallFlag(array $flags): LaboratoryAbnormalFlag
     {
-        if (array_intersect($flags, ['critical', 'critical_low', 'critical_high'])) return LaboratoryAbnormalFlag::Critical;
-        if (array_intersect($flags, ['low', 'high', 'abnormal'])) return LaboratoryAbnormalFlag::Abnormal;
+        if (array_intersect($flags, ['critical', 'critical_low', 'critical_high'])) {
+            return LaboratoryAbnormalFlag::Critical;
+        }
+        if (array_intersect($flags, ['low', 'high', 'abnormal'])) {
+            return LaboratoryAbnormalFlag::Abnormal;
+        }
+
         return LaboratoryAbnormalFlag::Normal;
     }
 }

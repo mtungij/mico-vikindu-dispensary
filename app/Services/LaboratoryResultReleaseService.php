@@ -23,7 +23,8 @@ class LaboratoryResultReleaseService
             $result->update(['result_status' => LaboratoryResultStatus::Released, 'released_by' => $actor->id, 'released_at' => now(), 'updated_by' => $actor->id]);
             $result->orderItem->update(['result_status' => 'released', 'result_released_at' => now(), 'status' => 'completed']);
             $this->updateOrderStatuses($result);
-            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_released', 'subject_type' => $result::class, 'subject_id' => $result->id]);
+            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_released', 'subject_type' => $result::class, 'subject_id' => $result->id, 'new_values' => ['facility_id' => $result->facility_id, 'visit_id' => $result->order?->visit_id, 'laboratory_order_id' => $result->laboratory_order_id]]);
+
             return $result->refresh();
         });
     }

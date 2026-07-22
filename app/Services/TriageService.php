@@ -5,10 +5,10 @@ namespace App\Services;
 use App\Enums\TriageStatus;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
+use App\Models\Department;
 use App\Models\PatientQueue;
 use App\Models\TriageAssessment;
 use App\Models\Visit;
-use App\Models\VisitMovement;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -24,6 +24,7 @@ class TriageService
     public function startAssessment(Visit $visit, $actor): TriageAssessment
     {
         $this->assertVisitCanBeTriaged($visit);
+
         return DB::transaction(function () use ($visit, $actor) {
             $sequence = (int) TriageAssessment::query()->where('visit_id', $visit->id)->max('sequence_number') + 1;
             $assessment = TriageAssessment::query()->create([
@@ -39,6 +40,7 @@ class TriageService
                 'created_by' => $actor->id,
             ]);
             $this->audit($actor, 'triage_started', $assessment);
+
             return $assessment;
         });
     }
@@ -60,10 +62,30 @@ class TriageService
     public function completeAssessment(TriageAssessment $assessment, array $data, $actor): TriageAssessment
     {
         return DB::transaction(function () use ($assessment, $data, $actor) {
+            $assessment = TriageAssessment::query()->lockForUpdate()->findOrFail($assessment->id);
+            abort_unless(
+                $assessment->facility_id === currentFacility()?->id
+                && $actor->belongsToCurrentFacility()
+                && $actor->can('triage.complete'),
+                403
+            );
+
+            if ($assessment->status === TriageStatus::Completed) {
+                throw ValidationException::withMessages([
+                    'assessment' => 'Triage hii tayari imekamilishwa.',
+                ]);
+            }
+
             $visit = Visit::query()->lockForUpdate()->findOrFail($assessment->visit_id);
             $this->assertVisitCanBeTriaged($visit);
             $assessment = $this->saveAssessment($assessment, $data, $actor);
-            $assessment->update(['status' => TriageStatus::Completed, 'assessed_at' => now(), 'updated_by' => $actor->id]);
+            $assessment->update([
+                'status' => TriageStatus::Completed,
+                'assessed_at' => now(),
+                'completed_by' => $actor->id,
+                'completed_at' => now(),
+                'updated_by' => $actor->id,
+            ]);
 
             if ($assessment->queue_id && $queue = PatientQueue::query()->find($assessment->queue_id)) {
                 $this->workflow->completeQueue($queue, $actor);
@@ -71,6 +93,12 @@ class TriageService
 
             $department = $this->determineNextDepartment($visit);
             if ($department) {
+                if (! $visit->destinationDepartment || strtoupper((string) $visit->destinationDepartment->code) === 'TRI') {
+                    $visit->update([
+                        'destination_department_id' => $department->id,
+                        'updated_by' => $actor->id,
+                    ]);
+                }
                 $this->workflow->transferPatient($visit->refresh(), $department, 'Triage completed', $actor, VisitStatus::InQueue, true, $actor);
             }
             $this->alerts->createFromVitals($assessment->refresh(), $this->vitals->buildClinicalAlerts($assessment->toArray()));
@@ -88,12 +116,28 @@ class TriageService
         $data['amendment_reason'] = $reason;
         $updated = $this->saveAssessment($assessment, $data, $actor);
         $this->audit($actor, 'triage_amended', $updated, ['reason' => $reason]);
+
         return $updated;
     }
 
     public function determineNextDepartment(Visit $visit)
     {
-        return $visit->destinationDepartment ?: $visit->currentDepartment;
+        $destination = $visit->destinationDepartment;
+
+        if ($destination && strtoupper((string) $destination->code) !== 'TRI') {
+            return $destination;
+        }
+
+        $consultationDepartment = $visit->consultationService?->department;
+        if ($consultationDepartment && strtoupper((string) $consultationDepartment->code) !== 'TRI') {
+            return $consultationDepartment;
+        }
+
+        return Department::query()
+            ->where('facility_id', $visit->facility_id)
+            ->where('code', 'OPD')
+            ->where('is_active', true)
+            ->first();
     }
 
     public function createTargetQueue(Visit $visit, $actor): ?PatientQueue

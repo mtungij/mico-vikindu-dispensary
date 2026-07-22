@@ -14,6 +14,7 @@ class Queue extends Component
     use WithPagination;
 
     public string $tab = 'awaiting';
+
     public string $search = '';
 
     protected array $queryString = [
@@ -45,7 +46,13 @@ class Queue extends Component
         return view('livewire.billing.queue', [
             'invoices' => Invoice::query()
                 ->forCurrentFacility()
-                ->with(['patient', 'visit', 'patientPayerProfile'])
+                ->with([
+                    'patient',
+                    'visit',
+                    'facility',
+                    'items.department',
+                    'items.laboratoryOrderItem.order.orderingClinician',
+                ])
                 ->when($this->tab === 'awaiting', fn (Builder $query) => $query->where('balance_amount', '>', 0))
                 ->when($this->tab === 'partial', fn (Builder $query) => $query->where('payment_status', 'partial'))
                 ->when($this->tab === 'paid_today', fn (Builder $query) => $query->where('payment_status', 'paid')->whereDate('updated_at', today()))

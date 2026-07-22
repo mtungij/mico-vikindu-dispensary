@@ -76,12 +76,12 @@ class DatabaseSeeder extends Seeder
             LaboratoryTestCategorySeeder::class,
             SpecimenTypeSeeder::class,
             LaboratorySampleRejectionReasonSeeder::class,
-            MinimalIcd10Seeder::class,
             RolePermissionSeeder::class,
         ]);
 
-        if (app()->environment(['local', 'testing'])) {
+        if ($this->shouldSeedDevelopmentData()) {
             $this->call([
+                MinimalIcd10Seeder::class,
                 DevelopmentLaboratoryTestSeeder::class,
                 DevelopmentSupplierSeeder::class,
                 DevelopmentMedicineSeeder::class,
@@ -89,5 +89,10 @@ class DatabaseSeeder extends Seeder
                 DemoStaffSeeder::class,
             ]);
         }
+    }
+
+    public function shouldSeedDevelopmentData(): bool
+    {
+        return app()->environment(['local', 'testing']);
     }
 }

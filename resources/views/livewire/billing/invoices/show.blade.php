@@ -23,7 +23,9 @@
             <h3 class="font-semibold">Invoice Items</h3>
             <div class="flex gap-2">
                 <a href="{{ route('billing.invoices.print', $invoice) }}" class="rounded-md border border-slate-300 px-3 py-2 text-sm dark:border-slate-700">Print</a>
-                <button type="button" wire:click="openPaymentModal" class="rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white">Receive Payment</button>
+                @can('create', \App\Models\Payment::class)
+                    <button type="button" wire:click="openPaymentModal" class="rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white">Receive Payment</button>
+                @endcan
             </div>
         </div>
 

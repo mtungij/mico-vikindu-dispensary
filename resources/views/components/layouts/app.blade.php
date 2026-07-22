@@ -120,6 +120,7 @@
             ['label' => 'Corporate Accounts', 'icon' => 'briefcase-business', 'route' => 'settings.corporate-accounts.index', 'enabled' => $user?->can('corporate-accounts.view') ?? false],
             ['label' => 'Roles', 'icon' => 'shield-check', 'route' => 'settings.roles.index', 'active' => 'settings.roles.*', 'enabled' => $user?->can('roles.view') ?? false],
             ['label' => 'Permissions', 'icon' => 'key-round', 'route' => 'settings.permissions.index', 'enabled' => $user?->can('permissions.view') ?? false],
+            ['label' => 'ICD-10 Catalogue', 'icon' => 'file-text', 'route' => 'administration.clinical-catalogues.icd10', 'active' => 'administration.clinical-catalogues.icd10', 'enabled' => $user?->can('icd10.view') ?? false],
         ],
     ];
 @endphp

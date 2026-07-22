@@ -30,6 +30,7 @@ class WorkflowService
 
             if (! $department->queue_enabled) {
                 $this->movePatient($visit, $department, $status ?? VisitStatus::AwaitingDepartment, $actor, $reason ?? 'Department queue disabled');
+
                 return null;
             }
 
@@ -43,6 +44,7 @@ class WorkflowService
             if ($existing) {
                 $this->updateCurrentDepartment($visit, $department, $actor);
                 $this->updateVisitStatus($visit, $status ?? VisitStatus::Waiting, $actor, $existing);
+
                 return $existing->refresh();
             }
 
@@ -100,6 +102,7 @@ class WorkflowService
             QueueCall::query()->create(['facility_id' => $queue->facility_id, 'patient_queue_id' => $queue->id, 'department_id' => $queue->department_id, 'queue_number' => $queue->queue_number, 'call_count' => $callCount + 1, 'called_at' => now(), 'called_by' => $actor->id]);
             $this->updateVisitStatus($queue->visit, VisitStatus::Called, $actor, $queue);
             $this->audit($actor, 'queue_called', $queue);
+
             return $queue->refresh();
         });
     }
@@ -110,6 +113,7 @@ class WorkflowService
         $queue->update(['queue_status' => QueueStatus::Serving, 'service_started_at' => now(), 'waiting_seconds' => $waitingSeconds, 'assigned_to_user_id' => $actor->id]);
         $this->updateVisitStatus($queue->visit, VisitStatus::Serving, $actor, $queue);
         $this->audit($actor, 'queue_service_started', $queue);
+
         return $queue->refresh();
     }
 
@@ -121,6 +125,7 @@ class WorkflowService
             $this->updateVisitStatus($queue->visit, $nextStatus, $actor, null);
         }
         $this->audit($actor, 'queue_completed', $queue);
+
         return $queue->refresh();
     }
 
@@ -133,6 +138,7 @@ class WorkflowService
     {
         $queue->update(['queue_status' => QueueStatus::Skipped, 'skipped_at' => now(), 'notes' => $reason]);
         $this->audit($actor, 'queue_skipped', $queue, ['reason' => $reason]);
+
         return $queue->refresh();
     }
 
@@ -140,6 +146,7 @@ class WorkflowService
     {
         $queue->update(['queue_status' => QueueStatus::Cancelled, 'cancelled_at' => now(), 'notes' => $reason]);
         $this->audit($actor, 'queue_cancelled', $queue, ['reason' => $reason]);
+
         return $queue->refresh();
     }
 
@@ -148,6 +155,7 @@ class WorkflowService
         $queue->update(['queue_status' => QueueStatus::Waiting, 'requeued_at' => now(), 'called_at' => null, 'service_started_at' => null, 'assigned_to_user_id' => null]);
         $this->updateVisitStatus($queue->visit, VisitStatus::Waiting, $actor, $queue);
         $this->audit($actor, 'queue_requeued', $queue);
+
         return $queue->refresh();
     }
 
@@ -160,7 +168,15 @@ class WorkflowService
             }
             PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', [QueueStatus::Waiting->value, QueueStatus::Called->value, QueueStatus::Serving->value])->update(['queue_status' => QueueStatus::Transferred->value, 'service_completed_at' => now()]);
             $this->createMovement($visit, $visit->currentDepartment, $toDepartment, $reason, $actor, 'department_transfer', $emergencyOverride, $authorizedBy);
-            return $this->createQueue($visit->refresh(), $toDepartment, $actor, $status ?? VisitStatus::Waiting, $reason, $skipValidation);
+
+            return $this->createQueue(
+                $visit->refresh(),
+                $toDepartment,
+                $actor,
+                $status ?? VisitStatus::Waiting,
+                $reason,
+                $skipValidation || $emergencyOverride
+            );
         });
     }
 
@@ -169,6 +185,7 @@ class WorkflowService
         $this->createMovement($visit, $visit->currentDepartment, $toDepartment, $reason ?? $status->value, $actor, 'patient_moved');
         $this->updateCurrentDepartment($visit, $toDepartment, $actor);
         $this->updateVisitStatus($visit, $status, $actor);
+
         return $visit->refresh();
     }
 
@@ -178,6 +195,7 @@ class WorkflowService
         $visit->update(['visit_status' => VisitStatus::Completed, 'completed_at' => now(), 'current_queue_id' => null, 'current_assigned_user_id' => null, 'updated_by' => $actor->id]);
         $this->createMovement($visit, $visit->currentDepartment, null, $reason, $actor, 'visit_completed');
         $this->audit($actor, 'visit_completed', $visit);
+
         return $visit->refresh();
     }
 
@@ -190,6 +208,7 @@ class WorkflowService
         $visit->update(['visit_status' => VisitStatus::Cancelled, 'cancelled_at' => now(), 'cancellation_reason' => $reason, 'current_queue_id' => null, 'current_assigned_user_id' => null, 'updated_by' => $actor->id]);
         $this->createMovement($visit, $visit->currentDepartment, null, $reason, $actor, 'visit_cancelled');
         $this->audit($actor, 'visit_cancelled', $visit, ['reason' => $reason]);
+
         return $visit->refresh();
     }
 
@@ -221,18 +240,25 @@ class WorkflowService
     public function updateVisitStatus(Visit $visit, VisitStatus $status, $actor, ?PatientQueue $queue = null): Visit
     {
         $visit->update(['visit_status' => $status, 'current_queue_id' => $queue?->id, 'current_assigned_user_id' => $queue?->assigned_to_user_id, 'updated_by' => $actor->id]);
+
         return $visit->refresh();
     }
 
     public function updateCurrentDepartment(Visit $visit, Department $department, $actor, ?PatientQueue $queue = null): Visit
     {
-        $visit->update(['current_department_id' => $department->id, 'destination_department_id' => $department->id, 'current_queue_id' => $queue?->id ?? $visit->current_queue_id, 'updated_by' => $actor->id]);
+        $visit->update([
+            'current_department_id' => $department->id,
+            'current_queue_id' => $queue?->id ?? $visit->current_queue_id,
+            'updated_by' => $actor->id,
+        ]);
+
         return $visit->refresh();
     }
 
     public function createTicket(PatientQueue $queue, $actor): QueueTicket
     {
         $patient = $queue->patient;
+
         return QueueTicket::query()->create([
             'facility_id' => $queue->facility_id,
             'patient_queue_id' => $queue->id,
@@ -257,6 +283,7 @@ class WorkflowService
             if (blank($reason)) {
                 throw ValidationException::withMessages(['override_reason' => 'Sababu ya emergency override inahitajika.']);
             }
+
             return;
         }
         $code = strtoupper((string) $department->code);
@@ -283,8 +310,10 @@ class WorkflowService
         }
         if ($useTriage && $destination?->requires_triage) {
             $triage = Department::query()->where('facility_id', $visit->facility_id)->where('code', 'TRI')->first() ?: $destination;
+
             return $this->createQueue($visit, $triage, $actor, VisitStatus::AwaitingTriage, 'Triage required before OPD');
         }
+
         return $destination ? $this->createQueue($visit, $destination, $actor, VisitStatus::Waiting, 'Registration completed') : null;
     }
 

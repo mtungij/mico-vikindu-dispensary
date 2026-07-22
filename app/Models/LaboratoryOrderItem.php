@@ -12,11 +12,44 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class LaboratoryOrderItem extends Model
 {
     use HasFactory, SoftDeletes;
-    protected function casts(): array { return ['result_entered_at' => 'datetime', 'result_verified_at' => 'datetime', 'result_released_at' => 'datetime']; }
-    public function order(): BelongsTo { return $this->belongsTo(LaboratoryOrder::class, 'laboratory_order_id'); }
-    public function service(): BelongsTo { return $this->belongsTo(Service::class); }
-    public function laboratoryTest(): BelongsTo { return $this->belongsTo(LaboratoryTest::class); }
-    public function specimenType(): BelongsTo { return $this->belongsTo(SpecimenType::class); }
-    public function sample(): BelongsTo { return $this->belongsTo(LaboratorySample::class, 'sample_id'); }
-    public function results() { return $this->hasMany(LaboratoryResult::class); }
+
+    protected function casts(): array
+    {
+        return ['result_entered_at' => 'datetime', 'result_verified_at' => 'datetime', 'result_released_at' => 'datetime'];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(LaboratoryOrder::class, 'laboratory_order_id');
+    }
+
+    public function service(): BelongsTo
+    {
+        return $this->belongsTo(Service::class);
+    }
+
+    public function laboratoryTest(): BelongsTo
+    {
+        return $this->belongsTo(LaboratoryTest::class);
+    }
+
+    public function specimenType(): BelongsTo
+    {
+        return $this->belongsTo(SpecimenType::class);
+    }
+
+    public function sample(): BelongsTo
+    {
+        return $this->belongsTo(LaboratorySample::class, 'sample_id');
+    }
+
+    public function invoiceItem(): BelongsTo
+    {
+        return $this->belongsTo(InvoiceItem::class);
+    }
+
+    public function results()
+    {
+        return $this->hasMany(LaboratoryResult::class);
+    }
 }

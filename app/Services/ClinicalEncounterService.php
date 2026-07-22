@@ -10,11 +10,13 @@ use App\Models\ActivityLog;
 use App\Models\ClinicalComplaint;
 use App\Models\ClinicalEncounter;
 use App\Models\ClinicalNoteAmendment;
+use App\Models\LaboratoryOrder;
 use App\Models\PatientQueue;
 use App\Models\PhysicalExamination;
 use App\Models\Visit;
 use App\Models\VisitMovement;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
 
 class ClinicalEncounterService
@@ -113,7 +115,20 @@ class ClinicalEncounterService
     }
 
     public function addDiagnosis(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->diagnoses->addDiagnosis($encounter, $data, $actor); }
-    public function addLabOrder(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->laboratoryOrders->createOrder($encounter, $data, $actor); }
+    public function addLabOrder(ClinicalEncounter $encounter, array $data, $actor): LaboratoryOrder
+    {
+        if (in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true)) {
+            throw ValidationException::withMessages([
+                'encounter' => $encounter->status === ClinicalEncounterStatus::Completed
+                    ? 'Laboratory orders cannot be added because this consultation is already completed.'
+                    : 'Laboratory orders cannot be added because this consultation is no longer active.',
+            ]);
+        }
+
+        Gate::forUser($actor)->authorize('create', [LaboratoryOrder::class, $encounter]);
+
+        return $this->laboratoryOrders->createOrder($encounter, $data, $actor);
+    }
     public function addPrescription(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->prescriptions->createPrescription($encounter, $data, $actor); }
     public function addProcedureOrder(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->procedures->createOrder($encounter, $data, $actor); }
     public function createFollowUp(ClinicalEncounter $encounter, array $data, $actor) { $this->ensureMutable($encounter, $actor); return $this->appointments->createFollowUp($encounter, $data, $actor); }

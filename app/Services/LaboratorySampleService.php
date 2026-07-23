@@ -17,6 +17,7 @@ class LaboratorySampleService
     public function __construct(
         private readonly LaboratorySampleNumberService $numbers,
         private readonly LaboratoryPaymentGuard $paymentGuard,
+        private readonly LaboratoryOrderStatusService $orderStatuses,
     ) {}
 
     public function collectSample(LaboratoryOrder $order, array $data, $actor, bool $accept = false): LaboratorySample
@@ -33,11 +34,8 @@ class LaboratorySampleService
                 403,
                 'Order hii ni ya facility nyingine.',
             );
-            if ($order->items()->whereNotNull('sample_id')->lockForUpdate()->exists()) {
-                throw ValidationException::withMessages(['order_item_ids' => 'Sampuli ya kipimo hiki tayari imekusanywa.']);
-            }
             $this->paymentGuard->ensureProcessable($order, $actor, 'collect_sample');
-            $eligibleStatuses = [ClinicalOrderStatus::Ordered];
+            $eligibleStatuses = [ClinicalOrderStatus::Ordered, ClinicalOrderStatus::SamplePending, ClinicalOrderStatus::Processing];
             if ($actor->can('laboratory.override-payment')) {
                 $eligibleStatuses[] = ClinicalOrderStatus::AwaitingPayment;
             }
@@ -46,13 +44,20 @@ class LaboratorySampleService
                     'order' => "Order hii haipo tayari kwa ukusanyaji wa sampuli (status: {$order->status->value}).",
                 ]);
             }
+            $selectionWasSubmitted = array_key_exists('order_item_ids', $data);
             $itemIds = collect($data['order_item_ids'] ?? [])
                 ->map(fn ($id): int => (int) $id)
                 ->filter()
                 ->unique()
                 ->values();
             if ($itemIds->isEmpty()) {
-                $itemIds = $order->items()->pluck('id')->map(fn ($id): int => (int) $id)->values();
+                if ($selectionWasSubmitted) {
+                    $this->collectionError($order, $actor, 'order_item_ids', 'Chagua angalau kipimo kimoja cha kukusanyia sampuli.', collect());
+                }
+                $itemIds = $order->items()
+                    ->whereNull('sample_id')
+                    ->whereIn('status', ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'])
+                    ->pluck('id')->map(fn ($id): int => (int) $id)->values();
             }
             if ($itemIds->isEmpty()) {
                 $storedItems = $order->items()->withTrashed()->get(['id', 'status', 'deleted_at']);
@@ -65,62 +70,68 @@ class LaboratorySampleService
             if ($items->count() !== $itemIds->count()) {
                 $this->collectionError($order, $actor, 'order_item_ids', 'Kitambulisho cha kipimo hakilingani na order hii.', $items);
             }
-            if ($items->contains(fn ($item): bool => $item->status === 'cancelled')) {
-                $this->collectionError($order, $actor, 'order_item_ids', 'Vipimo vya order hii vimefutwa.', $items);
-            }
-            if ($items->contains(fn ($item): bool => $item->sample_id !== null)) {
-                $this->collectionError($order, $actor, 'order_item_ids', 'Vipimo vya order hii tayari vimekusanywa.', $items);
-            }
             $eligibleItemStatuses = ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'];
-            if ($items->contains(fn ($item): bool => ! in_array($item->status, $eligibleItemStatuses, true))) {
-                $this->collectionError($order, $actor, 'order_item_ids', 'Hakuna kipimo kilicho tayari kukusanywa sampuli.', $items);
+            $errors = [];
+            foreach ($items as $item) {
+                $name = $item->test_name_snapshot ?: "Kipimo #{$item->id}";
+                if ($item->status === 'cancelled') {
+                    $errors["order_item_ids.{$item->id}"] = "{$name}: kipimo kimefutwa.";
+                } elseif ($item->sample_id !== null) {
+                    $errors["order_item_ids.{$item->id}"] = "{$name}: sampuli tayari imekusanywa.";
+                } elseif (! in_array($item->status, $eligibleItemStatuses, true)) {
+                    $errors["order_item_ids.{$item->id}"] = "{$name}: hakipo tayari kukusanywa sampuli.";
+                } elseif (! $item->laboratory_test_id) {
+                    $errors["order_item_ids.{$item->id}"] = "{$name}: test haijasanidiwa kwa service hii.";
+                } elseif (! ($item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id)) {
+                    $errors["order_item_ids.{$item->id}"] = "{$name}: Aina ya sampuli haijawekwa kwenye huduma ya kipimo.";
+                }
             }
-            $firstItem = $items->firstOrFail();
-            if (! $firstItem->laboratory_test_id) {
-                throw ValidationException::withMessages(['laboratory_test_id' => 'Test haijasanidiwa kwa service hii.']);
+            if ($errors !== []) {
+                Log::warning('Laboratory sample collection rejected.', ['laboratory_order_id' => $order->id, 'errors' => $errors]);
+                throw ValidationException::withMessages($errors);
             }
-            if ($items->contains(fn ($item): bool => ! ($item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id))) {
-                $this->collectionError($order, $actor, 'specimen_type_id', 'Aina ya sampuli haijawekwa kwenye huduma ya kipimo.', $items);
-            }
-            $specimenTypeId = $data['specimen_type_id'] ?? $firstItem->specimen_type_id ?? $firstItem->laboratoryTest?->specimen_type_id;
-            if ($items->contains(function ($item) use ($specimenTypeId): bool {
-                $required = $item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id;
 
-                return (int) $required !== (int) $specimenTypeId;
-            })) {
-                $this->collectionError($order, $actor, 'specimen_type_id', 'Vipimo vilivyochaguliwa vinahitaji specimen tofauti; kusanya kila specimen kivyake.', $items);
+            $samples = collect();
+            $groups = $items->groupBy(fn ($item): int => (int) ($item->specimen_type_id ?? $item->laboratoryTest->specimen_type_id));
+            foreach ($groups as $specimenTypeId => $groupItems) {
+                $firstItem = $groupItems->firstOrFail();
+                $sample = LaboratorySample::query()->create([
+                    'facility_id' => $order->facility_id,
+                    'laboratory_order_id' => $order->id,
+                    'patient_id' => $order->patient_id,
+                    'visit_id' => $order->visit_id,
+                    'sample_number' => $this->numbers->next($order->facility_id),
+                    'barcode_value' => null,
+                    'specimen_type_id' => $specimenTypeId,
+                    'container_type' => $firstItem->laboratoryTest?->specimenType?->container_type ?? $data['container_type'] ?? null,
+                    'collected_by' => $actor->id,
+                    'collected_at' => $data['collected_at'] ?? now(),
+                    'accepted_by' => $accept ? $actor->id : null,
+                    'accepted_at' => $accept ? now() : null,
+                    'collection_location' => $data['collection_location'] ?? null,
+                    'volume_collected' => $data['volume_collected'] ?? null,
+                    'volume_unit' => $data['volume_unit'] ?? null,
+                    'collection_notes' => $data['collection_notes'] ?? null,
+                    'sample_status' => $accept ? LaboratorySampleStatus::Accepted : LaboratorySampleStatus::Collected,
+                    'quality_status' => $accept ? 'acceptable' : null,
+                    'created_by' => $actor->id,
+                ]);
+                $sample->update(['barcode_value' => $sample->sample_number]);
+                $groupItemIds = $groupItems->pluck('id')->all();
+                $this->attachOrderItems($sample, $groupItemIds);
+                $order->items()->whereIn('id', $groupItemIds)->update([
+                    'sample_id' => $sample->id,
+                    'status' => $accept ? 'sample_accepted' : 'sample_collected',
+                ]);
+                $this->audit($actor, $accept ? 'sample_accepted' : 'sample_collected', $sample);
+                $samples->push($sample);
             }
-            $sample = LaboratorySample::query()->create([
-                'facility_id' => $order->facility_id,
-                'laboratory_order_id' => $order->id,
-                'patient_id' => $order->patient_id,
-                'visit_id' => $order->visit_id,
-                'sample_number' => $this->numbers->next($order->facility_id),
-                'barcode_value' => null,
-                'specimen_type_id' => $specimenTypeId,
-                'container_type' => $data['container_type'] ?? $firstItem->laboratoryTest?->specimenType?->container_type,
-                'collected_by' => $actor->id,
-                'collected_at' => $data['collected_at'] ?? now(),
-                'accepted_by' => $accept ? $actor->id : null,
-                'accepted_at' => $accept ? now() : null,
-                'collection_location' => $data['collection_location'] ?? null,
-                'volume_collected' => $data['volume_collected'] ?? null,
-                'volume_unit' => $data['volume_unit'] ?? null,
-                'collection_notes' => $data['collection_notes'] ?? null,
-                'sample_status' => $accept ? LaboratorySampleStatus::Accepted : LaboratorySampleStatus::Collected,
-                'quality_status' => $accept ? 'acceptable' : null,
-                'created_by' => $actor->id,
-            ]);
-            $sample->update(['barcode_value' => $sample->sample_number]);
-            $this->attachOrderItems($sample, $itemIds->all());
-            $order->items()->whereIn('id', $itemIds)->update(['sample_id' => $sample->id, 'status' => $accept ? 'sample_accepted' : 'sample_collected']);
-            $order->update(['status' => $accept ? ClinicalOrderStatus::Processing : ClinicalOrderStatus::SamplePending, 'updated_by' => $actor->id]);
-            $this->audit($actor, $accept ? 'sample_accepted' : 'sample_collected', $sample);
+            $this->orderStatuses->recalculate($order, $actor);
             if ($accept) {
                 $this->auditOrder($actor, 'laboratory_processing_started', $order);
             }
 
-            return $sample->refresh();
+            return $samples->firstOrFail()->refresh();
         });
     }
 
@@ -136,13 +147,23 @@ class LaboratorySampleService
 
     public function acceptSample(LaboratorySample $sample, $actor): LaboratorySample
     {
-        abort_unless($actor->can('laboratory.accept-sample'), 403);
-        $this->paymentGuard->ensureProcessable($sample->order, $actor, 'accept_sample');
-        $sample->update(['sample_status' => LaboratorySampleStatus::Accepted, 'quality_status' => 'acceptable', 'accepted_by' => $actor->id, 'accepted_at' => now(), 'updated_by' => $actor->id]);
-        $this->audit($actor, 'sample_accepted', $sample);
-        $this->auditOrder($actor, 'laboratory_processing_started', $sample->order);
+        return DB::transaction(function () use ($sample, $actor): LaboratorySample {
+            abort_unless($actor->can('laboratory.accept-sample'), 403);
+            $sample = LaboratorySample::query()->with('order')->lockForUpdate()->findOrFail($sample->id);
+            abort_unless(
+                $sample->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(),
+                403,
+                'Sampuli hii ni ya facility nyingine.',
+            );
+            $this->paymentGuard->ensureProcessable($sample->order, $actor, 'accept_sample');
+            $sample->update(['sample_status' => LaboratorySampleStatus::Accepted, 'quality_status' => 'acceptable', 'accepted_by' => $actor->id, 'accepted_at' => now(), 'updated_by' => $actor->id]);
+            $sample->order->items()->where('sample_id', $sample->id)->update(['status' => 'sample_accepted']);
+            $this->orderStatuses->recalculate($sample->order, $actor);
+            $this->audit($actor, 'sample_accepted', $sample);
+            $this->auditOrder($actor, 'laboratory_processing_started', $sample->order);
 
-        return $sample->refresh();
+            return $sample->refresh();
+        });
     }
 
     public function rejectSample(LaboratorySample $sample, LaboratorySampleRejectionReason $reason, string $notes, $actor): LaboratorySample

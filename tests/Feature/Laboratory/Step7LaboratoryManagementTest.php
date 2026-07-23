@@ -169,7 +169,8 @@ class Step7LaboratoryManagementTest extends TestCase
             ->test(LaboratoryQueue::class)
             ->call('openCollect', $order->id)
             ->assertSet('selectedOrder.id', $order->id)
-            ->assertSet('sampleForm.order_item_ids', [$order->items()->firstOrFail()->id])
+            ->assertSet('sampleForm.order_item_ids', [])
+            ->set('sampleForm.order_item_ids', [$order->items()->firstOrFail()->id])
             ->call('collectAndAccept')
             ->assertHasNoErrors()
             ->assertSet('showCollectModal', false)
@@ -193,7 +194,7 @@ class Step7LaboratoryManagementTest extends TestCase
         $this->assertDatabaseCount('laboratory_samples', 1);
     }
 
-    public function test_empty_submitted_item_array_falls_back_to_active_order_items_and_accepts_legacy_status(): void
+    public function test_empty_submitted_item_array_is_rejected(): void
     {
         $admin = $this->bootstrappedFacility();
         $test = $this->configuredTest($admin);
@@ -205,15 +206,12 @@ class Step7LaboratoryManagementTest extends TestCase
         $order->update(['status' => 'ordered', 'payment_status' => 'paid']);
         $order->items()->update(['status' => 'ordered']);
 
-        $sample = app(LaboratorySampleService::class)->collectSample(
-            $order->refresh(),
-            ['order_item_ids' => []],
-            $admin,
-            true,
+        $this->assertCollectionError(
+            fn () => app(LaboratorySampleService::class)->collectSample($order->refresh(), ['order_item_ids' => []], $admin, true),
+            'order_item_ids',
+            'Chagua angalau kipimo kimoja cha kukusanyia sampuli.',
         );
-
-        $this->assertSame('accepted', $sample->sample_status->value);
-        $this->assertSame('sample_accepted', $order->items()->firstOrFail()->status);
+        $this->assertDatabaseCount('laboratory_samples', 0);
     }
 
     public function test_paid_order_with_multiple_items_is_collected_and_order_creation_rejects_empty_selection(): void
@@ -237,7 +235,8 @@ class Step7LaboratoryManagementTest extends TestCase
         $order->update(['status' => 'ordered', 'payment_status' => 'paid']);
         $order->items()->update(['status' => 'ready_for_collection']);
 
-        $sample = app(LaboratorySampleService::class)->collectSample($order->refresh(), ['order_item_ids' => []], $admin, true);
+        $itemIds = $order->items()->pluck('id')->all();
+        $sample = app(LaboratorySampleService::class)->collectSample($order->refresh(), ['order_item_ids' => $itemIds], $admin, true);
 
         $this->assertSame(2, $sample->items()->count());
         $this->assertSame(['sample_accepted'], $order->items()->distinct()->pluck('status')->all());
@@ -252,6 +251,87 @@ class Step7LaboratoryManagementTest extends TestCase
         $this->assertSame($ordersBefore, LaboratoryOrder::query()->count());
     }
 
+    public function test_partial_collection_keeps_sibling_awaiting_and_restores_item_result_entry(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $firstTest = $this->configuredTest($admin);
+        $secondService = $this->service('Platelets', 'PLTTEST', 'laboratory_test', $admin);
+        $secondTest = app(LaboratoryTestService::class)->createTest([
+            'service_id' => $secondService->id,
+            'laboratory_test_category_id' => $firstTest->laboratory_test_category_id,
+            'specimen_type_id' => $firstTest->specimen_type_id,
+            'name' => 'Platelets',
+            'code' => 'PLT',
+            'result_type' => LaboratoryResultType::Numeric,
+        ], $admin);
+        $order = app(LaboratoryOrderService::class)->createOrder(
+            $this->encounter($admin),
+            ['service_ids' => [$firstTest->service_id, $secondTest->service_id]],
+            $admin,
+        );
+        $order->update(['status' => 'ordered', 'payment_status' => 'paid']);
+        $order->items()->update(['status' => 'ready_for_collection']);
+        $firstItem = $order->items()->where('laboratory_test_id', $firstTest->id)->firstOrFail();
+        $secondItem = $order->items()->where('laboratory_test_id', $secondTest->id)->firstOrFail();
+
+        app(LaboratorySampleService::class)->collectSample(
+            $order->refresh(),
+            ['order_item_ids' => [$firstItem->id]],
+            $admin,
+            true,
+        );
+
+        $this->assertSame('sample_accepted', $firstItem->refresh()->status);
+        $this->assertNull($secondItem->refresh()->sample_id);
+        $this->assertSame('ready_for_collection', $secondItem->status);
+        $this->assertSame('processing', $order->refresh()->status->value);
+
+        Livewire::actingAs($admin)->test(LaboratoryQueue::class)
+            ->assertSee($secondTest->name)
+            ->set('tab', 'processing')
+            ->assertSee($firstTest->name)
+            ->assertSee('Ingiza Matokeo');
+
+        Livewire::actingAs($admin)->test(ResultEntry::class, ['laboratoryOrder' => $order->refresh()])
+            ->assertSet('itemId', $firstItem->id)
+            ->assertSee($secondTest->name)
+            ->assertSee('Sampuli haijakusanywa');
+    }
+
+    public function test_incompatible_selected_specimens_are_split_into_separate_samples(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $firstTest = $this->configuredTest($admin);
+        $otherSpecimen = SpecimenType::query()->forCurrentFacility()->whereKeyNot($firstTest->specimen_type_id)->firstOrFail();
+        $secondService = $this->service('Urinalysis', 'URITEST', 'laboratory_test', $admin);
+        $secondTest = app(LaboratoryTestService::class)->createTest([
+            'service_id' => $secondService->id,
+            'laboratory_test_category_id' => $firstTest->laboratory_test_category_id,
+            'specimen_type_id' => $otherSpecimen->id,
+            'name' => 'Urinalysis',
+            'code' => 'URI',
+            'result_type' => LaboratoryResultType::Text,
+        ], $admin);
+        $order = app(LaboratoryOrderService::class)->createOrder(
+            $this->encounter($admin),
+            ['service_ids' => [$firstTest->service_id, $secondTest->service_id]],
+            $admin,
+        );
+        $order->update(['status' => 'ordered', 'payment_status' => 'paid']);
+        $order->items()->update(['status' => 'ready_for_collection']);
+
+        app(LaboratorySampleService::class)->collectSample(
+            $order->refresh(),
+            ['order_item_ids' => $order->items()->pluck('id')->all()],
+            $admin,
+            true,
+        );
+
+        $this->assertCount(2, $order->samples()->get());
+        $this->assertSame(2, $order->items()->distinct()->pluck('sample_id')->count());
+        $this->assertSame(['sample_accepted'], $order->items()->distinct()->pluck('status')->all());
+    }
+
     public function test_itemless_cancelled_mismatched_and_missing_specimen_orders_have_specific_errors(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -261,7 +341,7 @@ class Step7LaboratoryManagementTest extends TestCase
         $itemlessOrder->update(['status' => 'ordered', 'payment_status' => 'paid']);
         $itemlessOrder->items()->firstOrFail()->forceDelete();
         $this->assertCollectionError(
-            fn () => app(LaboratorySampleService::class)->collectSample($itemlessOrder->refresh(), ['order_item_ids' => []], $admin, true),
+            fn () => app(LaboratorySampleService::class)->collectSample($itemlessOrder->refresh(), [], $admin, true),
             'order_item_ids',
             'Order hii haina vipimo vilivyohifadhiwa.',
         );
@@ -290,7 +370,7 @@ class Step7LaboratoryManagementTest extends TestCase
         $test->update(['specimen_type_id' => null]);
         $this->assertCollectionError(
             fn () => app(LaboratorySampleService::class)->collectSample($missingSpecimenOrder->refresh(), [], $admin, true),
-            'specimen_type_id',
+            'order_item_ids.'.$missingSpecimenOrder->items()->firstOrFail()->id,
             'Aina ya sampuli haijawekwa',
         );
     }

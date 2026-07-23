@@ -12,10 +12,17 @@
         <x-card>
             <h3 class="mb-3 font-semibold">Tests</h3>
             @foreach($order->items as $item)
-                <button type="button" wire:key="result-item-{{ $item->id }}" wire:click="selectItem({{ $item->id }})" class="mb-2 block w-full rounded-md p-2 text-left text-sm {{ $itemId === $item->id ? 'bg-primary text-white' : 'bg-slate-100 dark:bg-slate-800' }}">
-                    {{ $item->test_name_snapshot }}
-                    <span class="block text-xs">{{ $item->sample?->sample_number ?? 'No sample' }} · {{ $item->result_status ?? $item->status }}</span>
-                </button>
+                @if($this->eligibleForEntry($item))
+                    <button type="button" wire:key="result-item-{{ $item->id }}" wire:click="selectItem({{ $item->id }})" class="mb-2 block w-full rounded-md p-2 text-left text-sm {{ $itemId === $item->id ? 'bg-primary text-white' : 'bg-slate-100 dark:bg-slate-800' }}">
+                        {{ $item->test_name_snapshot }}
+                        <span class="block text-xs">{{ $item->sample?->sample_number }} · Ingiza Matokeo</span>
+                    </button>
+                @else
+                    <div wire:key="result-item-{{ $item->id }}" class="mb-2 block w-full rounded-md bg-slate-100 p-2 text-left text-sm opacity-60 dark:bg-slate-800">
+                        {{ $item->test_name_snapshot }}
+                        <span class="block text-xs">{{ $item->sample?->sample_number ?? 'Sampuli haijakusanywa' }} · {{ $item->result_status ?? $item->status }}</span>
+                    </div>
+                @endif
             @endforeach
         </x-card>
 
@@ -82,7 +89,7 @@
                     @endif
                 </form>
             @else
-                <p class="text-sm text-slate-500">Test haijasanidiwa.</p>
+                <p class="text-sm text-slate-500">Hakuna kipimo chenye sampuli iliyokubaliwa ambacho kipo tayari kuingiziwa matokeo.</p>
             @endif
         </x-card>
     </div>

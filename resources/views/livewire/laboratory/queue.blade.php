@@ -1,8 +1,8 @@
 <div class="space-y-6" wire:poll.30s.visible>
     <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div class="flex flex-wrap gap-2">
-            @foreach(['awaiting_payment' => 'Awaiting Payment', 'awaiting_sample' => 'Awaiting Sample', 'processing' => 'Processing', 'completed' => 'Completed'] as $key => $label)
-                <button type="button" wire:click="$set('tab', '{{ $key }}')" class="rounded-md px-3 py-2 text-sm {{ $tab === $key ? 'bg-primary text-white' : 'bg-slate-100 dark:bg-slate-800' }}">{{ $label }}</button>
+            @foreach(['awaiting_payment' => 'Awaiting Payment', 'awaiting_sample' => 'Awaiting Sample', 'processing' => 'Processing', 'pending_verification' => 'Pending Verification', 'completed' => 'Completed'] as $key => $label)
+                <button type="button" wire:click="$set('tab', '{{ $key }}')" class="rounded-md px-3 py-2 text-sm {{ $tab === $key ? 'bg-primary text-white' : 'bg-slate-100 dark:bg-slate-800' }}">{{ $label }} <span class="ml-1 opacity-75">{{ $tabCounts[$key] ?? 0 }}</span></button>
             @endforeach
         </div>
         <x-text-input wire:model.live.debounce.300ms="search" placeholder="Tafuta..." />
@@ -14,26 +14,37 @@
                 <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Order</th><th>Patient</th><th>Tests</th><th>Priority</th><th>Payment</th><th>Status</th><th>Ordered</th><th class="text-right">Actions</th></tr></thead>
                 <tbody>
                     @foreach($orders as $order)
-                        <tr wire:key="laboratory-order-{{ $order->id }}" class="border-t border-slate-100 dark:border-slate-800">
+                        @php
+                            $visibleItems = $order->items->filter(fn ($item) => match ($tab) {
+                                'awaiting_sample' => $item->sample_id === null && in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true),
+                                'processing' => $item->sample_id !== null && in_array($item->status, ['sample_collected', 'sample_accepted', 'processing'], true) && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true)),
+                                'pending_verification' => $item->result_status === 'pending_verification',
+                                'completed' => in_array($item->result_status, ['verified', 'released'], true),
+                                default => true,
+                            });
+                        @endphp
+                        @foreach($visibleItems as $item)
+                        <tr wire:key="laboratory-order-item-{{ $tab }}-{{ $item->id }}" class="border-t border-slate-100 dark:border-slate-800">
                             <td class="py-3 font-semibold">{{ $order->order_number }}</td>
                             <td>{{ $order->patient?->fullName() }}<div class="text-xs text-slate-500">{{ $order->patient?->patient_number }}</div></td>
-                            <td>{{ $order->items->pluck('test_name_snapshot')->implode(', ') }}</td>
+                            <td>{{ $item->test_name_snapshot }}<div class="text-xs text-slate-500">{{ $item->laboratoryTest?->specimenType?->name ?? 'Specimen not configured' }}</div></td>
                             <td>{{ $order->priority }}</td>
                             <td>{{ $order->payment_status->value }}</td>
-                            <td>{{ $order->status->value }}</td>
+                            <td>{{ $item->result_status ?? $item->status }}</td>
                             <td>{{ $order->ordered_at?->diffForHumans() }}</td>
                             <td class="text-right">
                                 <a href="{{ route('laboratory.orders.show', $order) }}" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-eye class="h-4 w-4" /></a>
-                                @if(auth()->user()->can('laboratory.collect-sample') && auth()->user()->can('laboratory.accept-sample') && in_array($order->status->value, ['ordered', 'awaiting_payment'], true) && $order->items->every(fn ($item) => $item->sample_id === null))
+                                @if(auth()->user()->can('laboratory.collect-sample') && auth()->user()->can('laboratory.accept-sample') && $item->sample_id === null && in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true))
                                     @if($order->payment_status->value !== 'pending' || auth()->user()->can('laboratory.override-payment'))
-                                        <button type="button" wire:click="openCollect({{ $order->id }})" wire:loading.attr="disabled" wire:target="openCollect({{ $order->id }})" class="rounded-md p-2 hover:bg-slate-100 disabled:opacity-50 dark:hover:bg-slate-800" aria-label="Collect and accept sample"><x-lucide-test-tube class="h-4 w-4" /></button>
+                                        <button type="button" wire:click="openCollect({{ $order->id }}, {{ $item->id }})" wire:loading.attr="disabled" class="rounded-md p-2 hover:bg-slate-100 disabled:opacity-50 dark:hover:bg-slate-800" aria-label="Collect and accept {{ $item->test_name_snapshot }}"><x-lucide-test-tube class="h-4 w-4" /></button>
                                     @endif
                                 @endif
-                                @if(auth()->user()->can('laboratory-results.enter') && $order->items->contains(fn ($item) => $item->sample?->sample_status?->value === 'accepted'))
-                                    <a href="{{ route('laboratory.results.entry', $order) }}" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-clipboard-check class="h-4 w-4" /></a>
+                                @if(auth()->user()->can('laboratory-results.enter') && $item->sample?->sample_status?->value === 'accepted' && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true)))
+                                    <a href="{{ route('laboratory.results.entry', ['laboratoryOrder' => $order, 'item' => $item->id]) }}" class="inline-flex items-center gap-1 rounded-md px-2 py-1 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-clipboard-check class="h-4 w-4" /> Ingiza Matokeo</a>
                                 @endif
                             </td>
                         </tr>
+                        @endforeach
                     @endforeach
                 </tbody>
             </table>
@@ -50,6 +61,27 @@
                 </div>
             @endif
             <p class="text-sm text-slate-500">Sample number itatengenezwa server-side.</p>
+            @if($selectedOrder)
+                <fieldset class="space-y-2">
+                    <legend class="text-sm font-semibold">Chagua vipimo vya sampuli hii</legend>
+                    @foreach($selectedOrder->items as $item)
+                        @php
+                            $disabled = $item->sample_id !== null || ! in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true);
+                        @endphp
+                        <label wire:key="collect-item-{{ $item->id }}" class="flex items-start gap-3 rounded-md border border-slate-200 p-3 dark:border-slate-700 {{ $disabled ? 'opacity-60' : '' }}">
+                            <input type="checkbox" wire:model.live="sampleForm.order_item_ids" value="{{ $item->id }}" @disabled($disabled) class="mt-1 rounded border-slate-300 text-primary">
+                            <span class="text-sm"><span class="font-medium">{{ $item->test_name_snapshot }}</span><span class="block text-xs text-slate-500">{{ $item->laboratoryTest?->specimenType?->name ?? 'Specimen haijasanidiwa' }} · {{ $item->sample_id ? 'Collected' : $item->status }}</span></span>
+                        </label>
+                    @endforeach
+                    <x-input-error :messages="$errors->get('sampleForm.order_item_ids')" />
+                    @php
+                        $selectedSpecimens = $selectedOrder->items->whereIn('id', $sampleForm->order_item_ids)->map(fn ($item) => $item->specimen_type_id ?? $item->laboratoryTest?->specimen_type_id)->filter()->unique();
+                    @endphp
+                    @if($selectedSpecimens->count() > 1)
+                        <p class="rounded-md bg-blue-50 p-2 text-sm text-blue-700">Vipimo vilivyochaguliwa vinahitaji specimen tofauti. Mfumo utatengeneza sampuli tofauti kiotomatiki.</p>
+                    @endif
+                </fieldset>
+            @endif
             <div><x-text-input type="datetime-local" wire:model="sampleForm.collected_at" :class="$errors->has('sampleForm.collected_at') ? 'border-red-500' : ''" /><x-input-error :messages="$errors->get('sampleForm.collected_at')" /></div>
             <div><x-text-input wire:model="sampleForm.volume_collected" placeholder="Volume" :class="$errors->has('sampleForm.volume_collected') ? 'border-red-500' : ''" /><x-input-error :messages="$errors->get('sampleForm.volume_collected')" /></div>
             <x-text-input wire:model="sampleForm.volume_unit" placeholder="Unit" />

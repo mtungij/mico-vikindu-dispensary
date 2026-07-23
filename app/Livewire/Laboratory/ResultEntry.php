@@ -2,6 +2,7 @@
 
 namespace App\Livewire\Laboratory;
 
+use App\Enums\LaboratorySampleStatus;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryOrderItem;
 use App\Services\LaboratoryResultService;
@@ -30,7 +31,17 @@ class ResultEntry extends Component
         Gate::authorize('laboratory-results.enter');
         abort_unless($laboratoryOrder->facility_id === currentFacility()?->id, 404);
         $this->laboratoryOrder = $laboratoryOrder;
-        $firstItemId = $laboratoryOrder->items()->whereNotNull('laboratory_test_id')->value('id');
+        $requestedItemId = request()->integer('item');
+        $firstItemId = $laboratoryOrder->items()
+            ->with('sample')
+            ->whereNotNull('laboratory_test_id')
+            ->get()
+            ->first(fn (LaboratoryOrderItem $item): bool => (! $requestedItemId || $item->id === $requestedItemId) && $this->eligibleForEntry($item))?->id;
+        $firstItemId ??= $laboratoryOrder->items()
+            ->with('sample')
+            ->whereNotNull('laboratory_test_id')
+            ->get()
+            ->first(fn (LaboratoryOrderItem $item): bool => $this->eligibleForEntry($item))?->id;
         if ($firstItemId) {
             $this->selectItem($firstItemId);
         }
@@ -39,6 +50,9 @@ class ResultEntry extends Component
     public function selectItem(int $itemId): void
     {
         $item = $this->laboratoryOrder->items()->with('results.values')->findOrFail($itemId);
+        if (! $this->eligibleForEntry($item->loadMissing('sample'))) {
+            throw ValidationException::withMessages(['item' => 'Kipimo hiki hakipo tayari kuingiziwa matokeo.']);
+        }
         $this->itemId = $item->id;
         $this->values = [];
         $this->comments = null;
@@ -117,5 +131,13 @@ class ResultEntry extends Component
         $query = $this->laboratoryOrder->items()->with(['laboratoryTest.parameters', 'sample']);
 
         return $required ? $query->findOrFail($this->itemId) : $query->find($this->itemId);
+    }
+
+    public function eligibleForEntry(LaboratoryOrderItem $item): bool
+    {
+        return $item->laboratory_test_id !== null
+            && $item->sample?->sample_status === LaboratorySampleStatus::Accepted
+            && in_array($item->status, ['sample_accepted', 'processing'], true)
+            && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true));
     }
 }

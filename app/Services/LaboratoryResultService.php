@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Enums\ClinicalOrderStatus;
 use App\Enums\LaboratoryAbnormalFlag;
 use App\Enums\LaboratoryResultStatus;
 use App\Enums\LaboratoryResultType;
@@ -19,6 +18,7 @@ class LaboratoryResultService
         private readonly LaboratoryReferenceRangeService $ranges,
         private readonly LaboratoryCriticalResultService $criticalResults,
         private readonly LaboratoryPaymentGuard $paymentGuard,
+        private readonly LaboratoryOrderStatusService $orderStatuses,
     ) {}
 
     public function saveForItem(LaboratoryOrderItem $item, array $values, $actor, bool $submit = false): LaboratoryResult
@@ -65,7 +65,7 @@ class LaboratoryResultService
             }
             $result->update(['result_status' => LaboratoryResultStatus::PendingVerification, 'updated_by' => $actor->id]);
             $result->orderItem->update(['result_status' => LaboratoryResultStatus::PendingVerification->value]);
-            $this->advanceOrderAfterSubmission($result->orderItem, $actor);
+            $this->orderStatuses->recalculate($result->orderItem->order, $actor);
             $this->audit($actor, 'result_submitted', $result);
 
             return $result->refresh();
@@ -200,7 +200,7 @@ class LaboratoryResultService
             'result_entered_at' => now(),
         ]);
         if ($submit) {
-            $this->advanceOrderAfterSubmission($result->orderItem, $actor);
+            $this->orderStatuses->recalculate($result->orderItem->order, $actor);
         }
         $this->audit($actor, $submit ? 'result_submitted' : 'result_draft_saved', $result);
 
@@ -222,21 +222,6 @@ class LaboratoryResultService
         if ($allowed !== [] && ! in_array($raw, $allowed, true)) {
             throw ValidationException::withMessages(["values.$key.value" => "Tafadhali chagua thamani halali ya {$parameter->name}."]);
         }
-    }
-
-    private function advanceOrderAfterSubmission(LaboratoryOrderItem $item, $actor): void
-    {
-        $hasOutstandingItems = $item->order->items()
-            ->where('status', '!=', 'cancelled')
-            ->whereNotIn('result_status', [
-                LaboratoryResultStatus::PendingVerification->value,
-                LaboratoryResultStatus::Verified->value,
-                LaboratoryResultStatus::Released->value,
-            ])->exists();
-        $item->order->update([
-            'status' => $hasOutstandingItems ? ClinicalOrderStatus::Processing : ClinicalOrderStatus::ResultReady,
-            'updated_by' => $actor->id,
-        ]);
     }
 
     private function buildValueData(LaboratoryResultType $type, mixed $raw, mixed $parameter, mixed $range, $actor): array

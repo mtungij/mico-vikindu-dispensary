@@ -172,6 +172,12 @@ class LaboratoryPaymentWorkflowTest extends TestCase
             'subject_id' => $order->id,
             'user_id' => $technician->id,
         ]);
+
+        Livewire::actingAs($technician)
+            ->test(LaboratoryQueue::class)
+            ->set('tab', 'processing')
+            ->assertSee($order->order_number)
+            ->assertSee('Ingiza Matokeo');
     }
 
     public function test_unauthorized_users_cannot_confirm_payment_or_collect_samples(): void

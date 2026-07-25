@@ -14,7 +14,10 @@ use Illuminate\Validation\ValidationException;
 
 class ProcedureOrderService
 {
-    public function __construct(private readonly InvoiceService $invoices) {}
+    public function __construct(
+        private readonly InvoiceService $invoices,
+        private readonly VisitClosureService $visitClosure,
+    ) {}
 
     public function createOrder(ClinicalEncounter $encounter, array $data, $actor): ClinicalProcedureOrder
     {
@@ -45,6 +48,7 @@ class ProcedureOrderService
                 'created_by' => $actor->id,
             ]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_order_created', 'subject_type' => $order::class, 'subject_id' => $order->id]);
+
             return $order;
         });
     }
@@ -55,6 +59,52 @@ class ProcedureOrderService
             throw ValidationException::withMessages(['reason' => 'Sababu inahitajika.']);
         }
         $order->update(['status' => ProcedureOrderStatus::Cancelled, 'updated_by' => $actor->id, 'notes' => trim(($order->notes ? $order->notes."\n" : '').'Cancelled: '.$reason)]);
+        $this->finishPatientFacingWorkflowIfTerminal($order, $actor);
+
         return $order->refresh();
+    }
+
+    public function completeOrder(ClinicalProcedureOrder $order, $actor, ?string $notes = null): ClinicalProcedureOrder
+    {
+        return DB::transaction(function () use ($order, $actor, $notes): ClinicalProcedureOrder {
+            $order = ClinicalProcedureOrder::query()->lockForUpdate()->findOrFail($order->id);
+            if (in_array($order->status, [ProcedureOrderStatus::Completed, ProcedureOrderStatus::Cancelled], true)) {
+                throw ValidationException::withMessages(['procedure' => 'Procedure order tayari imefungwa.']);
+            }
+            $order->update([
+                'status' => ProcedureOrderStatus::Completed,
+                'performed_at' => now(),
+                'performed_by' => $actor->id,
+                'notes' => $notes ?? $order->notes,
+                'updated_by' => $actor->id,
+            ]);
+            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_order_completed', 'subject_type' => $order::class, 'subject_id' => $order->id]);
+            $this->finishPatientFacingWorkflowIfTerminal($order, $actor);
+
+            return $order->refresh();
+        });
+    }
+
+    private function finishPatientFacingWorkflowIfTerminal(ClinicalProcedureOrder $order, $actor): void
+    {
+        if (ClinicalProcedureOrder::query()
+            ->where('visit_id', $order->visit_id)
+            ->whereKeyNot($order->id)
+            ->whereIn('status', ['ordered', 'awaiting_payment', 'scheduled', 'in_progress'])
+            ->exists()) {
+            return;
+        }
+
+        $departmentIds = ClinicalProcedureOrder::query()
+            ->where('visit_id', $order->visit_id)
+            ->with('service:id,department_id')
+            ->get()
+            ->pluck('service.department_id')
+            ->filter()
+            ->unique()
+            ->values()
+            ->all();
+        $this->visitClosure->completeQueuesForDepartments($order->visit, $departmentIds, $actor);
+        $this->visitClosure->evaluate($order->visit->refresh(), $actor);
     }
 }

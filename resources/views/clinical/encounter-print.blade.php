@@ -16,7 +16,8 @@
 <div class="box"><h3>Examination</h3><p>{{ $encounter->physical_examination }}</p>@foreach($encounter->examinations as $exam)<p><strong>{{ $exam->examination_system }}:</strong> {{ $exam->findings }}</p>@endforeach</div>
 <div class="box"><h3>Diagnoses</h3><table><tbody>@foreach($encounter->diagnoses as $diagnosis)<tr><td>{{ $diagnosis->icd10_code }}</td><td>{{ $diagnosis->diagnosis_name }}</td><td>{{ $diagnosis->diagnosis_type->value }}</td></tr>@endforeach</tbody></table></div>
 <div class="box"><h3>Orders and Prescriptions</h3><p>Lab orders: {{ $encounter->laboratoryOrders->pluck('order_number')->implode(', ') }}</p><p>Prescriptions: {{ $encounter->prescriptions->pluck('prescription_number')->implode(', ') }}</p><p>Procedures: {{ $encounter->procedureOrders->pluck('procedure_name_snapshot')->implode(', ') }}</p></div>
-<div class="box"><h3>Treatment Plan</h3><p>{{ $encounter->treatment_plan }}</p><p>{{ $encounter->discharge_instructions }}</p></div>
-<div class="row"><div class="box">Provider signature: __________________</div><div class="box">Facility stamp: __________________</div></div>
+<div class="box"><h3>Clinical Summary</h3><p>{{ $encounter->clinical_summary }}</p><p>{{ $encounter->assessment_notes }}</p></div>
+<div class="box"><h3>Treatment Plan</h3><p>{{ $encounter->treatment_plan }}</p><p>{{ $encounter->discharge_instructions }}</p><p><strong>Outcome:</strong> {{ str($encounter->outcome?->value ?? $encounter->outcome)->replace('_', ' ')->title() }}</p></div>
+<div class="row"><div class="box">Provider signature: {{ $encounter->signer?->name ?? '__________________' }}<br>Signed: {{ $encounter->signed_off_at?->format('d/m/Y H:i') ?? '-' }}</div><div class="box">Facility stamp: __________________</div></div>
 </body>
 </html>

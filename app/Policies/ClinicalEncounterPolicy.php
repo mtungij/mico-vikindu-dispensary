@@ -11,11 +11,36 @@ use App\Policies\Concerns\ChecksClinicalAccess;
 class ClinicalEncounterPolicy
 {
     use ChecksClinicalAccess;
-    public function view(User $user, ClinicalEncounter $model): bool { return $this->canEncounter($user, ['clinical-encounters.view', 'opd.consult'], $model); }
-    public function create(User $user): bool { return $user->can('clinical-encounters.create'); }
-    public function update(User $user, ClinicalEncounter $model): bool { return $this->canEncounter($user, in_array($model->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true) ? ['clinical-encounters.amend'] : ['clinical-encounters.update-draft', 'opd.consult'], $model); }
-    public function complete(User $user, ClinicalEncounter $model): bool { return $this->canEncounter($user, ['clinical-encounters.complete', 'opd.complete-consultation'], $model); }
-    public function print(User $user, ClinicalEncounter $model): bool { return $this->can($user, 'clinical-encounters.print', $model); }
+
+    public function view(User $user, ClinicalEncounter $model): bool
+    {
+        return $this->canEncounter($user, ['clinical-encounters.view', 'opd.consult'], $model);
+    }
+
+    public function create(User $user): bool
+    {
+        return $user->can('clinical-encounters.create');
+    }
+
+    public function update(User $user, ClinicalEncounter $model): bool
+    {
+        return $this->canEncounter($user, in_array($model->status, [ClinicalEncounterStatus::SignedOff, ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true) ? ['clinical-encounters.amend'] : ['clinical-encounters.update-draft', 'opd.consult'], $model);
+    }
+
+    public function signOff(User $user, ClinicalEncounter $model): bool
+    {
+        return $this->canEncounter($user, ['clinical-encounters.complete', 'opd.complete-consultation'], $model);
+    }
+
+    public function complete(User $user, ClinicalEncounter $model): bool
+    {
+        return $this->canEncounter($user, ['clinical-encounters.complete', 'opd.complete-consultation'], $model);
+    }
+
+    public function print(User $user, ClinicalEncounter $model): bool
+    {
+        return $this->can($user, 'clinical-encounters.print', $model);
+    }
 
     private function canEncounter(User $user, array $permissions, ClinicalEncounter $model): bool
     {

@@ -24,7 +24,9 @@ use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 use Livewire\Attributes\On;
 use Livewire\Component;
 
@@ -91,7 +93,7 @@ class Consultation extends Component
             return false;
         }
 
-        if (! in_array($visit->visit_status, [VisitStatus::InProgress, VisitStatus::InQueue, VisitStatus::InConsultation, VisitStatus::AwaitingDepartment], true)) {
+        if (! in_array($visit->visit_status, [VisitStatus::InProgress, VisitStatus::InQueue, VisitStatus::InConsultation, VisitStatus::AwaitingDepartment, VisitStatus::AwaitingDoctorReview], true)) {
             return false;
         }
 
@@ -117,10 +119,18 @@ class Consultation extends Component
 
     public function saveDraft(ClinicalEncounterService $service): void
     {
-        Gate::authorize('update', $this->encounter);
-        $this->validate();
-        $this->encounter = $service->saveDraft($this->encounter, $this->form->normalize(), auth()->user());
-        Notifier::success('Draft imehifadhiwa.');
+        $this->resetErrorBag();
+
+        try {
+            Gate::authorize('update', $this->encounter);
+            $this->form->validate();
+            $this->encounter = $service->saveDraft($this->encounter, $this->form->normalize(), auth()->user());
+            Notifier::success('Draft saved successfully.');
+        } catch (ValidationException $exception) {
+            $this->showValidationFailure($exception);
+        } catch (AuthorizationException) {
+            $this->showAuthorizationFailure('You are not authorized to save this consultation draft.');
+        }
     }
 
     public function addComplaint(ClinicalEncounterService $service): void
@@ -219,6 +229,8 @@ class Consultation extends Component
         Gate::authorize('appointments.create');
         $this->appointmentForm->validate();
         $service->createFollowUp($this->encounter, $this->appointmentForm->normalize(), auth()->user());
+        $this->form->follow_up_required = true;
+        $this->form->follow_up_date = Carbon::parse($this->appointmentForm->scheduled_start)->toDateString();
         Notifier::success('Follow-up appointment imeundwa.');
     }
 
@@ -227,22 +239,92 @@ class Consultation extends Component
         Gate::authorize('referrals.create');
         $this->referralForm->validate();
         $service->createReferral($this->encounter, $this->referralForm->normalize(), auth()->user());
+        $this->form->outcome = ClinicalOutcome::Referred->value;
+        $this->encounter->refresh();
         Notifier::success('Referral imeandaliwa.');
     }
 
     public function signOff(ClinicalEncounterService $service): void
     {
-        $this->encounter = $service->signOff($this->encounter, auth()->user());
-        Notifier::success('Encounter imesainiwa.');
+        $this->resetErrorBag();
+
+        try {
+            Gate::authorize('signOff', $this->encounter);
+            $this->form->validate();
+            $this->encounter = $service->signOff($this->encounter, auth()->user(), $this->form->normalize());
+            $this->form->fillFromModel($this->encounter);
+            Notifier::success('Consultation signed off successfully.');
+        } catch (ValidationException $exception) {
+            $this->showValidationFailure($exception);
+        } catch (AuthorizationException) {
+            $this->showAuthorizationFailure('Only an authorized doctor or clinician can sign off this consultation.');
+        }
     }
 
-    public function complete(ClinicalEncounterService $service): mixed
+    public function completeConsultation(ClinicalEncounterService $service): mixed
     {
-        Gate::authorize('complete', $this->encounter);
-        $this->encounter = $service->completeEncounter($this->encounter, auth()->user());
-        Notifier::success('Consultation imekamilishwa.');
+        $this->resetErrorBag();
+
+        try {
+            Gate::authorize('complete', $this->encounter);
+            $this->form->validate();
+            $this->encounter = $service->completeEncounter(
+                $this->encounter,
+                auth()->user(),
+                $this->form->normalize(),
+            );
+        } catch (ValidationException $exception) {
+            $this->showValidationFailure($exception);
+
+            return null;
+        } catch (AuthorizationException) {
+            $this->showAuthorizationFailure('You are not authorized to complete this consultation.');
+
+            return null;
+        }
+
+        $destinations = $service->completionDestinations($this->encounter);
+        $message = 'Consultation completed successfully.';
+        $message .= $destinations === []
+            ? ' Visit completed.'
+            : ' Patient forwarded to '.collect($destinations)->join(', ', ' and ').'.';
+        Notifier::success($message);
 
         return redirect()->route('opd.index');
+    }
+
+    public function printSummary(): mixed
+    {
+        $this->resetErrorBag();
+
+        try {
+            Gate::authorize('print', $this->encounter);
+        } catch (AuthorizationException) {
+            $this->showAuthorizationFailure('You are not authorized to print this consultation summary.');
+
+            return null;
+        }
+
+        Notifier::success('Printable consultation summary prepared.');
+
+        return redirect()->route('clinical-encounters.print', $this->encounter);
+    }
+
+    private function showValidationFailure(ValidationException $exception): void
+    {
+        foreach ($exception->errors() as $field => $messages) {
+            foreach ($messages as $message) {
+                $this->addError($field, $message);
+            }
+        }
+
+        Notifier::error('Please correct the highlighted consultation errors and try again.');
+    }
+
+    private function showAuthorizationFailure(string $message): void
+    {
+        $this->addError('authorization', $message);
+        Notifier::error($message);
     }
 
     public function render(): View

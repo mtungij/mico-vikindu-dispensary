@@ -11,8 +11,15 @@ use Illuminate\Validation\ValidationException;
 
 class PrescriptionService
 {
-    public function __construct(private readonly SequenceNumberService $numbers) {}
-    public function generatePrescriptionNumber(int $facilityId): string { return $this->numbers->next('prescription_number_sequences', $facilityId, 'RX', 6); }
+    public function __construct(
+        private readonly SequenceNumberService $numbers,
+        private readonly VisitClosureService $visitClosure,
+    ) {}
+
+    public function generatePrescriptionNumber(int $facilityId): string
+    {
+        return $this->numbers->next('prescription_number_sequences', $facilityId, 'RX', 6);
+    }
 
     public function createPrescription(ClinicalEncounter $encounter, array $data, $actor): Prescription
     {
@@ -33,6 +40,7 @@ class PrescriptionService
                 $this->addItem($prescription, $item, $actor);
             }
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_created', 'subject_type' => $prescription::class, 'subject_id' => $prescription->id]);
+
             return $prescription->refresh();
         });
     }
@@ -49,6 +57,7 @@ class PrescriptionService
             throw ValidationException::withMessages(['prescription' => 'Prescription si draft.']);
         }
         $prescription->update([...$data, 'updated_by' => $actor->id]);
+
         return $prescription->refresh();
     }
 
@@ -58,6 +67,7 @@ class PrescriptionService
             throw ValidationException::withMessages(['items' => 'Prescription lazima iwe na dawa angalau moja.']);
         }
         $prescription->update(['status' => PrescriptionStatus::Prescribed, 'updated_by' => $actor->id]);
+
         return $prescription->refresh();
     }
 
@@ -68,6 +78,19 @@ class PrescriptionService
         }
         $prescription->update(['status' => PrescriptionStatus::Cancelled, 'cancelled_at' => now(), 'cancellation_reason' => $reason, 'updated_by' => $actor->id]);
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_cancelled', 'subject_type' => $prescription::class, 'subject_id' => $prescription->id]);
+        if (! Prescription::query()
+            ->where('visit_id', $prescription->visit_id)
+            ->whereKeyNot($prescription->id)
+            ->whereIn('status', [
+                PrescriptionStatus::Draft->value,
+                PrescriptionStatus::Prescribed->value,
+                PrescriptionStatus::AwaitingPayment->value,
+                PrescriptionStatus::PartiallyDispensed->value,
+            ])->exists()) {
+            $this->visitClosure->cancelDepartmentQueues($prescription->visit, 'PHA', $actor, $reason);
+        }
+        $this->visitClosure->evaluate($prescription->visit->refresh(), $actor);
+
         return $prescription->refresh();
     }
 }

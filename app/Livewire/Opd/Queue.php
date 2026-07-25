@@ -34,7 +34,7 @@ class Queue extends Component
     {
         $visits = Visit::query()->forCurrentFacility()->with(['patient', 'latestTriageAssessment', 'activeClinicalEncounter', 'invoice'])
             ->whereHas('currentDepartment', fn ($query) => $query->where('code', 'OPD'))
-            ->whereIn('visit_status', [VisitStatus::AwaitingDepartment->value, VisitStatus::InQueue->value, VisitStatus::InProgress->value, VisitStatus::InConsultation->value])
+            ->whereIn('visit_status', [VisitStatus::AwaitingDepartment->value, VisitStatus::InQueue->value, VisitStatus::InProgress->value, VisitStatus::InConsultation->value, VisitStatus::AwaitingDoctorReview->value])
             ->when($this->priority, fn ($q) => $q->where('priority', $this->priority))
             ->when($this->payerType, fn ($q) => $q->where('payer_type', $this->payerType))
             ->when($this->search, fn ($q) => $q->whereHas('patient', fn ($p) => $p->where('first_name', 'like', "%{$this->search}%")->orWhere('last_name', 'like', "%{$this->search}%")->orWhere('patient_number', 'like', "%{$this->search}%")))

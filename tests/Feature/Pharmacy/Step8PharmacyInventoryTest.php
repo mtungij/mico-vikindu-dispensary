@@ -11,7 +11,9 @@ use App\Models\Department;
 use App\Models\Facility;
 use App\Models\Medicine;
 use App\Models\MedicineBatch;
+use App\Models\MedicineUnit;
 use App\Models\Patient;
+use App\Models\PatientQueue;
 use App\Models\Permission;
 use App\Models\Prescription;
 use App\Models\PrescriptionItem;
@@ -24,6 +26,7 @@ use App\Models\User;
 use App\Models\Visit;
 use App\Services\PharmacyBatchAllocationService;
 use App\Services\PharmacyDispensingService;
+use App\Services\PrescriptionService;
 use App\Services\StockReceivingService;
 use Database\Seeders\DepartmentSeeder;
 use Database\Seeders\DosageFormSeeder;
@@ -101,6 +104,8 @@ class Step8PharmacyInventoryTest extends TestCase
         [$medicine, $supplier, $location] = $this->catalog();
         $this->receiveBatch($admin, $medicine, $supplier, $location, 'DSP', today()->addYear()->toDateString(), 20);
         $prescription = $this->prescription($admin, $medicine, 6);
+        $queue = $this->pharmacyQueue($prescription, $admin);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
 
         $dispensing = app(PharmacyDispensingService::class)->dispense($prescription, [[
             'prescription_item_id' => $prescription->items()->first()->id,
@@ -113,6 +118,43 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertDatabaseHas('medicine_batches', ['batch_number' => 'DSP', 'available_quantity' => 14]);
         $this->assertDatabaseHas('stock_movements', ['movement_type' => 'dispensing', 'quantity' => 6]);
         $this->assertDatabaseHas('activity_logs', ['event' => 'medicine_dispensed']);
+        $this->assertSame('completed', $queue->refresh()->queue_status->value);
+        $this->assertSame('completed', $prescription->visit->refresh()->visit_status->value);
+    }
+
+    public function test_partial_dispensing_keeps_pharmacy_queue_and_visit_active(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'PART', today()->addYear()->toDateString(), 20);
+        $prescription = $this->prescription($admin, $medicine, 6);
+        $queue = $this->pharmacyQueue($prescription, $admin);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+
+        app(PharmacyDispensingService::class)->dispense($prescription, [[
+            'prescription_item_id' => $prescription->items()->first()->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 3,
+        ]], $location, $admin);
+
+        $this->assertSame('partially_dispensed', $prescription->refresh()->status->value);
+        $this->assertSame('serving', $queue->refresh()->queue_status->value);
+        $this->assertSame('awaiting_pharmacy', $prescription->visit->refresh()->visit_status->value);
+    }
+
+    public function test_prescription_cancellation_cancels_pharmacy_queue_and_closes_visit(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine] = $this->catalog();
+        $prescription = $this->prescription($admin, $medicine, 6);
+        $queue = $this->pharmacyQueue($prescription, $admin);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+
+        app(PrescriptionService::class)->cancelPrescription($prescription, 'Patient declined medicine', $admin);
+
+        $this->assertSame('cancelled', $prescription->refresh()->status->value);
+        $this->assertSame('cancelled', $queue->refresh()->queue_status->value);
+        $this->assertSame('completed', $prescription->visit->refresh()->visit_status->value);
     }
 
     public function test_expiry_command_marks_expired_batches(): void
@@ -158,7 +200,7 @@ class Step8PharmacyInventoryTest extends TestCase
         $serviceCategory = ServiceCategory::query()->where('facility_id', $facility->id)->where('code', 'PHA')->firstOrFail();
         $service = Service::query()->create(['facility_id' => $facility->id, 'service_category_id' => $serviceCategory->id, 'name' => 'Test Medicine', 'code' => 'TMED', 'service_type' => ServiceType::Medicine, 'requires_payment' => true, 'is_active' => true]);
         ServicePrice::query()->create(['facility_id' => $facility->id, 'service_id' => $service->id, 'payer_type' => 'cash', 'amount' => 100, 'currency' => 'TZS', 'is_active' => true]);
-        $unit = \App\Models\MedicineUnit::query()->where('facility_id', $facility->id)->firstOrFail();
+        $unit = MedicineUnit::query()->where('facility_id', $facility->id)->firstOrFail();
         $medicine = Medicine::query()->create(['facility_id' => $facility->id, 'service_id' => $service->id, 'name' => 'Test Medicine', 'code' => 'TMED', 'purchase_unit_id' => $unit->id, 'dispensing_unit_id' => $unit->id, 'pack_size' => 1, 'purchase_to_dispensing_factor' => 1, 'reorder_level' => 5, 'default_dispensing_price' => 100, 'is_active' => true]);
         $supplier = Supplier::query()->create(['facility_id' => $facility->id, 'name' => 'Test Supplier', 'code' => 'SUP', 'phone_primary' => '0712000000', 'supplier_type' => 'pharmaceutical_wholesaler', 'is_active' => true]);
         $location = StockLocation::query()->where('facility_id', $facility->id)->where('is_receiving_location', true)->where('is_dispensing_location', true)->firstOrFail();
@@ -190,5 +232,30 @@ class Step8PharmacyInventoryTest extends TestCase
         PrescriptionItem::query()->create(['prescription_id' => $prescription->id, 'medicine_id' => $medicine->id, 'service_id' => $medicine->service_id, 'medication_name' => $medicine->name, 'dose' => '1 tab', 'frequency' => 'TDS', 'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => $quantity, 'remaining_quantity' => $quantity, 'status' => 'prescribed', 'created_by' => $admin->id]);
 
         return $prescription->refresh();
+    }
+
+    private function pharmacyQueue(Prescription $prescription, User $admin): PatientQueue
+    {
+        $department = Department::query()->where('facility_id', currentFacility()->id)->where('code', 'PHA')->firstOrFail();
+        $queue = PatientQueue::query()->create([
+            'facility_id' => currentFacility()->id,
+            'visit_id' => $prescription->visit_id,
+            'patient_id' => $prescription->patient_id,
+            'department_id' => $department->id,
+            'queue_number' => 'PHA-TEST-'.fake()->unique()->numerify('###'),
+            'queue_date' => today(),
+            'queue_status' => 'waiting',
+            'priority' => 'normal',
+            'position' => 1,
+            'checked_in_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+        $prescription->visit->update([
+            'visit_status' => 'awaiting_pharmacy',
+            'current_department_id' => $department->id,
+            'current_queue_id' => $queue->id,
+        ]);
+
+        return $queue;
     }
 }

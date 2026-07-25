@@ -19,9 +19,9 @@ class WorkflowService
 {
     public function __construct(private readonly QueueNumberService $numbers) {}
 
-    public function createQueue(Visit $visit, Department $department, $actor, ?VisitStatus $status = null, ?string $reason = null, bool $skipValidation = false): ?PatientQueue
+    public function createQueue(Visit $visit, Department $department, $actor, ?VisitStatus $status = null, ?string $reason = null, bool $skipValidation = false, bool $updateVisitContext = true): ?PatientQueue
     {
-        return DB::transaction(function () use ($visit, $department, $actor, $status, $reason, $skipValidation): ?PatientQueue {
+        return DB::transaction(function () use ($visit, $department, $actor, $status, $reason, $skipValidation, $updateVisitContext): ?PatientQueue {
             $visit = Visit::query()->lockForUpdate()->findOrFail($visit->id);
             $this->assertSameFacility($visit, $department);
             if (! $skipValidation) {
@@ -29,7 +29,9 @@ class WorkflowService
             }
 
             if (! $department->queue_enabled) {
-                $this->movePatient($visit, $department, $status ?? VisitStatus::AwaitingDepartment, $actor, $reason ?? 'Department queue disabled');
+                if ($updateVisitContext) {
+                    $this->movePatient($visit, $department, $status ?? VisitStatus::AwaitingDepartment, $actor, $reason ?? 'Department queue disabled');
+                }
 
                 return null;
             }
@@ -42,8 +44,10 @@ class WorkflowService
                 ->first();
 
             if ($existing) {
-                $this->updateCurrentDepartment($visit, $department, $actor);
-                $this->updateVisitStatus($visit, $status ?? VisitStatus::Waiting, $actor, $existing);
+                if ($updateVisitContext) {
+                    $this->updateCurrentDepartment($visit, $department, $actor);
+                    $this->updateVisitStatus($visit, $status ?? VisitStatus::Waiting, $actor, $existing);
+                }
 
                 return $existing->refresh();
             }
@@ -69,9 +73,11 @@ class WorkflowService
                 'created_by' => $actor->id,
             ]);
 
-            $this->createMovement($visit, $visit->currentDepartment, $department, $reason ?? 'Queue created', $actor, 'queue_created');
-            $this->updateVisitStatus($visit, $status ?? VisitStatus::Waiting, $actor, $queue);
-            $this->updateCurrentDepartment($visit, $department, $actor, $queue);
+            if ($updateVisitContext) {
+                $this->createMovement($visit, $visit->currentDepartment, $department, $reason ?? 'Queue created', $actor, 'queue_created');
+                $this->updateVisitStatus($visit, $status ?? VisitStatus::Waiting, $actor, $queue);
+                $this->updateCurrentDepartment($visit, $department, $actor, $queue);
+            }
             $this->audit($actor, 'workflow_queue_created', $queue, ['visit_id' => $visit->id]);
 
             return $queue->refresh();

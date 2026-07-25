@@ -18,6 +18,7 @@ class LaboratorySampleService
         private readonly LaboratorySampleNumberService $numbers,
         private readonly LaboratoryPaymentGuard $paymentGuard,
         private readonly LaboratoryOrderStatusService $orderStatuses,
+        private readonly VisitClosureService $visitClosure,
     ) {}
 
     public function collectSample(LaboratoryOrder $order, array $data, $actor, bool $accept = false): LaboratorySample
@@ -130,6 +131,12 @@ class LaboratorySampleService
             if ($accept) {
                 $this->auditOrder($actor, 'laboratory_processing_started', $order);
             }
+            if ($accept && $this->visitCollectionIsComplete($order)) {
+                $this->visitClosure->completeDepartmentQueues($order->visit, 'LAB', $actor);
+                $this->visitClosure->evaluate($order->visit->refresh(), $actor);
+            } else {
+                $this->visitClosure->startDepartmentQueues($order->visit, 'LAB', $actor);
+            }
 
             return $samples->firstOrFail()->refresh();
         });
@@ -161,6 +168,10 @@ class LaboratorySampleService
             $this->orderStatuses->recalculate($sample->order, $actor);
             $this->audit($actor, 'sample_accepted', $sample);
             $this->auditOrder($actor, 'laboratory_processing_started', $sample->order);
+            if ($this->visitCollectionIsComplete($sample->order)) {
+                $this->visitClosure->completeDepartmentQueues($sample->order->visit, 'LAB', $actor);
+                $this->visitClosure->evaluate($sample->order->visit->refresh(), $actor);
+            }
 
             return $sample->refresh();
         });
@@ -203,6 +214,17 @@ class LaboratorySampleService
     private function audit($actor, string $event, LaboratorySample $sample): void
     {
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => $event, 'subject_type' => $sample::class, 'subject_id' => $sample->id, 'new_values' => ['facility_id' => $sample->facility_id, 'visit_id' => $sample->visit_id, 'laboratory_order_id' => $sample->laboratory_order_id]]);
+    }
+
+    private function visitCollectionIsComplete(LaboratoryOrder $order): bool
+    {
+        return LaboratoryOrder::query()
+            ->where('visit_id', $order->visit_id)
+            ->whereNotIn('status', ['completed', 'cancelled'])
+            ->whereHas('items', fn ($query) => $query
+                ->whereNull('sample_id')
+                ->whereNotIn('status', ['completed', 'cancelled']))
+            ->doesntExist();
     }
 
     private function auditOrder($actor, string $event, LaboratoryOrder $order): void

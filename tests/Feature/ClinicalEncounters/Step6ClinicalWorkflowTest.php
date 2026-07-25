@@ -9,6 +9,7 @@ use App\Enums\VisitStatus;
 use App\Livewire\Clinical\Icd10Search;
 use App\Livewire\Opd\Consultation as OpdConsultation;
 use App\Livewire\Opd\Queue as OpdQueue;
+use App\Livewire\Pharmacy\Queue as PharmacyQueue;
 use App\Livewire\Triage\Assessment as TriageAssessmentComponent;
 use App\Livewire\Triage\Queue as TriageQueue;
 use App\Models\ClinicalEncounter;
@@ -28,6 +29,7 @@ use App\Models\Patient;
 use App\Models\PatientQueue;
 use App\Models\PaymentMethod;
 use App\Models\Permission;
+use App\Models\Prescription;
 use App\Models\Role;
 use App\Models\Service;
 use App\Models\ServiceCategory;
@@ -41,6 +43,7 @@ use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
 use App\Services\PaymentConfirmationService;
 use App\Services\TriageService;
+use App\Services\VisitClosureService;
 use App\Services\VitalSignAssessmentService;
 use App\Services\WorkflowService;
 use Database\Seeders\DepartmentSeeder;
@@ -223,6 +226,50 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->assertSee('Available Tests')
             ->assertSee('Ordered Laboratory Tests')
             ->assertSee('Full Blood Picture');
+    }
+
+    public function test_duration_inputs_accept_browser_string_values(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('clinical-officer');
+        $visit = $this->opdVisit($admin);
+
+        $component = Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('prescriptionItemForm.medication_name', 'Paracetamol')
+            ->set('prescriptionItemForm.dose', '500 mg')
+            ->set('prescriptionItemForm.frequency', 'TDS')
+            ->set('prescriptionItemForm.duration_value', '3')
+            ->assertSet('prescriptionItemForm.duration_value', '3')
+            ->set('complaintForm.duration_value', '2')
+            ->assertSet('complaintForm.duration_value', '2');
+
+        $this->assertSame(3, $component->instance()->prescriptionItemForm->normalize()['duration_value']);
+        $this->assertSame(2, $component->instance()->complaintForm->normalize()['duration_value']);
+
+        $component->call('addPrescription')->assertHasNoErrors();
+
+        $this->assertDatabaseHas('prescriptions', [
+            'visit_id' => $visit->id,
+            'prescribed_by' => $doctor->id,
+        ]);
+    }
+
+    public function test_treating_clinical_officer_can_print_consultation_summary(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $clinicalOfficer = $this->staffUser('clinical-officer');
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $clinicalOfficer);
+
+        $this->actingAs($clinicalOfficer)
+            ->get(route('clinical-encounters.print', $encounter))
+            ->assertOk();
+
+        Livewire::actingAs($clinicalOfficer)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('printSummary')
+            ->assertRedirect(route('clinical-encounters.print', $encounter));
     }
 
     public function test_opd_displays_released_single_value_with_verification_and_release_metadata(): void
@@ -1055,6 +1102,492 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->assertSame(VisitStatus::Completed, $visit->refresh()->visit_status);
     }
 
+    public function test_opd_consultation_save_draft_validates_only_consultation_draft_fields_and_stays_on_page(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+
+        Livewire::actingAs($doctor)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('form.chief_complaint', 'Intermittent headache')
+            ->call('saveDraft')
+            ->assertHasNoErrors()
+            ->assertNoRedirect();
+
+        $this->assertDatabaseHas('clinical_encounters', [
+            'visit_id' => $visit->id,
+            'chief_complaint' => 'Intermittent headache',
+            'completed_at' => null,
+        ]);
+    }
+
+    public function test_authorized_clinician_can_sign_off_once_and_signer_is_recorded(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $component = Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit]);
+
+        $component->call('signOff')->assertHasErrors(['form.clinical_summary']);
+        $encounter = ClinicalEncounter::query()->where('visit_id', $visit->id)->firstOrFail();
+        $this->assertNull($encounter->signed_off_at);
+
+        app(DiagnosisService::class)->addDiagnosis($encounter, [
+            'diagnosis_type' => 'final',
+            'diagnosis_name' => 'Acute illness',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ], $doctor);
+        $component
+            ->set('form.clinical_summary', 'Patient assessed and clinically stable')
+            ->set('form.outcome', 'discharged_home')
+            ->call('signOff')
+            ->assertHasNoErrors();
+
+        $encounter->refresh();
+        $this->assertSame($doctor->id, $encounter->signed_off_by);
+        $this->assertNotNull($encounter->signed_off_at);
+
+        $component->call('signOff')->assertHasErrors(['signed_off']);
+        $this->assertSame($doctor->id, $encounter->refresh()->signed_off_by);
+    }
+
+    public function test_complete_consultation_saves_pending_changes_records_completer_and_redirects(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $component = Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit]);
+        $encounter = ClinicalEncounter::query()->where('visit_id', $visit->id)->firstOrFail();
+        app(DiagnosisService::class)->addDiagnosis($encounter, [
+            'diagnosis_type' => 'final',
+            'diagnosis_name' => 'Tension headache',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ], $doctor);
+
+        $component
+            ->set('form.clinical_summary', 'Patient is stable for discharge')
+            ->set('form.treatment_plan', 'Hydration and analgesia')
+            ->set('form.outcome', 'discharged_home')
+            ->call('signOff')
+            ->call('completeConsultation')
+            ->assertHasNoErrors()
+            ->assertRedirect(route('opd.index'));
+
+        $encounter->refresh();
+        $this->assertSame('completed', $encounter->status->value);
+        $this->assertSame($doctor->id, $encounter->completed_by);
+        $this->assertNotNull($encounter->completed_at);
+        $this->assertSame('Patient is stable for discharge', $encounter->clinical_summary);
+        $this->assertSame(VisitStatus::Completed, $visit->refresh()->visit_status);
+        $this->assertNotNull($visit->completed_at);
+        $this->assertDatabaseMissing('patient_queues', [
+            'visit_id' => $visit->id,
+            'queue_status' => 'waiting',
+        ]);
+    }
+
+    public function test_complete_consultation_removes_patient_from_active_opd_queue(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        foreach (['waiting', 'called'] as $index => $status) {
+            PatientQueue::query()->create([
+                'facility_id' => currentFacility()->id,
+                'visit_id' => $visit->id,
+                'patient_id' => $visit->patient_id,
+                'department_id' => $encounter->department_id,
+                'queue_number' => 'OPD-ACTIVE-'.$index,
+                'queue_date' => today(),
+                'queue_status' => $status,
+                'priority' => 'normal',
+                'position' => $index + 2,
+                'checked_in_at' => now(),
+                'called_at' => $status === 'called' ? now() : null,
+                'created_by' => $admin->id,
+            ]);
+        }
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $this->assertDatabaseMissing('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $encounter->department_id,
+            'queue_status' => 'serving',
+        ]);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $encounter->department_id,
+            'queue_status' => 'completed',
+        ]);
+        $this->assertSame(0, PatientQueue::query()
+            ->where('visit_id', $visit->id)
+            ->where('department_id', $encounter->department_id)
+            ->whereIn('queue_status', ['waiting', 'called', 'serving'])
+            ->count());
+    }
+
+    public function test_completion_creates_pharmacy_destination_for_prescriptions(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        app(ClinicalEncounterService::class)->addPrescription($encounter, [
+            'items' => [[
+                'medication_name' => 'Paracetamol',
+                'dose' => '500mg',
+                'frequency' => 'TDS',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]],
+        ], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $pharmacy = Department::query()->forCurrentFacility()->where('code', 'PHA')->firstOrFail();
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $pharmacy->id,
+            'queue_status' => 'waiting',
+        ]);
+        $this->assertSame(1, PatientQueue::query()
+            ->where('visit_id', $visit->id)
+            ->where('department_id', $pharmacy->id)
+            ->whereIn('queue_status', ['waiting', 'called', 'serving'])
+            ->count());
+        $prescription = Prescription::query()->where('visit_id', $visit->id)->firstOrFail();
+        $this->assertSame('prescribed', $prescription->status->value);
+        Livewire::actingAs($admin)->test(PharmacyQueue::class)->assertSee($prescription->prescription_number);
+        $this->assertSame(VisitStatus::AwaitingPharmacy, $visit->refresh()->visit_status);
+
+        try {
+            app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+        } catch (ValidationException) {
+            // A completed consultation is immutable; idempotency is asserted by the queue count below.
+        }
+        $this->assertSame(1, PatientQueue::query()
+            ->where('visit_id', $visit->id)
+            ->where('department_id', $pharmacy->id)
+            ->whereIn('queue_status', ['waiting', 'called', 'serving'])
+            ->count());
+    }
+
+    public function test_completion_creates_laboratory_destination_for_laboratory_orders(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $labService = $this->service('Malaria MRDT', 'LAB-COMPLETE', 'laboratory_test', $admin);
+        app(ClinicalEncounterService::class)->addLabOrder($encounter, [
+            'service_ids' => [$labService->id],
+            'clinical_notes' => 'Exclude malaria',
+        ], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $laboratory = Department::query()->forCurrentFacility()->where('code', 'LAB')->firstOrFail();
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $laboratory->id,
+            'queue_status' => 'waiting',
+        ]);
+        $this->assertSame(VisitStatus::AwaitingLab, $visit->refresh()->visit_status);
+    }
+
+    public function test_completion_creates_laboratory_and_pharmacy_queues_in_parallel(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $labService = $this->service('Parallel Malaria Test', 'LAB-PARALLEL', 'laboratory_test', $admin);
+        app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$labService->id]], $admin);
+        app(ClinicalEncounterService::class)->addPrescription($encounter, [
+            'items' => [[
+                'medication_name' => 'Paracetamol',
+                'dose' => '500mg',
+                'frequency' => 'TDS',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]],
+        ], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $queues = PatientQueue::query()
+            ->where('visit_id', $visit->id)
+            ->whereIn('queue_status', ['waiting', 'called', 'serving'])
+            ->whereHas('department', fn ($query) => $query->whereIn('code', ['LAB', 'PHA']))
+            ->with('department')
+            ->get();
+        $this->assertEqualsCanonicalizing(['LAB', 'PHA'], $queues->pluck('department.code')->all());
+        $this->assertSame(VisitStatus::AwaitingLab, $visit->refresh()->visit_status);
+        $this->assertDatabaseMissing('visit_movements', [
+            'visit_id' => $visit->id,
+            'movement_type' => 'queue_created',
+            'reason' => 'Pharmacy destination created after consultation',
+        ]);
+    }
+
+    public function test_parallel_destinations_close_independently_and_visit_closes_last(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $labService = $this->service('Parallel Closure Test', 'LAB-CLOSE', 'laboratory_test', $admin);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$labService->id]], $admin);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, [
+            'items' => [[
+                'medication_name' => 'Paracetamol',
+                'dose' => '500mg',
+                'frequency' => 'TDS',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]],
+        ], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $closure = app(VisitClosureService::class);
+        $order->items()->update(['status' => 'completed']);
+        $order->update(['status' => 'processing']);
+        $closure->completeDepartmentQueues($visit, 'LAB', $admin);
+        $closure->evaluate($visit->refresh(), $admin);
+
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => Department::query()->forCurrentFacility()->where('code', 'PHA')->value('id'),
+            'queue_status' => 'waiting',
+        ]);
+        $this->assertSame(VisitStatus::AwaitingPharmacy, $visit->refresh()->visit_status);
+
+        $prescription->items()->update(['status' => 'dispensed', 'remaining_quantity' => 0]);
+        $prescription->update(['status' => 'dispensed', 'dispensed_at' => now()]);
+        $closure->completeDepartmentQueues($visit, 'PHA', $admin);
+        $closure->evaluate($visit->refresh(), $admin);
+
+        $this->assertSame(VisitStatus::Completed, $visit->refresh()->visit_status);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => Department::query()->forCurrentFacility()->where('code', 'LAB')->value('id'),
+            'queue_status' => 'completed',
+        ]);
+    }
+
+    public function test_missing_required_destination_configuration_rolls_back_completion(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        app(ClinicalEncounterService::class)->addPrescription($encounter, [
+            'items' => [[
+                'medication_name' => 'Paracetamol',
+                'dose' => '500mg',
+                'frequency' => 'TDS',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]],
+        ], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        Department::query()->forCurrentFacility()->where('code', 'PHA')->update(['is_active' => false]);
+
+        try {
+            app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+            $this->fail('Completion succeeded without a configured Pharmacy destination.');
+        } catch (ValidationException $exception) {
+            $this->assertStringContainsString('Pharmacy haijawekwa vizuri', $exception->errors()['destination'][0]);
+        }
+
+        $this->assertSame('signed_off', $encounter->refresh()->status->value);
+        $this->assertNull($encounter->completed_at);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $visit->id,
+            'department_id' => $encounter->department_id,
+            'queue_status' => 'serving',
+        ]);
+    }
+
+    public function test_missing_laboratory_configuration_rolls_back_completion(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $labService = $this->service('Missing Lab Destination Test', 'LAB-MISSING', 'laboratory_test', $admin);
+        app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$labService->id]], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        Department::query()->forCurrentFacility()->where('code', 'LAB')->update(['queue_enabled' => false]);
+
+        try {
+            app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+            $this->fail('Completion succeeded without a configured Laboratory destination.');
+        } catch (ValidationException $exception) {
+            $this->assertStringContainsString('Laboratory haijawekwa vizuri', $exception->errors()['destination'][0]);
+        }
+
+        $this->assertSame('signed_off', $encounter->refresh()->status->value);
+        $this->assertNull($encounter->completed_at);
+    }
+
+    public function test_signed_off_consultation_is_read_only_until_explicit_amendment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $encounter = app(ClinicalEncounterService::class)->startEncounter(
+            $this->opdVisit($admin, VisitStatus::InProgress),
+            $admin,
+        );
+        app(ClinicalEncounterService::class)->saveDraft($encounter, [
+            'clinical_summary' => 'Signed summary',
+            'outcome' => 'discharged_home',
+        ], $admin);
+        app(DiagnosisService::class)->addDiagnosis($encounter->refresh(), [
+            'diagnosis_type' => 'final',
+            'diagnosis_name' => 'Acute illness',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ], $admin);
+        app(ClinicalEncounterService::class)->signOff($encounter->refresh(), $admin);
+
+        $this->expectException(ValidationException::class);
+        app(ClinicalEncounterService::class)->saveDraft(
+            $encounter->refresh(),
+            ['clinical_summary' => 'Silently changed summary'],
+            $admin,
+        );
+    }
+
+    public function test_legacy_repair_fixes_only_unambiguous_records_and_reports_ambiguous_queues(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+        $encounter->update(['status' => 'awaiting_results']);
+
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        PatientQueue::query()->create([
+            'facility_id' => currentFacility()->id,
+            'visit_id' => $visit->id,
+            'patient_id' => $visit->patient_id,
+            'department_id' => $opd->id,
+            'queue_number' => 'OPD-LEGACY-001',
+            'queue_date' => today(),
+            'queue_status' => 'waiting',
+            'priority' => 'normal',
+            'position' => 1,
+            'checked_in_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+        $pharmacy = Department::query()->forCurrentFacility()->where('code', 'PHA')->firstOrFail();
+        foreach (['PHA-AMB-001', 'PHA-AMB-002'] as $number) {
+            PatientQueue::query()->create([
+                'facility_id' => currentFacility()->id,
+                'visit_id' => $visit->id,
+                'patient_id' => $visit->patient_id,
+                'department_id' => $pharmacy->id,
+                'queue_number' => $number,
+                'queue_date' => today(),
+                'queue_status' => 'waiting',
+                'priority' => 'normal',
+                'position' => 1,
+                'checked_in_at' => now(),
+                'created_by' => $admin->id,
+            ]);
+        }
+
+        $this->artisan('workflow:repair-post-consultation')
+            ->expectsOutputToContain('Dry run')
+            ->assertSuccessful();
+        $this->assertSame('awaiting_results', $encounter->refresh()->status->value);
+
+        $this->artisan('workflow:repair-post-consultation', ['--apply' => true])
+            ->expectsOutputToContain('Ambiguous duplicate active queues')
+            ->assertSuccessful();
+
+        $this->assertSame('completed', $encounter->refresh()->status->value);
+        $this->assertDatabaseHas('patient_queues', [
+            'queue_number' => 'OPD-LEGACY-001',
+            'queue_status' => 'completed',
+        ]);
+        $this->assertSame(2, PatientQueue::query()
+            ->whereIn('queue_number', ['PHA-AMB-001', 'PHA-AMB-002'])
+            ->where('queue_status', 'waiting')
+            ->count());
+        $this->assertDatabaseHas('activity_logs', [
+            'event' => 'post_consultation_legacy_repaired',
+            'subject_id' => $encounter->id,
+        ]);
+    }
+
+    public function test_user_without_clinician_completion_permission_cannot_sign_off_or_complete(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $unauthorized = User::factory()->create();
+        StaffProfile::factory()->create([
+            'facility_id' => currentFacility()->id,
+            'user_id' => $unauthorized->id,
+        ]);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter(
+            $this->opdVisit($admin, VisitStatus::InProgress),
+            $admin,
+        );
+
+        $failures = 0;
+        foreach ([
+            fn () => app(ClinicalEncounterService::class)->signOff($encounter, $unauthorized),
+            fn () => app(ClinicalEncounterService::class)->completeEncounter($encounter, $unauthorized),
+        ] as $action) {
+            try {
+                $action();
+            } catch (AuthorizationException) {
+                $failures++;
+            }
+        }
+
+        $this->assertSame(2, $failures);
+        $this->assertNull($encounter->refresh()->signed_off_at);
+        $this->assertNull($encounter->completed_at);
+    }
+
+    public function test_completion_reports_validation_failures_and_does_not_redirect(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        app(DiagnosisService::class)->addDiagnosis($encounter, [
+            'diagnosis_type' => 'final',
+            'diagnosis_name' => 'Acute illness',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ], $admin);
+        $component = Livewire::actingAs($admin)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('form.clinical_summary', 'Stable patient')
+            ->set('form.outcome', 'discharged_home')
+            ->call('completeConsultation')
+            ->assertHasErrors(['signed_off'])
+            ->assertNoRedirect();
+
+        $component->call('signOff')
+            ->set('form.clinical_summary', null)
+            ->set('form.assessment_notes', null)
+            ->set('form.treatment_plan', null)
+            ->call('completeConsultation')
+            ->assertHasErrors(['signed_off'])
+            ->assertNoRedirect();
+
+        $this->assertDatabaseMissing('clinical_encounters', [
+            'visit_id' => $visit->id,
+            'status' => 'completed',
+        ]);
+    }
+
     public function test_two_clinicians_cannot_start_same_department_encounter(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -1124,11 +1657,16 @@ class Step6ClinicalWorkflowTest extends TestCase
     public function test_routes_for_prints_dashboard_and_reports_render(): void
     {
         $admin = $this->bootstrappedFacility();
-        $encounter = app(ClinicalEncounterService::class)->startEncounter($this->visit($admin, VisitStatus::InQueue), $admin);
-        $referral = app(ClinicalEncounterService::class)->createReferral($encounter, ['destination_facility_name' => 'Regional Hospital', 'reason' => 'Review', 'urgency' => 'routine'], $admin);
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
 
         $this->actingAs($admin)->get(route('opd.dashboard'))->assertOk();
         $this->actingAs($admin)->get(route('clinical-encounters.print', $encounter))->assertOk();
+        Livewire::actingAs($admin)
+            ->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('printSummary')
+            ->assertRedirect(route('clinical-encounters.print', $encounter));
+        $referral = app(ClinicalEncounterService::class)->createReferral($encounter, ['destination_facility_name' => 'Regional Hospital', 'reason' => 'Review', 'urgency' => 'routine'], $admin);
         $this->actingAs($admin)->get(route('referrals.print', $referral))->assertOk();
         $this->actingAs($admin)->get(route('reports.triage.export'))->assertOk();
         $this->actingAs($admin)->get(route('reports.opd.export'))->assertOk();
@@ -1159,6 +1697,23 @@ class Step6ClinicalWorkflowTest extends TestCase
         }
 
         return $admin;
+    }
+
+    private function prepareEncounterForCompletion(ClinicalEncounter $encounter, User $actor): void
+    {
+        $service = app(ClinicalEncounterService::class);
+        $service->saveDraft($encounter, [
+            'clinical_summary' => 'Patient is clinically stable',
+            'treatment_plan' => 'Continue ordered care',
+            'outcome' => 'discharged_home',
+        ], $actor);
+        $service->addDiagnosis($encounter->refresh(), [
+            'diagnosis_type' => 'final',
+            'diagnosis_name' => 'Acute illness',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ], $actor);
+        $service->signOff($encounter->refresh(), $actor);
     }
 
     private function staffUser(string $roleName, ?Facility $facility = null): User

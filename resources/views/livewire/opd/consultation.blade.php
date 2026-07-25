@@ -57,6 +57,7 @@
         </aside>
 
         <main class="space-y-6">
+            <fieldset class="contents" @disabled((bool) $encounter->signed_off_at)>
             <div class="flex flex-wrap gap-2">
                 @foreach(['summary' => 'Summary', 'history' => 'History', 'exam' => 'Examination', 'diagnoses' => 'Diagnosis', 'orders' => 'Orders', 'results' => 'Results', 'plan' => 'Plan', 'follow' => 'Follow-up'] as $key => $label)
                     <button type="button" wire:click="$set('activeTab','{{ $key }}')" class="rounded-md px-3 py-2 text-sm font-semibold {{ $activeTab === $key ? 'bg-primary text-white' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200' }}">{{ $label }}</button>
@@ -162,7 +163,7 @@
                         <x-textarea wire:model.live.debounce.2000ms="form.social_history" wire:change="autosave" rows="3" placeholder="Social history" />
                     </div>
                 </x-card>
-                <x-card><h3 class="mb-3 font-semibold">Structured Complaints</h3><div class="grid gap-3 md:grid-cols-2"><x-text-input wire:model="complaintForm.complaint" placeholder="Complaint" /><x-select-input wire:model="complaintForm.severity"><option value="">Severity</option><option value="mild">Mild</option><option value="moderate">Moderate</option><option value="severe">Severe</option></x-select-input><x-text-input wire:model="complaintForm.duration_value" placeholder="Duration" /><x-select-input wire:model="complaintForm.duration_unit"><option value="">Unit</option><option value="hours">Hours</option><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option></x-select-input></div><x-primary-button type="button" wire:click="addComplaint" class="mt-3">Add Complaint</x-primary-button></x-card>
+                <x-card><h3 class="mb-3 font-semibold">Structured Complaints</h3><div class="grid gap-3 md:grid-cols-2"><x-text-input wire:model="complaintForm.complaint" placeholder="Complaint" /><x-select-input wire:model="complaintForm.severity"><option value="">Severity</option><option value="mild">Mild</option><option value="moderate">Moderate</option><option value="severe">Severe</option></x-select-input><x-text-input type="number" min="1" wire:model="complaintForm.duration_value" placeholder="Duration" /><x-select-input wire:model="complaintForm.duration_unit"><option value="">Unit</option><option value="hours">Hours</option><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option></x-select-input></div><x-primary-button type="button" wire:click="addComplaint" class="mt-3">Add Complaint</x-primary-button></x-card>
             @elseif($activeTab === 'exam')
                 <x-card>
                     <h3 class="mb-3 font-semibold">Read-only Triage Vitals</h3>
@@ -227,7 +228,7 @@
                             @endif
                             <x-text-input wire:model="prescriptionItemForm.dose" placeholder="Dose" />
                             <x-text-input wire:model="prescriptionItemForm.frequency" placeholder="Frequency" />
-                            <x-text-input wire:model="prescriptionItemForm.duration_value" placeholder="Duration" />
+                            <x-text-input type="number" min="1" wire:model="prescriptionItemForm.duration_value" placeholder="Duration" />
                             <x-select-input wire:model="prescriptionItemForm.duration_unit"><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option></x-select-input>
                             <x-text-input wire:model="prescriptionItemForm.instructions" placeholder="Instructions" />
                         </div>
@@ -262,13 +263,46 @@
                 <x-card><h3 class="mb-3 font-semibold">Follow-up Appointment</h3><x-input-label value="Review date and time" /><x-text-input type="datetime-local" wire:model="appointmentForm.scheduled_start" /><x-input-label value="Review reason" class="mt-3" /><x-text-input wire:model="appointmentForm.reason" placeholder="Review reason" /><x-primary-button type="button" wire:click="createFollowUp" class="mt-3">Schedule Review</x-primary-button></x-card>
                 <x-card><h3 class="mb-3 font-semibold">Outcome and Disposition</h3><x-select-input wire:model="form.outcome">@foreach($outcomes as $outcome)<option value="{{ $outcome->value }}">{{ str($outcome->value)->replace('_',' ')->title() }}</option>@endforeach</x-select-input><label class="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" wire:model="form.follow_up_required"> Follow-up required</label><x-text-input type="date" wire:model="form.follow_up_date" class="mt-3" /></x-card>
             @endif
+            </fieldset>
         </main>
 
         <aside class="space-y-4">
             <x-card>
                 <h3 class="mb-3 font-semibold">Complete Consultation</h3>
                 <p class="text-sm text-slate-500">Sign off before completing the consultation.</p>
-                <div class="mt-4 flex flex-col gap-2"><x-secondary-button type="button" wire:click="saveDraft">Save Draft</x-secondary-button><x-secondary-button type="button" wire:click="signOff">Sign Off</x-secondary-button><x-primary-button type="button" wire:click="complete">Complete Consultation</x-primary-button><a href="{{ route('clinical-encounters.print', $encounter) }}" class="rounded-md border border-slate-200 px-3 py-2 text-center text-sm dark:border-slate-700">Print Summary</a></div>
+                @if($errors->any())
+                    <div class="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200" role="alert">
+                        <p class="font-semibold">Please correct the following:</p>
+                        <ul class="mt-2 list-disc space-y-1 pl-5">
+                            @foreach($errors->all() as $error)
+                                <li>{{ $error }}</li>
+                            @endforeach
+                        </ul>
+                    </div>
+                @endif
+                @if($encounter->signed_off_at)
+                    <p class="mt-3 text-sm font-medium text-emerald-700 dark:text-emerald-300">
+                        Signed off {{ $encounter->signed_off_at->format('d/m/Y H:i') }}.
+                    </p>
+                @endif
+                <div class="mt-4 flex flex-col gap-2">
+                    <x-secondary-button type="button" wire:click="saveDraft" wire:loading.attr="disabled" wire:target="saveDraft" :disabled="(bool) $encounter->signed_off_at">
+                        <span wire:loading.remove wire:target="saveDraft">Save Draft</span>
+                        <span wire:loading wire:target="saveDraft">Saving Draft...</span>
+                    </x-secondary-button>
+                    <x-secondary-button type="button" wire:click="signOff" wire:loading.attr="disabled" wire:target="signOff" :disabled="(bool) $encounter->signed_off_at">
+                        <span wire:loading.remove wire:target="signOff">{{ $encounter->signed_off_at ? 'Signed Off' : 'Sign Off' }}</span>
+                        <span wire:loading wire:target="signOff">Signing Off...</span>
+                    </x-secondary-button>
+                    <x-primary-button type="button" wire:click="completeConsultation" wire:loading.attr="disabled" wire:target="completeConsultation">
+                        <span wire:loading.remove wire:target="completeConsultation">Complete Consultation</span>
+                        <span wire:loading wire:target="completeConsultation">Completing Consultation...</span>
+                    </x-primary-button>
+                    <x-secondary-button type="button" wire:click="printSummary" wire:loading.attr="disabled" wire:target="printSummary">
+                        <span wire:loading.remove wire:target="printSummary">Print Summary</span>
+                        <span wire:loading wire:target="printSummary">Preparing Summary...</span>
+                    </x-secondary-button>
+                </div>
             </x-card>
 
             <x-card>

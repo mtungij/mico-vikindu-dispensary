@@ -7,7 +7,6 @@ use App\Enums\PrescriptionStatus;
 use App\Enums\StockMovementType;
 use App\Models\ActivityLog;
 use App\Models\Dispensing;
-use App\Models\DispensingItem;
 use App\Models\Medicine;
 use App\Models\Prescription;
 use App\Models\StockLocation;
@@ -21,6 +20,7 @@ class PharmacyDispensingService
         private readonly PharmacyBatchAllocationService $allocator,
         private readonly StockMovementService $movements,
         private readonly PharmacyPricingService $pricing,
+        private readonly VisitClosureService $visitClosure,
     ) {}
 
     public function dispense(Prescription $prescription, array $lines, StockLocation $location, $actor, ?string $overrideReason = null): Dispensing
@@ -51,14 +51,20 @@ class PharmacyDispensingService
                 $medicine = Medicine::query()->where('facility_id', $prescription->facility_id)->findOrFail($line['medicine_id'] ?? $item->medicine_id);
                 $quantity = (float) ($line['quantity'] ?? $item->remaining_quantity ?? $item->quantity ?? 0);
                 $remaining = (float) ($item->remaining_quantity ?? $item->quantity ?? 0);
-                if ($quantity <= 0) continue;
+                if ($quantity <= 0) {
+                    continue;
+                }
                 if ($quantity > $remaining) {
                     throw ValidationException::withMessages(['quantity' => 'Quantity imezidi kiasi kilichobaki.']);
                 }
                 $substitutionFrom = null;
                 if ($item->medicine_id && $item->medicine_id !== $medicine->id) {
-                    if (! $item->substitution_allowed) throw ValidationException::withMessages(['substitution' => 'Substitution hairuhusiwi kwa item hii.']);
-                    if (! $actor->can('pharmacy.substitute-equivalent')) throw ValidationException::withMessages(['substitution' => 'Huna ruhusa ya substitution.']);
+                    if (! $item->substitution_allowed) {
+                        throw ValidationException::withMessages(['substitution' => 'Substitution hairuhusiwi kwa item hii.']);
+                    }
+                    if (! $actor->can('pharmacy.substitute-equivalent')) {
+                        throw ValidationException::withMessages(['substitution' => 'Huna ruhusa ya substitution.']);
+                    }
                     $substitutionFrom = $item->medicine_id;
                     ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'medicine_substituted', 'subject_type' => $item::class, 'subject_id' => $item->id]);
                 }
@@ -84,7 +90,9 @@ class PharmacyDispensingService
                 foreach ($this->allocator->allocateFefo($medicine, $location, (string) $quantity) as $allocation) {
                     $batch = $allocation['batch'];
                     $allocated = (string) $allocation['quantity'];
-                    if (! $dispensingItem->medicine_batch_id) $dispensingItem->update(['medicine_batch_id' => $batch->id]);
+                    if (! $dispensingItem->medicine_batch_id) {
+                        $dispensingItem->update(['medicine_batch_id' => $batch->id]);
+                    }
                     $dispensingItem->allocations()->create(['medicine_batch_id' => $batch->id, 'quantity' => $allocated, 'unit_cost_snapshot' => $batch->unit_cost, 'expiry_date_snapshot' => $batch->expiry_date]);
                     $this->movements->stockOut($batch, StockMovementType::Dispensing, $allocated, $actor, $dispensingItem, 'Medicine dispensed');
                 }
@@ -116,6 +124,25 @@ class PharmacyDispensingService
             $dispensing->update(['status' => $status === PrescriptionStatus::Dispensed ? DispensingStatus::Completed : DispensingStatus::PartiallyDispensed]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => $status === PrescriptionStatus::Dispensed ? 'medicine_dispensed' : 'partial_dispensing_completed', 'subject_type' => $prescription::class, 'subject_id' => $prescription->id]);
 
+            if ($status === PrescriptionStatus::Dispensed) {
+                $otherActivePrescriptions = Prescription::query()
+                    ->where('visit_id', $prescription->visit_id)
+                    ->whereKeyNot($prescription->id)
+                    ->whereIn('status', [
+                        PrescriptionStatus::Draft->value,
+                        PrescriptionStatus::Prescribed->value,
+                        PrescriptionStatus::AwaitingPayment->value,
+                        PrescriptionStatus::PartiallyDispensed->value,
+                    ])
+                    ->exists();
+                if (! $otherActivePrescriptions) {
+                    $this->visitClosure->completeDepartmentQueues($prescription->visit, 'PHA', $actor);
+                }
+            } else {
+                $this->visitClosure->startDepartmentQueues($prescription->visit, 'PHA', $actor);
+            }
+            $this->visitClosure->evaluate($prescription->visit->refresh(), $actor);
+
             return $dispensing->refresh();
         });
     }
@@ -123,9 +150,13 @@ class PharmacyDispensingService
     public function reverseDispensing(Dispensing $dispensing, $actor, string $reason): Dispensing
     {
         return DB::transaction(function () use ($dispensing, $actor, $reason) {
-            if (blank($reason)) throw ValidationException::withMessages(['reason' => 'Sababu inahitajika.']);
+            if (blank($reason)) {
+                throw ValidationException::withMessages(['reason' => 'Sababu inahitajika.']);
+            }
             $dispensing = Dispensing::query()->with('items.allocations.batch')->lockForUpdate()->findOrFail($dispensing->id);
-            if ($dispensing->status === DispensingStatus::Reversed) throw ValidationException::withMessages(['dispensing' => 'Dispensing tayari imereversed.']);
+            if ($dispensing->status === DispensingStatus::Reversed) {
+                throw ValidationException::withMessages(['dispensing' => 'Dispensing tayari imereversed.']);
+            }
             foreach ($dispensing->items as $item) {
                 foreach ($item->allocations as $allocation) {
                     $this->movements->stockIn($allocation->batch, StockMovementType::CancellationReversal, (string) $allocation->quantity, $actor, $dispensing, $reason);
@@ -136,13 +167,16 @@ class PharmacyDispensingService
             }
             $dispensing->update(['status' => DispensingStatus::Reversed, 'updated_by' => $actor->id]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'dispensing_reversed', 'subject_type' => $dispensing::class, 'subject_id' => $dispensing->id]);
+
             return $dispensing->refresh();
         });
     }
 
     private function validatePrescription(Prescription $prescription, $actor, ?string $overrideReason): void
     {
-        if ($prescription->facility_id !== currentFacility()?->id) abort(404);
+        if ($prescription->facility_id !== currentFacility()?->id) {
+            abort(404);
+        }
         if (! in_array($prescription->status, [PrescriptionStatus::Prescribed, PrescriptionStatus::AwaitingPayment, PrescriptionStatus::PartiallyDispensed], true)) {
             throw ValidationException::withMessages(['prescription' => 'Prescription haiwezi kudispense kwenye status hii.']);
         }

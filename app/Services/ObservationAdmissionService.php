@@ -18,7 +18,7 @@ use Illuminate\Validation\ValidationException;
 
 class ObservationAdmissionService
 {
-    public function __construct(private readonly ObservationAdmissionNumberService $numbers, private readonly BedManagementService $beds, private readonly ObservationBillingService $billing) {}
+    public function __construct(private readonly ObservationAdmissionNumberService $numbers, private readonly BedManagementService $beds, private readonly ObservationBillingService $billing, private readonly VisitClosureService $visitClosure) {}
     public function admit(Patient $patient, Visit $visit, array $data, $actor): ObservationAdmission
     {
         return DB::transaction(function () use ($patient, $visit, $data, $actor): ObservationAdmission {
@@ -37,6 +37,8 @@ class ObservationAdmissionService
             $this->createInitialMovement($admission, $actor);
             if (! empty($data['service_id'])) $this->billing->createAdmissionCharges($admission, Service::query()->where('facility_id', currentFacility()->id)->find($data['service_id']), $actor);
             ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'observation_admitted','subject_type'=>$admission::class,'subject_id'=>$admission->id]);
+            if ($bed) $this->visitClosure->completeDepartmentQueues($visit, 'BED', $actor);
+            $this->visitClosure->evaluate($visit->refresh(), $actor);
             return $admission->refresh();
         });
     }
@@ -44,5 +46,5 @@ class ObservationAdmissionService
     public function validatePayment(Visit $visit, $actor, ?string $reason): void { $invoice = $visit->invoice; if (($visit->payer_type?->value ?? $visit->payer_type) === 'cash' && $invoice && $invoice->balance_amount > 0 && ! $actor->can('observation.override-payment')) throw ValidationException::withMessages(['payment'=>'Malipo hayajakamilika.']); if (($visit->payer_type?->value ?? $visit->payer_type) === 'cash' && $invoice && $invoice->balance_amount > 0 && $actor->can('observation.override-payment') && blank($reason)) throw ValidationException::withMessages(['override_reason'=>'Sababu ya override inahitajika.']); if ($reason) ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'payment_override_used','subject_type'=>$visit::class,'subject_id'=>$visit->id]); }
     public function createInitialMovement(ObservationAdmission $admission, $actor): void { VisitMovement::query()->create(['facility_id'=>$admission->facility_id,'visit_id'=>$admission->visit_id,'patient_id'=>$admission->patient_id,'from_department_id'=>$admission->visit->current_department_id,'to_department_id'=>$admission->visit->current_department_id,'movement_type'=>'observation_admission','status'=>'completed','reason'=>$admission->reason_for_admission,'moved_by'=>$actor->id,'moved_at'=>now()]); }
     public function updateStatus(ObservationAdmission $a, string $status, $actor): ObservationAdmission { $a->update(['status'=>$status,'updated_by'=>$actor->id]); return $a->refresh(); }
-    public function cancelAdmission(ObservationAdmission $a, $actor, string $reason): ObservationAdmission { if (! $a->isActive()) throw ValidationException::withMessages(['admission'=>'Admission haiwezi kufutwa.']); $a->update(['status'=>ObservationAdmissionStatus::Cancelled,'notes'=>trim(($a->notes ? $a->notes."\n" : '').'Cancelled: '.$reason),'updated_by'=>$actor->id]); ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'observation_cancelled','subject_type'=>$a::class,'subject_id'=>$a->id]); return $a->refresh(); }
+    public function cancelAdmission(ObservationAdmission $a, $actor, string $reason): ObservationAdmission { if (! $a->isActive()) throw ValidationException::withMessages(['admission'=>'Admission haiwezi kufutwa.']); $a->update(['status'=>ObservationAdmissionStatus::Cancelled,'notes'=>trim(($a->notes ? $a->notes."\n" : '').'Cancelled: '.$reason),'updated_by'=>$actor->id]); ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'observation_cancelled','subject_type'=>$a::class,'subject_id'=>$a->id]); $this->visitClosure->cancelDepartmentQueues($a->visit, 'BED', $actor, $reason); $this->visitClosure->evaluate($a->visit->refresh(), $actor); return $a->refresh(); }
 }

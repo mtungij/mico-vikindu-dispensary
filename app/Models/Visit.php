@@ -35,4 +35,5 @@ class Visit extends Model
     public function latestTriageAssessment(): HasOne { return $this->hasOne(TriageAssessment::class)->latestOfMany(); }
     public function clinicalEncounters(): HasMany { return $this->hasMany(ClinicalEncounter::class); }
     public function activeClinicalEncounter(): HasOne { return $this->hasOne(ClinicalEncounter::class)->whereNotIn('status', ['completed', 'cancelled', 'referred'])->latestOfMany(); }
+    public function observationAdmissions(): HasMany { return $this->hasMany(ObservationAdmission::class); }
 }

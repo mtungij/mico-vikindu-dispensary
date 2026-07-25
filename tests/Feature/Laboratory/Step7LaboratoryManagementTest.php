@@ -16,6 +16,7 @@ use App\Models\LaboratoryReferenceRange;
 use App\Models\LaboratoryTest;
 use App\Models\LaboratoryTestCategory;
 use App\Models\Patient;
+use App\Models\PatientQueue;
 use App\Models\Permission;
 use App\Models\Service;
 use App\Models\ServiceCategory;
@@ -25,6 +26,9 @@ use App\Models\StaffProfile;
 use App\Models\StaffSignature;
 use App\Models\User;
 use App\Models\Visit;
+use App\Models\WorkflowSetting;
+use App\Services\ClinicalEncounterService;
+use App\Services\DiagnosisService;
 use App\Services\LaboratoryOrderService;
 use App\Services\LaboratoryResultReleaseService;
 use App\Services\LaboratoryResultService;
@@ -82,10 +86,37 @@ class Step7LaboratoryManagementTest extends TestCase
     {
         $admin = $this->bootstrappedFacility();
         $test = $this->configuredTest($admin);
-        $order = app(LaboratoryOrderService::class)->createOrder($this->encounter($admin), [
+        $encounter = $this->encounter($admin);
+        $order = app(LaboratoryOrderService::class)->createOrder($encounter, [
             'service_ids' => [$test->service_id],
             'clinical_notes' => 'Rule out severe anaemia',
         ], $admin);
+        $encounter->update([
+            'status' => 'completed',
+            'signed_off_by' => $admin->id,
+            'signed_off_at' => now(),
+            'completed_by' => $admin->id,
+            'completed_at' => now(),
+        ]);
+        $laboratory = Department::query()->forCurrentFacility()->where('code', 'LAB')->firstOrFail();
+        $queue = PatientQueue::query()->create([
+            'facility_id' => currentFacility()->id,
+            'visit_id' => $order->visit_id,
+            'patient_id' => $order->patient_id,
+            'department_id' => $laboratory->id,
+            'queue_number' => 'LAB-TEST-001',
+            'queue_date' => today(),
+            'queue_status' => 'waiting',
+            'priority' => 'normal',
+            'position' => 1,
+            'checked_in_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+        $order->visit->update([
+            'visit_status' => 'awaiting_lab',
+            'current_department_id' => $laboratory->id,
+            'current_queue_id' => $queue->id,
+        ]);
 
         $item = $order->items()->firstOrFail();
         $this->assertSame($test->id, $item->laboratory_test_id);
@@ -98,6 +129,9 @@ class Step7LaboratoryManagementTest extends TestCase
 
         $this->assertStringStartsWith('SMP-', $sample->sample_number);
         $this->assertSame('accepted', $sample->sample_status->value);
+        $this->assertSame('completed', $queue->refresh()->queue_status->value);
+        $this->assertSame('processing', $order->refresh()->status->value);
+        $this->assertSame('completed', $order->visit->refresh()->visit_status->value);
 
         $resultService = app(LaboratoryResultService::class);
         $result = $resultService->createDraft($item->refresh(), $admin);
@@ -135,6 +169,8 @@ class Step7LaboratoryManagementTest extends TestCase
 
         $this->assertSame('released', $released->result_status->value);
         $this->assertSame('completed', $order->refresh()->status->value);
+        $this->assertSame('completed', $encounter->refresh()->status->value);
+        $this->assertNotNull($encounter->completed_at);
         $this->assertDatabaseHas('activity_logs', ['event' => 'result_verified', 'subject_id' => $result->id]);
         $this->assertDatabaseHas('activity_logs', ['event' => 'result_released', 'subject_id' => $result->id]);
 
@@ -151,6 +187,74 @@ class Step7LaboratoryManagementTest extends TestCase
 
         $this->expectException(ValidationException::class);
         app(LaboratoryResultService::class)->createDraft($order->items()->first()->refresh(), $admin);
+    }
+
+    public function test_required_laboratory_review_creates_new_opd_review_encounter_without_reopening_original(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $test = $this->configuredTest($admin);
+        $original = $this->encounter($admin);
+        $order = app(LaboratoryOrderService::class)->createOrder($original, [
+            'service_ids' => [$test->service_id],
+        ], $admin);
+        $original->update([
+            'status' => 'completed',
+            'clinical_summary' => 'Original completed consultation',
+            'outcome' => 'discharged_home',
+            'signed_off_by' => $admin->id,
+            'signed_off_at' => now(),
+            'completed_by' => $admin->id,
+            'completed_at' => now(),
+        ]);
+        WorkflowSetting::query()->create([
+            'facility_id' => currentFacility()->id,
+            'key' => 'require_doctor_review_after_laboratory',
+            'value' => [true],
+            'type' => 'boolean',
+            'group' => 'workflow',
+            'updated_by' => $admin->id,
+        ]);
+
+        app(LaboratorySampleService::class)->collectSample($order, [], $admin, true);
+        $this->assertSame('awaiting_results', $order->visit->refresh()->visit_status->value);
+
+        $item = $order->items()->firstOrFail();
+        $parameter = $test->parameters()->firstOrFail();
+        $result = app(LaboratoryResultService::class)->createDraft($item->refresh(), $admin);
+        $result = app(LaboratoryResultService::class)->saveValues($result, [
+            (string) $parameter->id => ['value' => 13.5],
+        ], $admin, true);
+        $verified = app(LaboratoryResultVerificationService::class)->verify($result, $admin);
+        $released = app(LaboratoryResultReleaseService::class)->release($verified, $admin);
+
+        $this->assertSame('completed', $original->refresh()->status->value);
+        $this->assertNotNull($original->completed_at);
+        $this->assertSame('awaiting_doctor_review', $order->visit->refresh()->visit_status->value);
+        $this->assertDatabaseHas('patient_queues', [
+            'visit_id' => $order->visit_id,
+            'department_id' => Department::query()->forCurrentFacility()->where('code', 'OPD')->value('id'),
+            'queue_status' => 'waiting',
+        ]);
+
+        $review = app(ClinicalEncounterService::class)->startEncounter($order->visit->refresh(), $admin);
+        $this->assertSame($original->id, $review->parent_encounter_id);
+        $this->assertSame('follow_up', $review->encounter_type->value);
+        app(ClinicalEncounterService::class)->saveDraft($review, [
+            'clinical_summary' => 'Laboratory result reviewed with patient',
+            'outcome' => 'discharged_home',
+        ], $admin);
+        app(DiagnosisService::class)->addDiagnosis($review->refresh(), [
+            'diagnosis_type' => 'final',
+            'diagnosis_name' => 'Laboratory review',
+            'certainty' => 'confirmed',
+            'is_primary' => true,
+        ], $admin);
+        app(ClinicalEncounterService::class)->signOff($review->refresh(), $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($review->refresh(), $admin);
+
+        $this->assertNotNull($released->refresh()->reviewed_at);
+        $this->assertSame('completed', $order->visit->refresh()->visit_status->value);
+        $this->assertSame('completed', $original->refresh()->status->value);
     }
 
     public function test_collect_and_accept_is_atomic_and_cannot_be_repeated(): void

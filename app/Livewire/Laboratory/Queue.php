@@ -5,6 +5,7 @@ namespace App\Livewire\Laboratory;
 use App\Livewire\Forms\LaboratorySampleCollectionForm;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryOrderItem;
+use App\Services\LaboratoryReportService;
 use App\Services\LaboratorySampleService;
 use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -91,7 +92,7 @@ class Queue extends Component
         }
     }
 
-    public function render(): View
+    public function render(LaboratoryReportService $reports): View
     {
         $processablePayments = ['paid', 'covered', 'waived', 'not_required'];
         $canOverridePayment = auth()->user()->can('laboratory.override-payment');
@@ -119,6 +120,13 @@ class Queue extends Component
             'completed' => (clone $items)->whereIn('result_status', ['verified', 'released'])->count(),
         ];
 
-        return view('livewire.laboratory.queue', ['orders' => $orders, 'tabCounts' => $tabCounts])->layout('components.layouts.app', ['title' => 'Foleni ya Maabara', 'description' => 'Orders, sample collection na result workflow.']);
+        $reportEligibility = $orders->getCollection()
+            ->mapWithKeys(fn (LaboratoryOrder $order): array => [$order->id => $reports->isEligible($order)]);
+
+        return view('livewire.laboratory.queue', [
+            'orders' => $orders,
+            'tabCounts' => $tabCounts,
+            'reportEligibility' => $reportEligibility,
+        ])->layout('components.layouts.app', ['title' => 'Foleni ya Maabara', 'description' => 'Orders, sample collection na result workflow.']);
     }
 }

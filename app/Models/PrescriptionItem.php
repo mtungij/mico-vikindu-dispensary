@@ -12,9 +12,34 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class PrescriptionItem extends Model
 {
     use HasFactory, SoftDeletes;
-    protected function casts(): array { return ['substitution_allowed' => 'boolean', 'quantity' => 'decimal:2', 'dispensed_quantity' => 'decimal:3', 'remaining_quantity' => 'decimal:3', 'unit_price_snapshot' => 'decimal:2', 'patient_amount' => 'decimal:2', 'insurance_amount' => 'decimal:2', 'payer_amount' => 'decimal:2']; }
-    public function prescription(): BelongsTo { return $this->belongsTo(Prescription::class); }
-    public function medicine(): BelongsTo { return $this->belongsTo(Medicine::class); }
-    public function substitutionMedicine(): BelongsTo { return $this->belongsTo(Medicine::class, 'substitution_medicine_id'); }
-    public function invoiceItem(): BelongsTo { return $this->belongsTo(InvoiceItem::class); }
+
+    protected function casts(): array
+    {
+        return ['substitution_allowed' => 'boolean', 'quantity' => 'decimal:2', 'dispensed_quantity' => 'decimal:3', 'remaining_quantity' => 'decimal:3', 'unit_price_snapshot' => 'decimal:2', 'patient_amount' => 'decimal:2', 'insurance_amount' => 'decimal:2', 'payer_amount' => 'decimal:2'];
+    }
+
+    public function prescription(): BelongsTo
+    {
+        return $this->belongsTo(Prescription::class);
+    }
+
+    public function medicine(): BelongsTo
+    {
+        return $this->belongsTo(Medicine::class);
+    }
+
+    public function substitutionMedicine(): BelongsTo
+    {
+        return $this->belongsTo(Medicine::class, 'substitution_medicine_id');
+    }
+
+    public function service(): BelongsTo
+    {
+        return $this->belongsTo(Service::class);
+    }
+
+    public function invoiceItem(): BelongsTo
+    {
+        return $this->belongsTo(InvoiceItem::class);
+    }
 }

@@ -132,7 +132,6 @@ class LaboratorySampleService
                 $this->auditOrder($actor, 'laboratory_processing_started', $order);
             }
             if ($accept && $this->visitCollectionIsComplete($order)) {
-                $this->visitClosure->completeDepartmentQueues($order->visit, 'LAB', $actor);
                 $this->visitClosure->evaluate($order->visit->refresh(), $actor);
             } else {
                 $this->visitClosure->startDepartmentQueues($order->visit, 'LAB', $actor);
@@ -169,7 +168,6 @@ class LaboratorySampleService
             $this->audit($actor, 'sample_accepted', $sample);
             $this->auditOrder($actor, 'laboratory_processing_started', $sample->order);
             if ($this->visitCollectionIsComplete($sample->order)) {
-                $this->visitClosure->completeDepartmentQueues($sample->order->visit, 'LAB', $actor);
                 $this->visitClosure->evaluate($sample->order->visit->refresh(), $actor);
             }
 

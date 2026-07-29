@@ -24,7 +24,11 @@ class ClinicalEncounterPolicy
 
     public function update(User $user, ClinicalEncounter $model): bool
     {
-        return $this->canEncounter($user, in_array($model->status, [ClinicalEncounterStatus::SignedOff, ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true) ? ['clinical-encounters.amend'] : ['clinical-encounters.update-draft', 'opd.consult'], $model);
+        if ($model->completed_at || in_array($model->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true)) {
+            return false;
+        }
+
+        return $this->canEncounter($user, ['clinical-encounters.update-draft', 'opd.consult'], $model);
     }
 
     public function signOff(User $user, ClinicalEncounter $model): bool

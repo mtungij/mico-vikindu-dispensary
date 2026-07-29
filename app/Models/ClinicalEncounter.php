@@ -13,7 +13,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-    #[Fillable(['facility_id', 'patient_id', 'visit_id', 'department_id', 'parent_encounter_id', 'encounter_type', 'encounter_number', 'provider_user_id', 'started_at', 'completed_by', 'completed_at', 'status', 'chief_complaint', 'history_of_presenting_illness', 'past_medical_history', 'surgical_history', 'medication_history', 'allergy_history', 'family_history', 'social_history', 'obstetric_history', 'gynecological_history', 'review_of_systems', 'physical_examination', 'clinical_summary', 'assessment_notes', 'treatment_plan', 'discharge_instructions', 'follow_up_required', 'follow_up_date', 'outcome', 'signed_off_by', 'signed_off_at', 'amendment_reason', 'created_by', 'updated_by'])]
+#[Fillable(['facility_id', 'patient_id', 'visit_id', 'department_id', 'parent_encounter_id', 'encounter_type', 'encounter_number', 'provider_user_id', 'started_at', 'completed_by', 'completed_at', 'status', 'chief_complaint', 'history_of_presenting_illness', 'past_medical_history', 'surgical_history', 'medication_history', 'allergy_history', 'family_history', 'social_history', 'obstetric_history', 'gynecological_history', 'review_of_systems', 'physical_examination', 'clinical_summary', 'assessment_notes', 'treatment_plan', 'discharge_instructions', 'follow_up_required', 'follow_up_date', 'outcome', 'signed_off_by', 'signed_off_at', 'signed_content_hash', 'amendment_reason', 'created_by', 'updated_by'])]
 class ClinicalEncounter extends Model
 {
     use HasFactory, SoftDeletes;

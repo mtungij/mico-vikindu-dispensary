@@ -14,6 +14,9 @@ class LaboratoryResultVerificationService
     {
         return DB::transaction(function () use ($result, $actor) {
             $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
+            if (in_array($result->result_status, [LaboratoryResultStatus::Verified, LaboratoryResultStatus::Released], true)) {
+                return $result->refresh();
+            }
             if ($result->result_status !== LaboratoryResultStatus::PendingVerification) {
                 throw ValidationException::withMessages(['result' => 'Result haipo kwenye verification queue.']);
             }
@@ -26,6 +29,7 @@ class LaboratoryResultVerificationService
             $result->update(['result_status' => LaboratoryResultStatus::Verified, 'verified_by' => $actor->id, 'verified_at' => now(), 'updated_by' => $actor->id]);
             $result->orderItem->update(['result_status' => 'verified', 'result_verified_at' => now()]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_verified', 'subject_type' => $result::class, 'subject_id' => $result->id]);
+
             return $result->refresh();
         });
     }
@@ -37,6 +41,7 @@ class LaboratoryResultVerificationService
         }
         $result->update(['result_status' => LaboratoryResultStatus::Draft, 'comments' => trim(($result->comments ? $result->comments."\n" : '').'Returned: '.$reason), 'updated_by' => $actor->id]);
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_returned_for_correction', 'subject_type' => $result::class, 'subject_id' => $result->id]);
+
         return $result->refresh();
     }
 }

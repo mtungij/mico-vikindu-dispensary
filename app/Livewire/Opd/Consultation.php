@@ -14,6 +14,7 @@ use App\Livewire\Forms\PrescriptionItemForm;
 use App\Livewire\Forms\ProcedureOrderForm;
 use App\Livewire\Forms\ReferralForm;
 use App\Models\ClinicalEncounter;
+use App\Models\Department;
 use App\Models\LaboratoryTest;
 use App\Models\Medicine;
 use App\Models\PatientQueue;
@@ -93,7 +94,25 @@ class Consultation extends Component
             return false;
         }
 
-        if (! in_array($visit->visit_status, [VisitStatus::InProgress, VisitStatus::InQueue, VisitStatus::InConsultation, VisitStatus::AwaitingDepartment, VisitStatus::AwaitingDoctorReview], true)) {
+        $openStatuses = [
+            VisitStatus::InProgress,
+            VisitStatus::InQueue,
+            VisitStatus::InConsultation,
+            VisitStatus::AwaitingDepartment,
+            VisitStatus::AwaitingDoctorReview,
+        ];
+        $laboratoryInterruptionStatuses = [
+            VisitStatus::AwaitingPayment,
+            VisitStatus::AwaitingLab,
+            VisitStatus::AwaitingSample,
+            VisitStatus::Processing,
+            VisitStatus::AwaitingVerification,
+            VisitStatus::ResultsReady,
+            VisitStatus::AwaitingResults,
+        ];
+        if (! in_array($visit->visit_status, $openStatuses, true)
+            && (! $visit->activeClinicalEncounter
+                || ! in_array($visit->visit_status, $laboratoryInterruptionStatuses, true))) {
             return false;
         }
 
@@ -175,6 +194,13 @@ class Consultation extends Component
     public function updatedDiagnosisFormDiagnosisName(): void
     {
         $this->icd10Selected = false;
+    }
+
+    public function updatedFormOutcome(?string $outcome): void
+    {
+        if ($outcome === ClinicalOutcome::FollowUp->value) {
+            $this->form->follow_up_required = true;
+        }
     }
 
     public function addLabOrder(ClinicalEncounterService $service): void
@@ -271,9 +297,15 @@ class Consultation extends Component
             $this->encounter = $service->completeEncounter(
                 $this->encounter,
                 auth()->user(),
-                $this->form->normalize(),
+                [
+                    ...$this->form->normalize(),
+                    'follow_up_scheduled_start' => $this->appointmentForm->scheduled_start,
+                    'follow_up_reason' => $this->appointmentForm->reason,
+                    'follow_up_department_id' => $this->appointmentForm->department_id,
+                ],
             );
         } catch (ValidationException $exception) {
+            $this->encounter = $this->encounter->refresh();
             $this->showValidationFailure($exception);
 
             return null;
@@ -284,10 +316,15 @@ class Consultation extends Component
         }
 
         $destinations = $service->completionDestinations($this->encounter);
-        $message = 'Consultation completed successfully.';
-        $message .= $destinations === []
-            ? ' Visit completed.'
-            : ' Patient forwarded to '.collect($destinations)->join(', ', ' and ').'.';
+        $message = match ($this->encounter->outcome) {
+            ClinicalOutcome::AdmittedBedRest => 'Consultation completed. Patient forwarded for admission.',
+            ClinicalOutcome::Observation => 'Consultation completed. Patient forwarded to Observation.',
+            ClinicalOutcome::Referred => 'Consultation completed. Referral recorded successfully.',
+            ClinicalOutcome::FollowUp => 'Consultation completed. Follow-up scheduled successfully.',
+            default => $destinations === []
+                ? 'Consultation completed. Visit completed.'
+                : 'Consultation completed. Patient forwarded to '.collect($destinations)->join(', ', ' and ').'.',
+        };
         Notifier::success($message);
 
         return redirect()->route('opd.index');
@@ -373,7 +410,7 @@ class Consultation extends Component
             'labServices' => Service::query()->forCurrentFacility()->where('service_type', 'laboratory_test')->where('is_active', true)->get(),
             'procedureServices' => Service::query()->forCurrentFacility()->where('service_type', 'procedure')->where('is_active', true)->get(),
             'medicines' => Medicine::query()->forCurrentFacility()->with(['generic', 'dosageForm', 'route'])->where('is_active', true)->orderBy('name')->get(),
-            'outcomes' => ClinicalOutcome::cases(),
+            'admissionConfigured' => Department::query()->forCurrentFacility()->where('code', 'BED')->where('is_active', true)->where('can_receive_patients', true)->where('queue_enabled', true)->exists(),
             'canViewLaboratoryResults' => $canViewLaboratoryResults,
         ])->layout('components.layouts.app', ['title' => 'OPD Consultation', 'description' => $this->visit->patient->fullName().' - '.$this->visit->visit_number]);
     }

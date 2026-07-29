@@ -383,8 +383,11 @@ Route::middleware(['auth', 'active.user'])->group(function (): void {
         Route::get('laboratory/dashboard', LaboratoryDashboard::class)->middleware('permission:laboratory.view-dashboard')->name('laboratory.dashboard');
         Route::get('laboratory/orders/{laboratoryOrder}', LaboratoryOrderShow::class)->middleware('permission:laboratory.view-order')->name('laboratory.orders.show');
         Route::get('laboratory/orders/{laboratoryOrder}/results', LaboratoryResultEntry::class)->middleware('permission:laboratory-results.enter')->name('laboratory.results.entry');
-        Route::get('laboratory/orders/{laboratoryOrder}/report', LaboratoryOrderReportController::class)->middleware('permission:laboratory-results.print')->name('laboratory.orders.report');
-        Route::get('laboratory/results/{laboratoryResult}/verify', LaboratoryVerifyResult::class)->middleware('permission:laboratory-results.verify')->name('laboratory.results.verify');
+        Route::get('laboratory/orders/{laboratoryOrder}/report', [LaboratoryOrderReportController::class, 'view'])->middleware('permission:laboratory-results.view')->name('laboratory.orders.report');
+        Route::get('laboratory/orders/{laboratoryOrder}/report/view', [LaboratoryOrderReportController::class, 'view'])->middleware('permission:laboratory-results.view')->name('laboratory.orders.report.view');
+        Route::get('laboratory/orders/{laboratoryOrder}/report/download', [LaboratoryOrderReportController::class, 'download'])->middleware('permission:laboratory-results.download')->name('laboratory.orders.report.download');
+        Route::get('laboratory/orders/{laboratoryOrder}/report/print', [LaboratoryOrderReportController::class, 'print'])->middleware('permission:laboratory-results.print')->name('laboratory.orders.report.print');
+        Route::get('laboratory/results/{laboratoryResult}/verify', LaboratoryVerifyResult::class)->middleware('permission:laboratory-results.verify|laboratory-results.release')->name('laboratory.results.verify');
         Route::get('laboratory/results/{laboratoryResult}/print', LaboratoryResultPrintController::class)->middleware('permission:laboratory-results.print')->name('laboratory.results.print');
         Route::get('laboratory/critical-results', LaboratoryCriticalResults::class)->middleware('permission:laboratory-critical-results.view')->name('laboratory.critical-results');
         Route::get('clinical/laboratory-results', ClinicalLaboratoryResults::class)->middleware('permission:laboratory-results.view')->name('clinical.laboratory-results');

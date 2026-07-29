@@ -57,6 +57,11 @@ class LaboratoryResult extends Model
         return $this->belongsTo(User::class, 'verified_by');
     }
 
+    public function enterer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'entered_by');
+    }
+
     public function releaser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'released_by');

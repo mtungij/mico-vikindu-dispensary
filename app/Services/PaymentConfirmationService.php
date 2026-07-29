@@ -94,11 +94,11 @@ class PaymentConfirmationService
                 'cashier_session_id' => $payment->cashier_session_id,
             ]);
 
+            $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);
             if ((float) $invoice->balance_amount === 0.0 && $invoice->payment_status === 'paid') {
                 LaboratoryPaymentConfirmed::dispatch($invoice->refresh(), $actor);
+                app(PrescriptionBillingService::class)->releasePaidInvoice($invoice->refresh(), $actor);
             }
-
-            $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);
 
             return $payment->refresh();
         });

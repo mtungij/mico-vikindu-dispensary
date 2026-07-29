@@ -4,6 +4,7 @@ namespace Tests\Feature\Patients;
 
 use App\Enums\FacilityType;
 use App\Enums\OwnershipType;
+use App\Enums\PayerType;
 use App\Livewire\Patients\Index as PatientsIndex;
 use App\Livewire\Reception\Index as ReceptionIndex;
 use App\Livewire\Services\Categories\Index as ServiceCategoriesIndex;
@@ -11,13 +12,15 @@ use App\Models\Department;
 use App\Models\Facility;
 use App\Models\FacilitySetting;
 use App\Models\InsuranceProvider;
+use App\Models\LaboratoryOrder;
+use App\Models\LaboratoryTest;
+use App\Models\LaboratoryTestCategory;
 use App\Models\Patient;
-use App\Models\PatientDocument;
-use App\Models\Role;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
 use App\Models\User;
+use App\Services\PatientDocumentService;
 use App\Services\PatientDuplicateDetectionService;
 use App\Services\ReceptionChargeService;
 use App\Services\ReceptionWorkflowService;
@@ -34,6 +37,8 @@ use Database\Seeders\ServiceSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -66,7 +71,7 @@ class Step5FoundationTest extends TestCase
         $pricing->createPriceVersion($service, ['payer_type' => 'cash', 'amount' => 5000, 'currency' => 'TZS'], $admin);
         $pricing->createPriceVersion($service, ['payer_type' => 'cash', 'amount' => 7000, 'currency' => 'TZS'], $admin);
 
-        $this->assertSame('7000.00', $pricing->getCurrentPrice($service, \App\Enums\PayerType::Cash)->amount);
+        $this->assertSame('7000.00', $pricing->getCurrentPrice($service, PayerType::Cash)->amount);
         $this->assertSame(3, ServicePrice::query()->where('service_id', $service->id)->count());
     }
 
@@ -103,6 +108,76 @@ class Step5FoundationTest extends TestCase
         $this->assertNotNull($result['queue']);
     }
 
+    public function test_direct_laboratory_registration_requires_a_test_and_creates_no_opd_work(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $laboratory = Department::query()->where('code', 'LAB')->firstOrFail();
+        $laboratory->update(['queue_enabled' => true, 'requires_consultation' => false, 'requires_triage' => false]);
+        [$service] = $this->directLaboratoryTest($admin, $laboratory, 7500);
+
+        $data = [
+            'visit_type' => 'new_patient',
+            'payer_type' => 'cash',
+            'destination_department_id' => $laboratory->id,
+            'consultation_service_id' => null,
+            'priority' => 'normal',
+            'source' => 'walk_in',
+            'registration_idempotency_key' => (string) Str::uuid(),
+            'require_payment_before_service' => true,
+        ];
+
+        try {
+            app(ReceptionWorkflowService::class)->registerNewPatientAndVisit([
+                'first_name' => 'No',
+                'last_name' => 'Test',
+                'gender' => 'female',
+                'age_years' => 20,
+                'patient_status' => 'active',
+            ], ['payer_type' => 'cash', 'is_primary' => true], $data, [], $admin);
+            $this->fail('Direct laboratory registration continued without a test.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('selectedLaboratoryTestIds', $exception->errors());
+        }
+
+        $result = app(ReceptionWorkflowService::class)->registerNewPatientAndVisit([
+            'first_name' => 'Direct',
+            'last_name' => 'Laboratory',
+            'gender' => 'female',
+            'age_years' => 20,
+            'patient_status' => 'active',
+        ], ['payer_type' => 'cash', 'is_primary' => true], [
+            ...$data,
+            'registration_idempotency_key' => (string) Str::uuid(),
+        ], [$service->id], $admin);
+
+        $this->assertSame('reception_direct', $result['laboratoryOrder']->source);
+        $this->assertNull($result['laboratoryOrder']->clinical_encounter_id);
+        $this->assertSame('awaiting_payment', $result['visit']->visit_status->value);
+        $this->assertDatabaseCount('clinical_encounters', 0);
+        $this->assertDatabaseMissing('patient_queues', ['visit_id' => $result['visit']->id, 'department_id' => Department::query()->where('code', 'OPD')->value('id')]);
+        $this->assertDatabaseHas('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $service->id, 'item_type' => 'laboratory_test']);
+    }
+
+    public function test_direct_laboratory_registration_is_idempotent(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $laboratory = Department::query()->where('code', 'LAB')->firstOrFail();
+        $laboratory->update(['queue_enabled' => true, 'requires_consultation' => false, 'requires_triage' => false]);
+        [$service] = $this->directLaboratoryTest($admin, $laboratory, 0);
+        $key = (string) Str::uuid();
+        $patient = ['first_name' => 'Double', 'last_name' => 'Click', 'gender' => 'male', 'age_years' => 40, 'patient_status' => 'active'];
+        $payer = ['payer_type' => 'cash', 'is_primary' => true];
+        $visit = ['visit_type' => 'new_patient', 'payer_type' => 'cash', 'destination_department_id' => $laboratory->id, 'consultation_service_id' => null, 'priority' => 'normal', 'source' => 'walk_in', 'registration_idempotency_key' => $key, 'require_payment_before_service' => true];
+
+        $first = app(ReceptionWorkflowService::class)->registerNewPatientAndVisit($patient, $payer, $visit, [$service->id], $admin);
+        $second = app(ReceptionWorkflowService::class)->registerNewPatientAndVisit($patient, $payer, $visit, [$service->id], $admin);
+
+        $this->assertSame($first['visit']->id, $second['visit']->id);
+        $this->assertSame(1, LaboratoryOrder::query()->where('visit_id', $first['visit']->id)->count());
+        $this->assertSame(1, $first['invoice']->items()->where('service_id', $service->id)->count());
+        $this->assertSame(1, $first['visit']->queues()->where('department_id', $laboratory->id)->count());
+    }
+
     public function test_duplicate_detection_finds_exact_phone_match(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -128,7 +203,7 @@ class Step5FoundationTest extends TestCase
         Storage::fake('local');
         $admin = $this->bootstrappedFacility();
         $patient = $this->patient($admin);
-        $document = app(\App\Services\PatientDocumentService::class)->store($patient, UploadedFile::fake()->create('nida.pdf', 10, 'application/pdf'), ['document_type' => 'nida', 'document_name' => 'NIDA'], $admin);
+        $document = app(PatientDocumentService::class)->store($patient, UploadedFile::fake()->create('nida.pdf', 10, 'application/pdf'), ['document_type' => 'nida', 'document_name' => 'NIDA'], $admin);
 
         Storage::disk('local')->assertExists($document->file_path);
         $this->actingAs($admin)->get(route('patients.documents.download', [$patient, $document]))->assertOk();
@@ -191,7 +266,7 @@ class Step5FoundationTest extends TestCase
         try {
             $this->registerPatient($admin, $department, $consultation, 'cash');
             $this->fail('Missing service price should block registration.');
-        } catch (\Illuminate\Validation\ValidationException $exception) {
+        } catch (ValidationException $exception) {
             $this->assertStringContainsString('bado haijawekewa bei', collect($exception->errors())->flatten()->first());
         }
 
@@ -332,5 +407,42 @@ class Step5FoundationTest extends TestCase
             ...$this->visitData($department, $consultation),
             'payer_type' => $payerType,
         ], [], $admin);
+    }
+
+    private function directLaboratoryTest(User $admin, Department $department, float $amount): array
+    {
+        $category = ServiceCategory::query()->where('category_type', 'laboratory')->firstOrFail();
+        $service = Service::query()->create([
+            'facility_id' => currentFacility()->id,
+            'service_category_id' => $category->id,
+            'department_id' => $department->id,
+            'name' => 'Direct CBC '.$amount,
+            'code' => 'DLAB'.(int) $amount,
+            'service_type' => 'laboratory_test',
+            'requires_payment' => true,
+            'allows_walk_in' => true,
+            'is_active' => true,
+            'created_by' => $admin->id,
+        ]);
+        $testCategory = LaboratoryTestCategory::query()->create([
+            'facility_id' => currentFacility()->id,
+            'name' => 'Direct Tests',
+            'code' => 'DIRECT',
+            'is_active' => true,
+            'created_by' => $admin->id,
+        ]);
+        $test = LaboratoryTest::query()->create([
+            'facility_id' => currentFacility()->id,
+            'service_id' => $service->id,
+            'laboratory_test_category_id' => $testCategory->id,
+            'name' => $service->name,
+            'code' => $service->code,
+            'result_type' => 'numeric',
+            'is_active' => true,
+            'created_by' => $admin->id,
+        ]);
+        app(ServicePricingService::class)->createPriceVersion($service, ['payer_type' => 'cash', 'amount' => $amount, 'currency' => 'TZS'], $admin);
+
+        return [$service, $test];
     }
 }

@@ -22,11 +22,6 @@
         $statusValue = fn ($status) => $status instanceof \BackedEnum ? $status->value : (string) ($status ?? '');
         $statusLabel = fn ($status) => str($statusValue($status))->replace('_', ' ')->title();
         $badge = fn ($status) => $statusTone[$statusValue($status)] ?? 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200';
-        $laboratoryStatusLabel = fn ($status) => match ($statusValue($status)) {
-            'pending_verification' => 'Awaiting Verification',
-            'sample_pending', 'sample_collected', 'sample_accepted', 'processing', 'draft', 'entered', 'result_ready' => 'In Processing',
-            default => $statusLabel($status),
-        };
         $labServiceIdsWithTests = $labTests->pluck('service_id')->filter()->all();
         $catalogueOnlyServices = $labServices->whereNotIn('id', $labServiceIdsWithTests);
     @endphp
@@ -261,15 +256,134 @@
                 <x-card><h3 class="mb-3 font-semibold">Doctor Plan</h3><x-textarea wire:model.live.debounce.2000ms="form.clinical_summary" wire:change="autosave" rows="4" placeholder="Doctor notes / clinical summary" /><x-input-error :messages="$errors->get('form.clinical_summary')" class="mt-2" /><x-textarea wire:model.live.debounce.2000ms="form.assessment_notes" wire:change="autosave" rows="4" class="mt-3" placeholder="Assessment notes" /><x-textarea wire:model.live.debounce.2000ms="form.treatment_plan" wire:change="autosave" rows="5" class="mt-3" placeholder="Treatment plan" /><x-textarea wire:model.live.debounce.2000ms="form.discharge_instructions" wire:change="autosave" rows="3" class="mt-3" placeholder="Advice / discharge instructions" /></x-card>
             @elseif($activeTab === 'follow')
                 <x-card><h3 class="mb-3 font-semibold">Follow-up Appointment</h3><x-input-label value="Review date and time" /><x-text-input type="datetime-local" wire:model="appointmentForm.scheduled_start" /><x-input-label value="Review reason" class="mt-3" /><x-text-input wire:model="appointmentForm.reason" placeholder="Review reason" /><x-primary-button type="button" wire:click="createFollowUp" class="mt-3">Schedule Review</x-primary-button></x-card>
-                <x-card><h3 class="mb-3 font-semibold">Outcome and Disposition</h3><x-select-input wire:model="form.outcome">@foreach($outcomes as $outcome)<option value="{{ $outcome->value }}">{{ str($outcome->value)->replace('_',' ')->title() }}</option>@endforeach</x-select-input><label class="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" wire:model="form.follow_up_required"> Follow-up required</label><x-text-input type="date" wire:model="form.follow_up_date" class="mt-3" /></x-card>
+                <x-card><h3 class="mb-3 font-semibold">Follow-up Requirements</h3><label class="flex items-center gap-2 text-sm"><input type="checkbox" wire:model.live="form.follow_up_required"> Follow-up required</label><x-text-input type="date" wire:model.live="form.follow_up_date" class="mt-3" /></x-card>
             @endif
             </fieldset>
         </main>
 
         <aside class="space-y-4">
+            @php
+                $activePrescriptionStatuses = ['draft', 'prescribed', 'awaiting_payment', 'partially_dispensed'];
+                $activeProcedureStatuses = ['ordered', 'awaiting_payment', 'scheduled', 'in_progress'];
+                $activePrescriptions = $encounter->prescriptions->filter(fn ($prescription) => in_array($statusValue($prescription->status), $activePrescriptionStatuses, true));
+                $activeMedicineCount = $activePrescriptions->sum(fn ($prescription) => $prescription->items->count());
+                $allMedicineCount = $encounter->prescriptions->sum(fn ($prescription) => $prescription->items->count());
+                $laboratoryItems = $encounter->laboratoryOrders->flatMap->items;
+                $activeLaboratoryItems = $laboratoryItems->filter(fn ($item) => ! $item->sample_id
+                    && ! in_array($statusValue($item->result_status), ['verified', 'released', 'cancelled', 'entered_in_error'], true)
+                    && ! in_array($statusValue($item->status), ['completed', 'cancelled'], true));
+                $activeLaboratoryCount = $activeLaboratoryItems->count();
+                $activeProcedures = $encounter->procedureOrders->filter(fn ($procedure) => in_array($statusValue($procedure->status), $activeProcedureStatuses, true));
+                $activeProcedureCount = $activeProcedures->count();
+                $hasClinicalContent = filled($form->clinical_summary)
+                    || filled($form->assessment_notes)
+                    || filled($form->treatment_plan)
+                    || $encounter->diagnoses->where('status', '!=', \App\Enums\DiagnosisStatus::EnteredInError)->isNotEmpty()
+                    || $encounter->prescriptions->where('status', '!=', \App\Enums\PrescriptionStatus::Cancelled)->isNotEmpty()
+                    || $encounter->laboratoryOrders->where('status', '!=', \App\Enums\ClinicalOrderStatus::Cancelled)->isNotEmpty()
+                    || $encounter->procedureOrders->where('status', '!=', \App\Enums\ProcedureOrderStatus::Cancelled)->isNotEmpty();
+                $completionMissing = [];
+                if (blank($form->outcome) || $form->outcome === \App\Enums\ClinicalOutcome::Ongoing->value) {
+                    $completionMissing[] = 'Select a final consultation outcome.';
+                }
+                if (! $hasClinicalContent) {
+                    $completionMissing[] = 'Add a diagnosis, treatment plan, prescription, laboratory order, or clinical summary before completing.';
+                }
+                if ($form->follow_up_required && $form->outcome !== \App\Enums\ClinicalOutcome::FollowUp->value && blank($form->follow_up_date)) {
+                    $completionMissing[] = 'Select a follow-up date.';
+                }
+                if ($form->outcome === \App\Enums\ClinicalOutcome::Referred->value && $encounter->referrals->isEmpty()) {
+                    $completionMissing[] = 'Add referral details.';
+                }
+                $isAdmissionOutcome = in_array($form->outcome, [
+                    \App\Enums\ClinicalOutcome::AdmittedBedRest->value,
+                    \App\Enums\ClinicalOutcome::Observation->value,
+                ], true);
+                if ($isAdmissionOutcome && ! $admissionConfigured) {
+                    $completionMissing[] = 'Select an admission destination.';
+                }
+                $hasFollowUpAppointment = $encounter->appointments->isNotEmpty();
+                if ($form->outcome === \App\Enums\ClinicalOutcome::FollowUp->value && ! $hasFollowUpAppointment) {
+                    if (blank($form->follow_up_date) && blank($appointmentForm->scheduled_start)) {
+                        $completionMissing[] = 'Add a follow-up date.';
+                    }
+                    if (blank($appointmentForm->reason)) {
+                        $completionMissing[] = 'Add a follow-up reason.';
+                    }
+                    if (blank($appointmentForm->department_id)) {
+                        $completionMissing[] = 'Select a follow-up clinic or department.';
+                    }
+                }
+                $prescriptionStatusLabel = fn ($status) => match ($statusValue($status)) {
+                    'draft' => 'Ready to send to Pharmacy',
+                    'prescribed', 'awaiting_payment' => 'Sent to Pharmacy',
+                    'partially_dispensed' => 'Partially Dispensed',
+                    'dispensed' => 'Dispensed',
+                    'cancelled' => 'Cancelled',
+                    default => $statusLabel($status),
+                };
+                $procedureStatusLabel = fn ($status) => match ($statusValue($status)) {
+                    'ordered', 'awaiting_payment', 'scheduled' => 'Awaiting Procedure',
+                    'in_progress' => 'In Progress',
+                    'completed' => 'Completed',
+                    'cancelled' => 'Cancelled',
+                    default => $statusLabel($status),
+                };
+                $laboratoryItemStatusLabel = function ($item) use ($statusValue, $statusLabel) {
+                    $resultStatus = $statusValue($item->result_status);
+                    return match (true) {
+                        $resultStatus === 'released' => 'Released',
+                        $resultStatus === 'verified' => 'Verified',
+                        $resultStatus === 'pending_verification' => 'Awaiting Verification',
+                        in_array($resultStatus, ['draft', 'entered'], true) => 'Processing',
+                        ! $item->sample_id => 'Awaiting Sample Collection',
+                        $statusValue($item->status) === 'completed' => 'Completed',
+                        default => $statusLabel($item->status),
+                    };
+                };
+            @endphp
             <x-card>
                 <h3 class="mb-3 font-semibold">Complete Consultation</h3>
-                <p class="text-sm text-slate-500">Sign off before completing the consultation.</p>
+                <x-input-label for="final-consultation-outcome" value="Final Consultation Outcome" />
+                <x-select-input id="final-consultation-outcome" wire:model.live="form.outcome" class="mt-1 w-full" :disabled="(bool) $encounter->signed_off_at">
+                    <option value="ongoing">Select final outcome</option>
+                    <option value="discharged_home">Discharge</option>
+                    <option value="referred">Refer</option>
+                    <option value="admitted_bed_rest">Admit</option>
+                    <option value="observation">Observation</option>
+                    <option value="follow_up">Follow-up</option>
+                </x-select-input>
+                <x-input-error :messages="$errors->get('form.outcome')" class="mt-2" />
+
+                @if($form->outcome === \App\Enums\ClinicalOutcome::FollowUp->value && ! $hasFollowUpAppointment)
+                    <div class="mt-3 space-y-2">
+                        <x-input-label for="completion-follow-up-date" value="Follow-up Date" />
+                        <x-text-input id="completion-follow-up-date" type="date" wire:model.live="form.follow_up_date" class="w-full" />
+                        <x-input-label for="completion-follow-up-reason" value="Follow-up Reason" />
+                        <x-text-input id="completion-follow-up-reason" wire:model.live="appointmentForm.reason" class="w-full" placeholder="Reason for review" />
+                        <p class="text-xs text-slate-500">Clinic: {{ $encounter->department?->name ?? 'Current OPD clinic' }}</p>
+                    </div>
+                @endif
+
+                <div class="mt-4 rounded-md bg-slate-50 p-3 text-sm dark:bg-slate-900/60">
+                    <p class="font-semibold">Next Destinations</p>
+                    <div class="mt-2 grid gap-2">
+                        <div><p class="font-medium">Pharmacy</p><p class="text-xs text-slate-500">{{ $activeMedicineCount > 0 ? $activeMedicineCount.' '.str('medicine')->plural($activeMedicineCount) : ($allMedicineCount > 0 ? 'Completed or already processed' : 'None') }}</p></div>
+                        <div><p class="font-medium">Laboratory</p><p class="text-xs text-slate-500">{{ $activeLaboratoryCount > 0 ? $activeLaboratoryCount.' '.str('test')->plural($activeLaboratoryCount) : ($laboratoryItems->isNotEmpty() ? 'Completed or already processing' : 'None') }}</p></div>
+                        <div><p class="font-medium">Procedure</p><p class="text-xs text-slate-500">{{ $activeProcedureCount > 0 ? $activeProcedureCount.' '.str('procedure')->plural($activeProcedureCount) : ($encounter->procedureOrders->isNotEmpty() ? 'Completed or already processed' : 'None') }}</p></div>
+                    </div>
+                </div>
+
+                @if($completionMissing !== [])
+                    <div class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+                        <p class="font-semibold">Required before completion:</p>
+                        <ul class="mt-2 list-disc space-y-1 pl-5">
+                            @foreach($completionMissing as $missing)
+                                <li>{{ $missing }}</li>
+                            @endforeach
+                        </ul>
+                    </div>
+                @endif
                 @if($errors->any())
                     <div class="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200" role="alert">
                         <p class="font-semibold">Please correct the following:</p>
@@ -280,23 +394,14 @@
                         </ul>
                     </div>
                 @endif
-                @if($encounter->signed_off_at)
-                    <p class="mt-3 text-sm font-medium text-emerald-700 dark:text-emerald-300">
-                        Signed off {{ $encounter->signed_off_at->format('d/m/Y H:i') }}.
-                    </p>
-                @endif
                 <div class="mt-4 flex flex-col gap-2">
                     <x-secondary-button type="button" wire:click="saveDraft" wire:loading.attr="disabled" wire:target="saveDraft" :disabled="(bool) $encounter->signed_off_at">
                         <span wire:loading.remove wire:target="saveDraft">Save Draft</span>
                         <span wire:loading wire:target="saveDraft">Saving Draft...</span>
                     </x-secondary-button>
-                    <x-secondary-button type="button" wire:click="signOff" wire:loading.attr="disabled" wire:target="signOff" :disabled="(bool) $encounter->signed_off_at">
-                        <span wire:loading.remove wire:target="signOff">{{ $encounter->signed_off_at ? 'Signed Off' : 'Sign Off' }}</span>
-                        <span wire:loading wire:target="signOff">Signing Off...</span>
-                    </x-secondary-button>
-                    <x-primary-button type="button" wire:click="completeConsultation" wire:loading.attr="disabled" wire:target="completeConsultation">
+                    <x-primary-button type="button" wire:click="completeConsultation" wire:loading.attr="disabled" wire:target="completeConsultation" :disabled="$completionMissing !== []">
                         <span wire:loading.remove wire:target="completeConsultation">Complete Consultation</span>
-                        <span wire:loading wire:target="completeConsultation">Completing Consultation...</span>
+                        <span wire:loading wire:target="completeConsultation">Completing...</span>
                     </x-primary-button>
                     <x-secondary-button type="button" wire:click="printSummary" wire:loading.attr="disabled" wire:target="printSummary">
                         <span wire:loading.remove wire:target="printSummary">Print Summary</span>
@@ -307,11 +412,34 @@
 
             <x-card>
                 <h3 class="mb-3 font-semibold">Active Orders</h3>
-                <div class="space-y-3 text-sm">
-                    <div><p class="font-medium">Laboratory</p>@forelse($encounter->laboratoryOrders as $order)@php($activeLaboratoryStatus = $order->items->pluck('result_status')->filter()->first() ?: $order->status)<p class="text-xs text-slate-500">{{ $order->order_number }} · {{ $laboratoryStatusLabel($activeLaboratoryStatus) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
-                    <div><p class="font-medium">Procedures</p>@forelse($encounter->procedureOrders as $procedure)<p class="text-xs text-slate-500">{{ $procedure->procedure_name_snapshot }} · {{ $statusLabel($procedure->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
-                    <div><p class="font-medium">Medicines</p>@forelse($encounter->prescriptions as $prescription)<p class="text-xs text-slate-500">{{ $prescription->prescription_number }} · {{ $statusLabel($prescription->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
-                    <div><p class="font-medium">Referrals</p>@forelse($encounter->referrals as $referral)<p class="text-xs text-slate-500">{{ $referral->destination_facility_name }} · {{ $statusLabel($referral->status) }}</p>@empty<p class="text-xs text-slate-500">None</p>@endforelse</div>
+                <div class="space-y-4 text-sm">
+                    <div>
+                        <p class="font-semibold">Laboratory</p>
+                        @forelse($laboratoryItems as $item)
+                            <div class="mt-1"><p>{{ $item->test_name_snapshot }}</p><p class="text-xs text-slate-500">{{ $laboratoryItemStatusLabel($item) }}</p></div>
+                        @empty
+                            <p class="text-xs text-slate-500">None</p>
+                        @endforelse
+                    </div>
+                    <div>
+                        <p class="font-semibold">Medicines</p>
+                        @forelse($encounter->prescriptions as $prescription)
+                            @foreach($prescription->items as $item)
+                                <p class="mt-1">{{ $item->medication_name }}{{ $item->strength ? ' '.$item->strength : '' }}</p>
+                            @endforeach
+                            <p class="text-xs text-slate-500">{{ $prescriptionStatusLabel($prescription->status) }}</p>
+                        @empty
+                            <p class="text-xs text-slate-500">None</p>
+                        @endforelse
+                    </div>
+                    <div>
+                        <p class="font-semibold">Procedures</p>
+                        @forelse($encounter->procedureOrders as $procedure)
+                            <div class="mt-1"><p>{{ $procedure->procedure_name_snapshot }}</p><p class="text-xs text-slate-500">{{ $procedureStatusLabel($procedure->status) }}</p></div>
+                        @empty
+                            <p class="text-xs text-slate-500">None</p>
+                        @endforelse
+                    </div>
                 </div>
             </x-card>
         </aside>

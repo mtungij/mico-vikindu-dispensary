@@ -11,7 +11,7 @@
     <x-card>
         <div class="overflow-x-auto">
             <table class="min-w-full text-sm">
-                <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Order</th><th>Patient</th><th>Tests</th><th>Priority</th><th>Payment</th><th>Status</th><th>Ordered</th><th class="text-right">Actions</th></tr></thead>
+                <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Order</th><th>Source</th><th>Patient</th><th>Tests</th><th>Priority</th><th>Payment</th><th>Status</th><th>Ordered</th><th class="text-right">Actions</th></tr></thead>
                 <tbody>
                     @foreach($orders as $order)
                         @php
@@ -26,6 +26,7 @@
                         @foreach($visibleItems as $item)
                         <tr wire:key="laboratory-order-item-{{ $tab }}-{{ $item->id }}" class="border-t border-slate-100 dark:border-slate-800">
                             <td class="py-3 font-semibold">{{ $order->order_number }}</td>
+                            <td><x-badge>{{ $order->isDirectLaboratory() ? 'Direct from Reception' : 'OPD Order' }}</x-badge></td>
                             <td>{{ $order->patient?->fullName() }}<div class="text-xs text-slate-500">{{ $order->patient?->patient_number }}</div></td>
                             <td>{{ $item->test_name_snapshot }}<div class="text-xs text-slate-500">{{ $item->laboratoryTest?->specimenType?->name ?? 'Specimen not configured' }}</div></td>
                             <td>{{ $order->priority }}</td>
@@ -41,6 +42,25 @@
                                 @endif
                                 @if(auth()->user()->can('laboratory-results.enter') && $item->sample?->sample_status?->value === 'accepted' && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true)))
                                     <a href="{{ route('laboratory.results.entry', ['laboratoryOrder' => $order, 'item' => $item->id]) }}" class="inline-flex items-center gap-1 rounded-md px-2 py-1 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-clipboard-check class="h-4 w-4" /> Ingiza Matokeo</a>
+                                @endif
+                                @php
+                                    $latestResult = $item->results->sortByDesc('result_version')->first();
+                                @endphp
+                                @if($latestResult?->result_status?->value === 'pending_verification' && auth()->user()->can('laboratory-results.verify'))
+                                    <a href="{{ route('laboratory.results.verify', $latestResult) }}" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-primary hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-file-check-2 class="h-4 w-4" /> Verify Results</a>
+                                @elseif($latestResult?->result_status?->value === 'verified' && auth()->user()->can('laboratory-results.release'))
+                                    <a href="{{ route('laboratory.results.verify', $latestResult) }}" class="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-1 text-amber-800 hover:bg-amber-200 dark:bg-amber-950/40 dark:text-amber-200"><x-lucide-send class="h-4 w-4" /> Release Results</a>
+                                @endif
+                                @if($loop->first && ($reportEligibility[$order->id] ?? false))
+                                    @can('viewReport', $order)
+                                        <a href="{{ route('laboratory.orders.report.view', $order) }}" target="_blank" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-primary hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-eye class="h-4 w-4" /> Angalia Majibu</a>
+                                    @endcan
+                                    @can('downloadReport', $order)
+                                        <a href="{{ route('laboratory.orders.report.download', $order) }}" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-primary hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-download class="h-4 w-4" /> Pakua Majibu</a>
+                                    @endcan
+                                    @can('printReport', $order)
+                                        <a href="{{ route('laboratory.orders.report.print', $order) }}" target="_blank" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-primary hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-printer class="h-4 w-4" /> Chapisha Majibu</a>
+                                    @endcan
                                 @endif
                             </td>
                         </tr>

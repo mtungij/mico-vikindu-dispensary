@@ -14,9 +14,11 @@ use App\Models\ClinicalEncounter;
 use App\Models\ClinicalNoteAmendment;
 use App\Models\Department;
 use App\Models\LaboratoryOrder;
+use App\Models\ObservationAdmission;
 use App\Models\PatientQueue;
 use App\Models\PhysicalExamination;
 use App\Models\Visit;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
@@ -98,12 +100,15 @@ class ClinicalEncounterService
 
     public function saveDraft(ClinicalEncounter $encounter, array $data, $actor): ClinicalEncounter
     {
-        $this->ensureMutable($encounter, $actor);
-        $allowed = $this->draftFields($data);
-        $encounter->update([...$allowed, 'updated_by' => $actor->id]);
-        $this->audit($actor, 'clinical_encounter_draft_saved', $encounter, ['fields' => array_keys($allowed)]);
+        return DB::transaction(function () use ($encounter, $data, $actor): ClinicalEncounter {
+            $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
+            $allowed = $this->draftFields($data);
+            $this->ensureMutable($encounter);
+            $encounter->update([...$allowed, 'updated_by' => $actor->id]);
+            $this->audit($actor, 'clinical_encounter_draft_saved', $encounter, ['fields' => array_keys($allowed)]);
 
-        return $encounter->refresh();
+            return $encounter->refresh();
+        });
     }
 
     public function addComplaint(ClinicalEncounter $encounter, array $data, $actor): ClinicalComplaint
@@ -143,7 +148,7 @@ class ClinicalEncounterService
 
     public function addLabOrder(ClinicalEncounter $encounter, array $data, $actor): LaboratoryOrder
     {
-        if (in_array($encounter->status, [ClinicalEncounterStatus::SignedOff, ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true)) {
+        if (in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true)) {
             throw ValidationException::withMessages([
                 'encounter' => $encounter->status === ClinicalEncounterStatus::Completed
                     ? 'Laboratory orders cannot be added because this consultation is already completed.'
@@ -152,6 +157,7 @@ class ClinicalEncounterService
         }
 
         Gate::forUser($actor)->authorize('create', [LaboratoryOrder::class, $encounter]);
+        $this->ensureMutable($encounter, $actor);
 
         return $this->laboratoryOrders->createOrder($encounter, $data, $actor);
     }
@@ -181,7 +187,7 @@ class ClinicalEncounterService
     {
         $this->ensureMutable($encounter, $actor);
         $referral = $this->referrals->createReferral($encounter, $data, $actor);
-        $encounter->update(['status' => ClinicalEncounterStatus::Referred, 'outcome' => ClinicalOutcome::Referred]);
+        $encounter->update(['outcome' => ClinicalOutcome::Referred]);
 
         return $referral;
     }
@@ -194,7 +200,7 @@ class ClinicalEncounterService
             $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
             $this->ensureOpenForFinalization($encounter);
             if ($encounter->signed_off_at || $encounter->signed_off_by) {
-                throw ValidationException::withMessages(['signed_off' => 'This consultation has already been signed off.']);
+                throw ValidationException::withMessages(['encounter' => 'This consultation has already been finalized.']);
             }
 
             $encounter->update([
@@ -208,9 +214,12 @@ class ClinicalEncounterService
                 'status' => ClinicalEncounterStatus::SignedOff,
                 'signed_off_by' => $actor->id,
                 'signed_off_at' => now(),
+                'signed_content_hash' => $this->clinicalContentHash($encounter),
                 'updated_by' => $actor->id,
             ]);
-            $this->audit($actor, 'clinical_encounter_signed_off', $encounter);
+            $this->audit($actor, 'clinical_encounter_signed_off', $encounter, [
+                'signed_content_hash' => $encounter->signed_content_hash,
+            ]);
 
             return $encounter->refresh();
         });
@@ -218,37 +227,65 @@ class ClinicalEncounterService
 
     public function completeEncounter(ClinicalEncounter $encounter, $actor, array $data = []): ClinicalEncounter
     {
-        Gate::forUser($actor)->authorize('complete', $encounter);
-
         return DB::transaction(function () use ($encounter, $actor, $data) {
+            $visit = Visit::query()->lockForUpdate()->findOrFail($encounter->visit_id);
             $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
-            $this->ensureOpenForFinalization($encounter);
+            $encounter->setRelation('visit', $visit);
 
-            if ($data !== [] && ! $this->signedDataMatches($encounter, $data)) {
-                throw ValidationException::withMessages([
-                    'signed_off' => 'Clinical content changed after Sign Off. Revert the changes or use the amendment workflow.',
+            Gate::forUser($actor)->authorize('complete', $encounter);
+
+            if ($encounter->completed_at || $encounter->status === ClinicalEncounterStatus::Completed) {
+                return $encounter->refresh();
+            }
+
+            $this->ensureOpenForFinalization($encounter);
+            $draft = $this->draftFields($data);
+            if (($draft['outcome'] ?? null) === ClinicalOutcome::FollowUp->value) {
+                $draft['follow_up_required'] = true;
+                $draft['follow_up_date'] ??= $this->followUpDateFromData($data);
+            }
+            $encounter->update([
+                ...$draft,
+                'updated_by' => $actor->id,
+            ]);
+            $encounter->refresh();
+            if ($data !== []) {
+                $this->audit($actor, 'clinical_encounter_draft_saved', $encounter, [
+                    'fields' => array_keys($this->draftFields($data)),
+                    'source' => 'complete_consultation',
                 ]);
             }
 
-            $this->validateClinicalContentForFinalization($encounter);
-            if (! $encounter->signed_off_at) {
-                throw ValidationException::withMessages(['signed_off' => 'Sign Off is required before completing the consultation.']);
-            }
-
-            $destinations = $this->resolveRequiredDestinations($encounter);
+            $this->validateClinicalContentForFinalization($encounter, $data);
+            $this->validateClinicalContentFacility($encounter);
+            $this->validateOutcomeConsistency($encounter);
+            $this->ensureFollowUpAppointment($encounter, $data, $actor);
+            $completedAt = now();
+            $wasSigned = (bool) ($encounter->signed_off_by && $encounter->signed_off_at);
 
             $encounter->prescriptions()
                 ->where('status', PrescriptionStatus::Draft->value)
                 ->get()
                 ->each(fn ($prescription) => $this->prescriptions->finalizePrescription($prescription, $actor));
 
+            $encounter->load('visit.invoice');
+            $destinations = $this->resolveRequiredDestinations($encounter);
             $next = $this->determineNextVisitStatus($encounter);
             $encounter->update([
                 'status' => $encounter->outcome === ClinicalOutcome::Referred ? ClinicalEncounterStatus::Referred : ClinicalEncounterStatus::Completed,
+                'signed_off_by' => $encounter->signed_off_by ?: $actor->id,
+                'signed_off_at' => $encounter->signed_off_at ?: $completedAt,
+                'signed_content_hash' => $this->clinicalContentHash($encounter),
                 'completed_by' => $actor->id,
-                'completed_at' => now(),
+                'completed_at' => $completedAt,
                 'updated_by' => $actor->id,
             ]);
+            if (! $wasSigned) {
+                $this->audit($actor, 'clinical_encounter_signed_off', $encounter, [
+                    'signed_content_hash' => $encounter->signed_content_hash,
+                    'source' => 'complete_consultation',
+                ]);
+            }
 
             PatientQueue::query()
                 ->where('visit_id', $encounter->visit_id)
@@ -285,8 +322,11 @@ class ClinicalEncounterService
             }
 
             $this->audit($actor, 'clinical_encounter_completed', $encounter, [
+                'final_outcome' => $encounter->outcome?->value,
+                'signed_off_by' => $encounter->signed_off_by,
+                'completed_by' => $encounter->completed_by,
                 'next_visit_status' => $next->value,
-                'destinations' => $this->completionDestinations($encounter),
+                'destinations' => array_keys($destinations),
             ]);
 
             return $encounter->refresh();
@@ -297,23 +337,11 @@ class ClinicalEncounterService
     public function completionDestinations(ClinicalEncounter $encounter): array
     {
         $destinations = [];
-        if ($encounter->laboratoryOrders()->exists()) {
-            $destinations[] = 'Laboratory';
-        }
-        if ($encounter->procedureOrders()->exists()) {
+        if ($this->hasActiveProcedureWork($encounter)) {
             $destinations[] = 'Procedures';
         }
-        if ($encounter->prescriptions()->exists()) {
+        if ($this->hasReadyPharmacyWork($encounter)) {
             $destinations[] = 'Pharmacy';
-        }
-        if ($encounter->outcome === ClinicalOutcome::AdmittedBedRest) {
-            $destinations[] = 'Admission';
-        }
-        if ($encounter->referrals()->exists()) {
-            $destinations[] = 'Referral';
-        }
-        if ($encounter->appointments()->exists() || $encounter->follow_up_required) {
-            $destinations[] = 'Follow-up';
         }
 
         return array_values(array_unique($destinations));
@@ -321,6 +349,11 @@ class ClinicalEncounterService
 
     public function amendEncounter(ClinicalEncounter $encounter, string $field, ?string $value, string $reason, $actor): ClinicalEncounter
     {
+        if ($encounter->completed_at || in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true)) {
+            throw ValidationException::withMessages([
+                'encounter' => 'This consultation is completed and cannot be edited.',
+            ]);
+        }
         if (blank($reason)) {
             throw ValidationException::withMessages(['reason' => 'Sababu ya amendment inahitajika.']);
         }
@@ -340,31 +373,27 @@ class ClinicalEncounterService
         if ($encounter->outcome === ClinicalOutcome::Referred) {
             return VisitStatus::Referred;
         }
-        if ($encounter->outcome === ClinicalOutcome::AdmittedBedRest) {
+        if (in_array($encounter->outcome, [ClinicalOutcome::AdmittedBedRest, ClinicalOutcome::Observation], true)) {
             return VisitStatus::AwaitingBed;
         }
-        if ($encounter->laboratoryOrders()->exists()) {
-            return VisitStatus::AwaitingLab;
-        }
-        if ($encounter->procedureOrders()->exists()) {
+        if ($this->hasActiveProcedureWork($encounter)) {
             return VisitStatus::AwaitingPayment;
         }
-        if ($encounter->prescriptions()->exists()) {
-            return VisitStatus::AwaitingPharmacy;
+        if ($this->hasActivePharmacyWork($encounter)) {
+            return $this->hasReadyPharmacyWork($encounter)
+                ? VisitStatus::AwaitingPharmacy
+                : VisitStatus::AwaitingPayment;
         }
 
         return VisitStatus::Completed;
     }
 
-    private function ensureMutable(ClinicalEncounter $encounter, $actor): void
+    private function ensureMutable(ClinicalEncounter $encounter, $actor = null): void
     {
-        if ($encounter->status === ClinicalEncounterStatus::SignedOff || $encounter->signed_off_at) {
+        if ($encounter->completed_at || in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled], true)) {
             throw ValidationException::withMessages([
-                'signed_off' => 'This consultation is signed off and is read-only. Use the amendment workflow for changes.',
+                'encounter' => 'This consultation is completed and cannot be edited.',
             ]);
-        }
-        if (in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true) && ! $actor->can('clinical-encounters.amend')) {
-            throw ValidationException::withMessages(['encounter' => 'Clinical record iliyokamilika haiwezi kubadilishwa bila amendment.']);
         }
     }
 
@@ -404,17 +433,9 @@ class ClinicalEncounterService
     private function resolveRequiredDestinations(ClinicalEncounter $encounter): array
     {
         $destinations = [];
-        if ($encounter->laboratoryOrders()->whereNotIn('status', ['completed', 'cancelled'])->exists()) {
-            $destinations['Laboratory'] = $this->requiredDepartment(
-                $encounter,
-                ['LAB'],
-                'Consultation haiwezi kukamilika kwa sababu Laboratory haijawekwa vizuri.',
-                true,
-            );
-        }
-        if ($encounter->procedureOrders()->whereNotIn('status', ['completed', 'cancelled'])->exists()) {
+        if ($this->hasActiveProcedureWork($encounter)) {
             $serviceDepartmentIds = $encounter->procedureOrders()
-                ->whereNotIn('status', ['completed', 'cancelled'])
+                ->whereIn('status', ['ordered', 'awaiting_payment', 'scheduled', 'in_progress'])
                 ->with('service:id,department_id')
                 ->get()
                 ->pluck('service.department_id')
@@ -432,24 +453,24 @@ class ClinicalEncounterService
             $destinations['Procedures'] = $department ?: $this->requiredDepartment(
                 $encounter,
                 ['PRC', 'PRO'],
-                'Consultation haiwezi kukamilika kwa sababu Procedure destination haijawekwa vizuri.',
+                'Procedures are not configured correctly.',
                 true,
             );
         }
-        if ($encounter->prescriptions()->whereNotIn('status', ['dispensed', 'cancelled'])->exists()) {
+        if ($this->hasActivePharmacyWork($encounter)) {
             $destinations['Pharmacy'] = $this->requiredDepartment(
                 $encounter,
                 ['PHA'],
-                'Consultation haiwezi kukamilika kwa sababu Pharmacy haijawekwa vizuri.',
+                'Pharmacy is not configured correctly.',
                 true,
             );
         }
-        if ($encounter->outcome === ClinicalOutcome::AdmittedBedRest) {
+        if (in_array($encounter->outcome, [ClinicalOutcome::AdmittedBedRest, ClinicalOutcome::Observation], true)) {
             $destinations['Admission'] = $this->requiredDepartment(
                 $encounter,
                 ['BED'],
-                'Consultation haiwezi kukamilika kwa sababu Admission destination haijawekwa vizuri.',
-                false,
+                'Admission is not configured correctly.',
+                true,
             );
         }
 
@@ -498,47 +519,220 @@ class ClinicalEncounterService
         return $department;
     }
 
-    private function signedDataMatches(ClinicalEncounter $encounter, array $data): bool
+    /**
+     * @param  array<string, mixed>  $overrides
+     */
+    private function clinicalContentHash(ClinicalEncounter $encounter, array $overrides = []): string
     {
-        foreach ($this->draftFields($data) as $field => $value) {
-            $stored = $encounter->{$field};
-            if ($stored instanceof \BackedEnum) {
-                $stored = $stored->value;
-            } elseif ($stored instanceof \DateTimeInterface) {
-                $stored = $stored->format('Y-m-d');
-            }
-            if (is_bool($stored) || is_bool($value)) {
-                if ((bool) $stored !== (bool) $value) {
-                    return false;
-                }
-            } elseif ((string) ($stored ?? '') !== (string) ($value ?? '')) {
-                return false;
-            }
+        $content = [];
+        foreach ($this->clinicalFieldNames() as $field) {
+            $content[$field] = $this->normalizeClinicalValue(
+                array_key_exists($field, $overrides) ? $overrides[$field] : $encounter->{$field},
+            );
         }
 
-        return true;
+        return hash('sha256', json_encode($content, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
     }
 
-    private function validateClinicalContentForFinalization(ClinicalEncounter $encounter): void
+    private function normalizeClinicalValue(mixed $value): mixed
     {
-        if (! $encounter->started_at || ! $encounter->provider_user_id) {
-            throw ValidationException::withMessages(['encounter' => 'The consultation has not been started correctly.']);
+        if ($value instanceof \BackedEnum) {
+            return $value->value;
         }
-        if (blank($encounter->clinical_summary) && blank($encounter->assessment_notes) && blank($encounter->treatment_plan)) {
-            throw ValidationException::withMessages(['form.clinical_summary' => 'A clinical summary, assessment note, or treatment plan is required.']);
+        if ($value instanceof \DateTimeInterface) {
+            return $value->format('Y-m-d');
+        }
+        if (is_bool($value)) {
+            return $value;
+        }
+
+        return $value === null ? '' : (string) $value;
+    }
+
+    /** @return array<int, string> */
+    private function clinicalFieldNames(): array
+    {
+        return [
+            'chief_complaint',
+            'history_of_presenting_illness',
+            'past_medical_history',
+            'surgical_history',
+            'medication_history',
+            'allergy_history',
+            'family_history',
+            'social_history',
+            'obstetric_history',
+            'gynecological_history',
+            'review_of_systems',
+            'physical_examination',
+            'clinical_summary',
+            'assessment_notes',
+            'treatment_plan',
+            'discharge_instructions',
+            'follow_up_required',
+            'follow_up_date',
+            'outcome',
+        ];
+    }
+
+    private function validateClinicalContentForFinalization(ClinicalEncounter $encounter, array $data = []): void
+    {
+        $errors = [];
+        if (! $encounter->started_at || ! $encounter->provider_user_id) {
+            $errors['encounter'] = 'The consultation has not been started correctly.';
+        }
+        $hasClinicalContent = filled($encounter->clinical_summary)
+            || filled($encounter->assessment_notes)
+            || filled($encounter->treatment_plan)
+            || $encounter->diagnoses()->where('status', '!=', 'entered_in_error')->exists()
+            || $encounter->prescriptions()->where('status', '!=', 'cancelled')->exists()
+            || $encounter->laboratoryOrders()->where('status', '!=', 'cancelled')->exists()
+            || $encounter->procedureOrders()->where('status', '!=', 'cancelled')->exists();
+        if (! $hasClinicalContent) {
+            $errors['clinical_content'] = 'Add a diagnosis, treatment plan, prescription, laboratory order, or clinical summary before completing.';
         }
         if (! $encounter->outcome || $encounter->outcome === ClinicalOutcome::Ongoing) {
-            throw ValidationException::withMessages(['form.outcome' => 'Select a final consultation outcome.']);
+            $errors['form.outcome'] = 'Select a final consultation outcome.';
         }
         if ($encounter->follow_up_required && ! $encounter->follow_up_date) {
-            throw ValidationException::withMessages(['form.follow_up_date' => 'A follow-up date is required.']);
+            $errors['form.follow_up_date'] = 'A follow-up date is required.';
         }
         if ($encounter->outcome === ClinicalOutcome::Referred && ! $encounter->referrals()->exists()) {
-            throw ValidationException::withMessages(['referral' => 'Rufaa inahitajika kwa outcome ya referred.']);
+            $errors['referral'] = 'Add referral details before completing.';
         }
-        if (! in_array($encounter->outcome, [ClinicalOutcome::Referred, ClinicalOutcome::Transferred, ClinicalOutcome::LeftAgainstAdvice], true)) {
-            $this->diagnoses->validateCompletionDiagnosis($encounter);
+        if ($encounter->outcome === ClinicalOutcome::FollowUp && ! $encounter->appointments()->exists()) {
+            if (! $encounter->follow_up_date && ! $this->followUpDateFromData($data)) {
+                $errors['form.follow_up_date'] = 'Add a follow-up date.';
+            }
+            if (blank($data['follow_up_reason'] ?? null)) {
+                $errors['follow_up_reason'] = 'Add a follow-up reason.';
+            }
+            if (blank($data['follow_up_department_id'] ?? null)) {
+                $errors['follow_up_department_id'] = 'Select a follow-up clinic or department.';
+            }
         }
+
+        if ($encounter->laboratoryOrders()
+            ->where('status', '!=', 'cancelled')
+            ->where(fn ($orders) => $orders
+                ->where('payment_status', 'pending')
+                ->orWhereHas('items', fn ($query) => $query
+                    ->whereNotIn('status', ['cancelled'])
+                    ->where(fn ($query) => $query
+                        ->where('result_status', '!=', LaboratoryResultStatus::Released->value)
+                        ->orWhereNull('result_status'))))
+            ->exists()) {
+            $errors['laboratory'] = 'Consultation cannot be completed because some laboratory orders are not yet verified and released.';
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
+    private function validateClinicalContentFacility(ClinicalEncounter $encounter): void
+    {
+        $facilityId = $encounter->facility_id;
+        $hasForeignContent = $encounter->visit->facility_id !== $facilityId
+            || $encounter->laboratoryOrders()->where('facility_id', '!=', $facilityId)->exists()
+            || $encounter->laboratoryOrders()
+                ->whereHas('items.service', fn ($query) => $query->where('facility_id', '!=', $facilityId))
+                ->exists()
+            || $encounter->prescriptions()->where('facility_id', '!=', $facilityId)->exists()
+            || $encounter->prescriptions()
+                ->whereHas('items.medicine', fn ($query) => $query->where('facility_id', '!=', $facilityId))
+                ->exists()
+            || $encounter->prescriptions()
+                ->whereHas('items.service', fn ($query) => $query->where('facility_id', '!=', $facilityId))
+                ->exists()
+            || $encounter->procedureOrders()->where('facility_id', '!=', $facilityId)->exists()
+            || $encounter->procedureOrders()
+                ->whereHas('service', fn ($query) => $query->where('facility_id', '!=', $facilityId))
+                ->exists();
+
+        if ($hasForeignContent) {
+            throw ValidationException::withMessages([
+                'facility' => 'All selected clinical services must belong to the current facility.',
+            ]);
+        }
+    }
+
+    private function validateOutcomeConsistency(ClinicalEncounter $encounter): void
+    {
+        $hasActiveAdmission = ObservationAdmission::query()
+            ->where('visit_id', $encounter->visit_id)
+            ->whereIn('status', ['awaiting_payment', 'awaiting_bed', 'admitted', 'under_observation', 'ready_for_discharge'])
+            ->exists();
+
+        if ($hasActiveAdmission && ! in_array($encounter->outcome, [ClinicalOutcome::AdmittedBedRest, ClinicalOutcome::Observation], true)) {
+            throw ValidationException::withMessages([
+                'outcome' => 'The selected final outcome conflicts with the current admission order.',
+            ]);
+        }
+    }
+
+    private function ensureFollowUpAppointment(ClinicalEncounter $encounter, array $data, $actor): void
+    {
+        if ($encounter->outcome !== ClinicalOutcome::FollowUp || $encounter->appointments()->exists()) {
+            return;
+        }
+
+        $date = $encounter->follow_up_date?->toDateString() ?? $this->followUpDateFromData($data);
+        $this->appointments->createFollowUp($encounter, [
+            'scheduled_start' => Carbon::parse($date)->setTime(8, 0)->toDateTimeString(),
+            'department_id' => (int) $data['follow_up_department_id'],
+            'reason' => $data['follow_up_reason'],
+        ], $actor);
+    }
+
+    private function followUpDateFromData(array $data): ?string
+    {
+        if (filled($data['follow_up_date'] ?? null)) {
+            return Carbon::parse($data['follow_up_date'])->toDateString();
+        }
+        if (filled($data['follow_up_scheduled_start'] ?? null)) {
+            return Carbon::parse($data['follow_up_scheduled_start'])->toDateString();
+        }
+
+        return null;
+    }
+
+    private function hasActivePharmacyWork(ClinicalEncounter $encounter): bool
+    {
+        return $encounter->prescriptions()
+            ->whereIn('status', ['draft', 'prescribed', 'awaiting_payment', 'partially_dispensed'])
+            ->exists();
+    }
+
+    private function hasReadyPharmacyWork(ClinicalEncounter $encounter): bool
+    {
+        return $encounter->prescriptions()
+            ->whereIn('status', [
+                PrescriptionStatus::Prescribed->value,
+                PrescriptionStatus::PartiallyDispensed->value,
+            ])
+            ->exists()
+            && (float) ($encounter->visit->invoice?->balance_amount ?? 0) <= 0;
+    }
+
+    private function hasPatientFacingLaboratoryWork(ClinicalEncounter $encounter): bool
+    {
+        return $encounter->laboratoryOrders()
+            ->whereNotIn('status', ['completed', 'cancelled'])
+            ->whereHas('items', fn ($query) => $query
+                ->whereNull('sample_id')
+                ->where(fn ($query) => $query
+                    ->whereNull('result_status')
+                    ->orWhereNotIn('result_status', ['verified', 'released', 'cancelled', 'entered_in_error']))
+                ->whereNotIn('status', ['completed', 'cancelled']))
+            ->exists();
+    }
+
+    private function hasActiveProcedureWork(ClinicalEncounter $encounter): bool
+    {
+        return $encounter->procedureOrders()
+            ->whereIn('status', ['ordered', 'awaiting_payment', 'scheduled', 'in_progress'])
+            ->exists();
     }
 
     private function audit($actor, string $event, ClinicalEncounter $encounter, array $extra = []): void

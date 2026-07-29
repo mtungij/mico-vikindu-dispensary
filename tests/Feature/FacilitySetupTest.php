@@ -286,7 +286,7 @@ class FacilitySetupTest extends TestCase
         $this->seed();
 
         $this->assertDatabaseHas('users', [
-            'email' => 'admin@dispensary.test',
+            'email' => 'admin@gmail.com',
             'is_super_admin' => true,
         ]);
     }

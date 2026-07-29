@@ -5,9 +5,11 @@ namespace App\Services;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\Department;
+use App\Models\LaboratoryOrder;
 use App\Models\Visit;
 use App\Models\VisitMovement;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class ReceptionWorkflowService
 {
@@ -18,11 +20,16 @@ class ReceptionWorkflowService
         private readonly InvoiceService $invoices,
         private readonly QueueService $queues,
         private readonly ReceptionChargeService $charges,
+        private readonly LaboratoryOrderService $laboratoryOrders,
     ) {}
 
     public function registerNewPatientAndVisit(array $patientData, array $payerData, array $visitData, array $serviceIds = [], $actor = null): array
     {
-        return DB::transaction(function () use ($patientData, $payerData, $visitData, $actor): array {
+        if ($existing = $this->existingRegistration($visitData)) {
+            return $existing;
+        }
+
+        return DB::transaction(function () use ($patientData, $payerData, $visitData, $serviceIds, $actor): array {
             $patient = $this->patients->createPatient($patientData, $actor);
             $payerProfile = $this->payers->createProfile($patient, $payerData, $actor);
             $visitData['patient_payer_profile_id'] = $payerProfile->id;
@@ -33,8 +40,24 @@ class ReceptionWorkflowService
             $visit = $this->visits->createVisit($patient, $visitData, $actor);
             $invoice = $this->invoices->createVisitInvoice($visit, [], $actor);
             $invoice = $this->charges->createInitialInvoiceItems($invoice, $registration, $consultation, true, $destination, $actor);
+            $laboratoryOrder = null;
+            if (strtoupper((string) $destination->code) === 'LAB') {
+                if ($serviceIds === []) {
+                    throw ValidationException::withMessages([
+                        'selectedLaboratoryTestIds' => 'Chagua angalau kipimo kimoja cha maabara.',
+                    ]);
+                }
+                $laboratoryOrder = $this->laboratoryOrders->createDirectOrder($visit, $invoice, $serviceIds, $actor);
+                $invoice->refresh();
+            }
             $visit = $this->applyPostChargeStatus($visit, $destination, (float) $invoice->items()->sum('patient_amount'), (bool) ($visitData['require_payment_before_service'] ?? true), $actor);
-            $queue = $this->shouldCreateDestinationQueue($visit, $destination) ? $this->queues->createQueue($visit->load('destinationDepartment'), $actor) : null;
+            $queue = null;
+            if ($laboratoryOrder && (float) $invoice->balance_amount <= 0) {
+                $this->laboratoryOrders->activateLaboratoryQueue($laboratoryOrder, $actor);
+                $queue = $visit->queues()->where('department_id', $destination->id)->latest()->first();
+            } elseif (! $laboratoryOrder && $this->shouldCreateDestinationQueue($visit, $destination)) {
+                $queue = $this->queues->createQueue($visit->load('destinationDepartment'), $actor);
+            }
 
             ActivityLog::query()->create([
                 'user_id' => $actor->id,
@@ -47,27 +70,47 @@ class ReceptionWorkflowService
                 'user_agent' => request()->userAgent(),
             ]);
 
-            return compact('patient', 'payerProfile', 'visit', 'invoice', 'queue');
+            return compact('patient', 'payerProfile', 'visit', 'invoice', 'queue', 'laboratoryOrder');
         });
     }
 
     public function openReturningPatientVisit($patient, array $payerData, array $visitData, array $serviceIds, $actor): array
     {
+        if ($existing = $this->existingRegistration($visitData)) {
+            return $existing;
+        }
+
         $payerProfile = $patient->primaryPayerProfile ?? $this->payers->createProfile($patient, $payerData, $actor);
         $visitData['patient_payer_profile_id'] = $payerProfile->id;
         $visitData['payer_type'] = $payerProfile->payer_type->value;
 
-        return DB::transaction(function () use ($patient, $payerProfile, $visitData, $actor): array {
+        return DB::transaction(function () use ($patient, $payerProfile, $visitData, $serviceIds, $actor): array {
             $destination = $this->charges->destination($patient->facility, (int) $visitData['destination_department_id']);
             $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null);
             [$registration] = $this->charges->validateChargeConfiguration($patient->facility, false, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id);
             $visit = $this->visits->createVisit($patient, $visitData, $actor);
             $invoice = $this->invoices->createVisitInvoice($visit, [], $actor);
             $invoice = $this->charges->createInitialInvoiceItems($invoice, $registration, $consultation, false, $destination, $actor);
+            $laboratoryOrder = null;
+            if (strtoupper((string) $destination->code) === 'LAB') {
+                if ($serviceIds === []) {
+                    throw ValidationException::withMessages([
+                        'selectedLaboratoryTestIds' => 'Chagua angalau kipimo kimoja cha maabara.',
+                    ]);
+                }
+                $laboratoryOrder = $this->laboratoryOrders->createDirectOrder($visit, $invoice, $serviceIds, $actor);
+                $invoice->refresh();
+            }
             $visit = $this->applyPostChargeStatus($visit, $destination, (float) $invoice->items()->sum('patient_amount'), (bool) ($visitData['require_payment_before_service'] ?? true), $actor);
-            $queue = $this->shouldCreateDestinationQueue($visit, $destination) ? $this->queues->createQueue($visit->load('destinationDepartment'), $actor) : null;
+            $queue = null;
+            if ($laboratoryOrder && (float) $invoice->balance_amount <= 0) {
+                $this->laboratoryOrders->activateLaboratoryQueue($laboratoryOrder, $actor);
+                $queue = $visit->queues()->where('department_id', $destination->id)->latest()->first();
+            } elseif (! $laboratoryOrder && $this->shouldCreateDestinationQueue($visit, $destination)) {
+                $queue = $this->queues->createQueue($visit->load('destinationDepartment'), $actor);
+            }
 
-            return compact('patient', 'payerProfile', 'visit', 'invoice', 'queue');
+            return compact('patient', 'payerProfile', 'visit', 'invoice', 'queue', 'laboratoryOrder');
         });
     }
 
@@ -141,5 +184,33 @@ class ReceptionWorkflowService
     private function shouldCreateDestinationQueue(Visit $visit, Department $destination): bool
     {
         return $visit->visit_status === VisitStatus::AwaitingDepartment && $destination->queue_enabled;
+    }
+
+    private function existingRegistration(array $visitData): ?array
+    {
+        $key = $visitData['registration_idempotency_key'] ?? null;
+        if (! $key) {
+            return null;
+        }
+        $visit = Visit::query()
+            ->where('facility_id', currentFacility()?->id)
+            ->where('registration_idempotency_key', $key)
+            ->with(['patient.primaryPayerProfile', 'invoice', 'queues'])
+            ->first();
+        if (! $visit) {
+            return null;
+        }
+
+        return [
+            'patient' => $visit->patient,
+            'payerProfile' => $visit->payerProfile,
+            'visit' => $visit,
+            'invoice' => $visit->invoice,
+            'queue' => $visit->queues->last(),
+            'laboratoryOrder' => LaboratoryOrder::query()
+                ->where('visit_id', $visit->id)
+                ->where('source', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
+                ->first(),
+        ];
     }
 }

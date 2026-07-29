@@ -6,12 +6,15 @@ use App\Enums\ClinicalOrderStatus;
 use App\Enums\ClinicalPaymentStatus;
 use App\Enums\PayerType;
 use App\Enums\ServiceType;
+use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\ClinicalEncounter;
+use App\Models\Department;
 use App\Models\Invoice;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryTest;
 use App\Models\Service;
+use App\Models\Visit;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -24,6 +27,7 @@ class LaboratoryOrderService
         private readonly BillingChargeService $charges,
         private readonly InvoiceStatusService $invoiceStatuses,
         private readonly LaboratoryCoverageService $coverage,
+        private readonly WorkflowService $workflow,
     ) {}
 
     public function generateOrderNumber(int $facilityId): string
@@ -45,6 +49,7 @@ class LaboratoryOrderService
                 'patient_id' => $encounter->patient_id,
                 'visit_id' => $encounter->visit_id,
                 'clinical_encounter_id' => $encounter->id,
+                'source' => LaboratoryOrder::SOURCE_OPD,
                 'ordered_by' => $actor->id,
                 'order_number' => $this->generateOrderNumber($encounter->facility_id),
                 'priority' => $data['priority'] ?? 'normal',
@@ -58,6 +63,32 @@ class LaboratoryOrderService
             $invoice = $this->resolveInvoice($order, $actor);
             $this->addItems($order, $invoice, $services, $actor);
             $invoice = $this->invoiceStatuses->recalculate($invoice);
+            if ((float) $invoice->balance_amount <= 0) {
+                $this->activateLaboratoryQueue($order, $actor);
+            } else {
+                $billing = Department::query()
+                    ->where('facility_id', $order->facility_id)
+                    ->where('code', 'BIL')
+                    ->where('is_active', true)
+                    ->first();
+                if ($billing) {
+                    $billingQueue = $this->workflow->createQueue(
+                        $order->visit,
+                        $billing,
+                        $actor,
+                        VisitStatus::AwaitingPayment,
+                        'Laboratory payment required',
+                        true,
+                        false,
+                    );
+                    $this->workflow->updateVisitStatus(
+                        $order->visit->refresh(),
+                        VisitStatus::AwaitingPayment,
+                        $actor,
+                        $billingQueue,
+                    );
+                }
+            }
 
             $this->audit($actor, 'lab_order_created', $order, [
                 'facility_id' => $order->facility_id,
@@ -77,6 +108,63 @@ class LaboratoryOrderService
                 'visit_id' => $invoice->visit_id,
                 'laboratory_order_id' => $order->id,
                 'balance_amount' => (float) $invoice->balance_amount,
+            ]);
+
+            return $order->refresh();
+        });
+    }
+
+    /** @param array<int, int|string> $serviceIds */
+    public function createDirectOrder(Visit $visit, Invoice $invoice, array $serviceIds, $actor): LaboratoryOrder
+    {
+        abort_unless(
+            $actor->can('laboratory-orders.create-direct') && $actor->can('laboratory-tests.view'),
+            403,
+        );
+
+        return DB::transaction(function () use ($visit, $invoice, $serviceIds, $actor): LaboratoryOrder {
+            $visit = Visit::query()->lockForUpdate()->findOrFail($visit->id);
+            $services = $this->validatedServicesForFacility($visit->facility_id, $serviceIds);
+            $serviceKey = $services->pluck('id')->sort()->implode(',');
+
+            $existing = LaboratoryOrder::query()
+                ->where('visit_id', $visit->id)
+                ->where('source', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
+                ->whereNotIn('status', [ClinicalOrderStatus::Cancelled->value])
+                ->whereHas('items', fn ($query) => $query->whereIn('service_id', $services->pluck('id')))
+                ->with('items')
+                ->lockForUpdate()
+                ->first();
+            if ($existing && $existing->items->pluck('service_id')->sort()->implode(',') === $serviceKey) {
+                return $existing;
+            }
+
+            $paymentStatus = $this->resolveVisitPaymentStatus($visit);
+            $order = LaboratoryOrder::query()->create([
+                'facility_id' => $visit->facility_id,
+                'patient_id' => $visit->patient_id,
+                'visit_id' => $visit->id,
+                'clinical_encounter_id' => null,
+                'source' => LaboratoryOrder::SOURCE_RECEPTION_DIRECT,
+                'ordered_by' => $actor->id,
+                'order_number' => $this->generateOrderNumber($visit->facility_id),
+                'priority' => $visit->priority?->value ?? $visit->priority ?? 'normal',
+                'clinical_notes' => $visit->reason_for_visit,
+                'status' => $paymentStatus === ClinicalPaymentStatus::Pending
+                    ? ClinicalOrderStatus::AwaitingPayment
+                    : ClinicalOrderStatus::Ordered,
+                'ordered_at' => now(),
+                'payment_status' => $paymentStatus,
+                'created_by' => $actor->id,
+            ]);
+            $this->addItems($order, $invoice, $services, $actor);
+            $invoice = $this->invoiceStatuses->recalculate($invoice);
+
+            $this->audit($actor, 'direct_laboratory_order_created', $order, [
+                'facility_id' => $order->facility_id,
+                'visit_id' => $order->visit_id,
+                'invoice_id' => $invoice->id,
+                'service_ids' => $services->pluck('id')->all(),
             ]);
 
             return $order->refresh();
@@ -156,9 +244,17 @@ class LaboratoryOrderService
      */
     private function validatedServices(ClinicalEncounter $encounter, array $serviceIds): Collection
     {
+        return $this->validatedServicesForFacility($encounter->facility_id, $serviceIds);
+    }
+
+    /** @param array<int, int|string> $serviceIds
+     * @return Collection<int, Service>
+     */
+    private function validatedServicesForFacility(int $facilityId, array $serviceIds): Collection
+    {
         $ids = collect($serviceIds)->map(fn ($id): int => (int) $id)->unique()->values();
         $services = Service::query()
-            ->where('facility_id', $encounter->facility_id)
+            ->where('facility_id', $facilityId)
             ->whereIn('id', $ids)
             ->where('is_active', true)
             ->get();
@@ -180,12 +276,39 @@ class LaboratoryOrderService
 
     public function resolvePaymentStatus(ClinicalEncounter $encounter): ClinicalPaymentStatus
     {
-        return match ($encounter->visit->payer_type) {
+        return $this->resolveVisitPaymentStatus($encounter->visit);
+    }
+
+    public function resolveVisitPaymentStatus(Visit $visit): ClinicalPaymentStatus
+    {
+        return match ($visit->payer_type) {
             PayerType::Cash => ClinicalPaymentStatus::Pending,
             PayerType::Insurance, PayerType::Corporate => ClinicalPaymentStatus::Covered,
             PayerType::Exempted => ClinicalPaymentStatus::Waived,
             default => ClinicalPaymentStatus::NotRequired,
         };
+    }
+
+    public function activateLaboratoryQueue(LaboratoryOrder $order, $actor): void
+    {
+        $laboratory = Department::query()
+            ->where('facility_id', $order->facility_id)
+            ->where('code', 'LAB')
+            ->where('is_active', true)
+            ->where('queue_enabled', true)
+            ->first();
+        if (! $laboratory) {
+            throw ValidationException::withMessages(['destination' => 'Laboratory queue is not configured.']);
+        }
+
+        $this->workflow->createQueue(
+            $order->visit,
+            $laboratory,
+            $actor,
+            VisitStatus::AwaitingLab,
+            'Direct laboratory order ready for sample collection',
+            true,
+        );
     }
 
     public function cancelOrder(LaboratoryOrder $order, string $reason, $actor): LaboratoryOrder

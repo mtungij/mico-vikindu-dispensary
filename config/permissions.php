@@ -45,7 +45,7 @@ return [
     'clinical-encounters' => ['label' => 'Clinical Encounters', 'permissions' => ['clinical-encounters.view' => 'Kuangalia encounters', 'clinical-encounters.create' => 'Kuunda encounter', 'clinical-encounters.update-draft' => 'Kuhifadhi draft', 'clinical-encounters.complete' => 'Kukamilisha encounter', 'clinical-encounters.amend' => 'Kufanya amendment', 'clinical-encounters.print' => 'Kuprint consultation summary']],
     'diagnoses' => ['label' => 'Diagnoses', 'permissions' => ['diagnoses.view' => 'Kuangalia diagnoses', 'diagnoses.create' => 'Kuongeza diagnosis', 'diagnoses.update' => 'Kubadilisha diagnosis', 'diagnoses.mark-error' => 'Ku-mark entered in error']],
     'icd10' => ['label' => 'ICD-10 Catalogue', 'permissions' => ['icd10.view' => 'View ICD-10 catalogue administration', 'icd10.manage' => 'Manage ICD-10 catalogue records', 'icd10.import' => 'Import an approved ICD-10 catalogue']],
-    'laboratory-orders' => ['label' => 'Lab Orders', 'permissions' => ['laboratory-orders.view' => 'Kuangalia lab orders', 'laboratory-orders.create' => 'Kuunda lab order', 'laboratory-orders.cancel' => 'Kufuta lab order']],
+    'laboratory-orders' => ['label' => 'Lab Orders', 'permissions' => ['laboratory-orders.view' => 'Kuangalia lab orders', 'laboratory-orders.create' => 'Kuunda lab order', 'laboratory-orders.create-direct' => 'Kuunda direct laboratory order Reception', 'laboratory-tests.view' => 'Kuangalia vipimo vya maabara', 'laboratory-orders.cancel' => 'Kufuta lab order']],
     'prescriptions' => ['label' => 'Prescriptions', 'permissions' => ['prescriptions.view' => 'Kuangalia prescriptions', 'prescriptions.create' => 'Kuandika prescription', 'prescriptions.update' => 'Kubadilisha prescription', 'prescriptions.cancel' => 'Kufuta prescription']],
     'procedure-orders' => ['label' => 'Procedure Orders', 'permissions' => ['procedure-orders.view' => 'Kuangalia procedure orders', 'procedure-orders.create' => 'Kuunda procedure order', 'procedure-orders.cancel' => 'Kufuta procedure order']],
     'appointments' => ['label' => 'Appointments', 'permissions' => [
@@ -95,6 +95,7 @@ return [
         'laboratory-results.amend' => 'Kufanya amendment ya results',
         'laboratory-results.mark-error' => 'Ku-mark result error',
         'laboratory-results.print' => 'Kuprint result',
+        'laboratory-results.download' => 'Kupakua result report',
         'laboratory-results.view-history' => 'Kuangalia result history',
         'laboratory-critical-results.view' => 'Kuangalia critical results',
         'laboratory-critical-results.notify' => 'Kurekodi notification',

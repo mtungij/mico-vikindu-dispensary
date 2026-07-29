@@ -46,5 +46,33 @@ class LaboratoryOrderPolicy
             && ! in_array($encounter->visit?->visit_status, [VisitStatus::Completed, VisitStatus::Cancelled, VisitStatus::Referred, VisitStatus::Discharged], true);
     }
 
-    public function cancel(User $user, LaboratoryOrder $model): bool { return $this->can($user, 'laboratory-orders.cancel', $model); }
+    public function viewReport(User $user, LaboratoryOrder $model): bool
+    {
+        return $this->canAccessReport($user, $model, 'laboratory-results.view');
+    }
+
+    public function downloadReport(User $user, LaboratoryOrder $model): bool
+    {
+        return $this->canAccessReport($user, $model, 'laboratory-results.download');
+    }
+
+    public function printReport(User $user, LaboratoryOrder $model): bool
+    {
+        return $this->canAccessReport($user, $model, 'laboratory-results.print');
+    }
+
+    public function cancel(User $user, LaboratoryOrder $model): bool
+    {
+        return $this->can($user, 'laboratory-orders.cancel', $model);
+    }
+
+    private function canAccessReport(User $user, LaboratoryOrder $model, string $permission): bool
+    {
+        $model->loadMissing('visit:id,facility_id,patient_id');
+
+        return $this->can($user, $permission, $model)
+            && $model->facility_id === currentFacility()?->id
+            && $model->visit?->facility_id === $model->facility_id
+            && $model->visit?->patient_id === $model->patient_id;
+    }
 }

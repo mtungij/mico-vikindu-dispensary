@@ -7,6 +7,7 @@ use App\Enums\ProcedureOrderStatus;
 use App\Enums\QueueStatus;
 use App\Enums\VisitStatus;
 use App\Models\ClinicalEncounter;
+use App\Models\Invoice;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryResult;
 use App\Models\ObservationAdmission;
@@ -152,6 +153,18 @@ class VisitClosureService
 
     public function requiresDoctorReview(Visit $visit): bool
     {
+        $hasDirectLaboratoryOrder = LaboratoryOrder::query()
+            ->where('visit_id', $visit->id)
+            ->where('source', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
+            ->exists();
+        $hasClinicianLaboratoryOrder = LaboratoryOrder::query()
+            ->where('visit_id', $visit->id)
+            ->where('source', '!=', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
+            ->exists();
+        if ($hasDirectLaboratoryOrder && ! $hasClinicianLaboratoryOrder) {
+            return false;
+        }
+
         $setting = WorkflowSetting::query()
             ->where('facility_id', $visit->facility_id)
             ->where('key', 'require_doctor_review_after_laboratory')
@@ -169,6 +182,14 @@ class VisitClosureService
     {
         $blockers = [];
 
+        if (Invoice::query()
+            ->where('visit_id', $visit->id)
+            ->where('balance_amount', '>', 0)
+            ->whereNotIn('invoice_status', ['voided', 'cancelled'])
+            ->exists()) {
+            $blockers[] = 'payment';
+        }
+
         if (Prescription::query()
             ->where('visit_id', $visit->id)
             ->whereIn('status', [
@@ -185,6 +206,9 @@ class VisitClosureService
             ->whereNotIn('status', ['completed', 'cancelled'])
             ->whereHas('items', fn ($query) => $query
                 ->whereNull('sample_id')
+                ->where(fn ($query) => $query
+                    ->whereNull('result_status')
+                    ->orWhereNotIn('result_status', ['verified', 'released', 'cancelled', 'entered_in_error']))
                 ->whereNotIn('status', ['completed', 'cancelled']))
             ->exists();
         if ($uncollectedLaboratoryWork) {
@@ -211,7 +235,7 @@ class VisitClosureService
             ->exists();
         $hasPendingAdmissionDecision = ClinicalEncounter::query()
             ->where('visit_id', $visit->id)
-            ->where('outcome', 'admitted_bed_rest')
+            ->whereIn('outcome', ['admitted_bed_rest', 'observation'])
             ->exists()
             && ObservationAdmission::query()->where('visit_id', $visit->id)->doesntExist();
         if ($hasActiveAdmission || $hasPendingAdmissionDecision) {
@@ -269,6 +293,7 @@ class VisitClosureService
     private function legacyStatusAndQueue(Visit $visit, array $blockers): array
     {
         $priority = [
+            'payment' => [VisitStatus::AwaitingPayment, ['BIL']],
             'admission' => [$this->admissionVisitStatus($visit), ['BED']],
             'laboratory' => [VisitStatus::AwaitingLab, ['LAB']],
             'doctor_review' => [
@@ -307,6 +332,13 @@ class VisitClosureService
 
     private function admissionVisitStatus(Visit $visit): VisitStatus
     {
+        if (ClinicalEncounter::query()
+            ->where('visit_id', $visit->id)
+            ->where('outcome', 'observation')
+            ->exists()) {
+            return VisitStatus::UnderObservation;
+        }
+
         return ObservationAdmission::query()
             ->where('visit_id', $visit->id)
             ->whereIn('status', ['admitted', 'under_observation', 'ready_for_discharge'])

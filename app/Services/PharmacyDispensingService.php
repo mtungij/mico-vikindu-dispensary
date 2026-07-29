@@ -180,8 +180,11 @@ class PharmacyDispensingService
         if (! in_array($prescription->status, [PrescriptionStatus::Prescribed, PrescriptionStatus::AwaitingPayment, PrescriptionStatus::PartiallyDispensed], true)) {
             throw ValidationException::withMessages(['prescription' => 'Prescription haiwezi kudispense kwenye status hii.']);
         }
+        if (! $prescription->encounter || ! $prescription->encounter->completed_at) {
+            throw ValidationException::withMessages(['prescription' => 'Consultation must be completed before medicines can be dispensed.']);
+        }
         $invoice = $prescription->visit->invoice;
-        if ($prescription->visit->payer_type->value === 'cash' && $invoice && $invoice->balance_amount > 0 && ! $actor->can('pharmacy.override-payment')) {
+        if ($invoice && $invoice->balance_amount > 0 && ! $actor->can('pharmacy.override-payment')) {
             throw ValidationException::withMessages(['payment' => 'Malipo hayajakamilika.']);
         }
         if ($actor->can('pharmacy.override-payment') && $invoice && $invoice->balance_amount > 0 && blank($overrideReason)) {

@@ -7,6 +7,7 @@ use App\Enums\LaboratoryResultStatus;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\Department;
+use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryResult;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -22,6 +23,9 @@ class LaboratoryResultReleaseService
     {
         return DB::transaction(function () use ($result, $actor) {
             $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
+            if ($result->result_status === LaboratoryResultStatus::Released) {
+                return $result->refresh();
+            }
             if ($result->result_status !== LaboratoryResultStatus::Verified) {
                 throw ValidationException::withMessages(['result' => 'Verified result pekee ndiyo inaweza kutolewa.']);
             }
@@ -37,20 +41,44 @@ class LaboratoryResultReleaseService
     public function updateOrderStatuses(LaboratoryResult $result, $actor): void
     {
         $order = $result->order;
-        if ($order->items()->where('result_status', '!=', 'released')->doesntExist()) {
+        $hasUnreleasedItems = $order->items()
+            ->whereNotIn('status', ['cancelled', 'entered_in_error'])
+            ->where(fn ($query) => $query
+                ->whereNull('result_status')
+                ->orWhere('result_status', '!=', LaboratoryResultStatus::Released->value))
+            ->exists();
+        if (! $hasUnreleasedItems) {
             $order->update(['status' => ClinicalOrderStatus::Completed, 'completed_at' => now()]);
             $visit = $order->visit;
             if (! $visit) {
                 return;
             }
 
-            $allVisitOrdersTerminal = $visit->clinicalEncounters()
-                ->whereHas('laboratoryOrders', fn ($query) => $query
-                    ->whereNotIn('status', [
-                        ClinicalOrderStatus::Completed->value,
-                        ClinicalOrderStatus::Cancelled->value,
-                    ]))
+            $allVisitOrdersTerminal = LaboratoryOrder::query()
+                ->where('visit_id', $visit->id)
+                ->whereNotIn('status', [
+                    ClinicalOrderStatus::Completed->value,
+                    ClinicalOrderStatus::Cancelled->value,
+                ])
                 ->doesntExist();
+            if ($allVisitOrdersTerminal) {
+                $this->visitClosure->completeDepartmentQueues($visit, 'LAB', $actor);
+            }
+            if ($order->isDirectLaboratory() && $allVisitOrdersTerminal) {
+                $this->visitClosure->evaluate($visit->refresh(), $actor);
+
+                return;
+            }
+            $activeEncounter = $visit->activeClinicalEncounter;
+            if ($allVisitOrdersTerminal && $activeEncounter) {
+                $opdQueue = $visit->queues()
+                    ->where('department_id', $activeEncounter->department_id)
+                    ->whereIn('queue_status', ['waiting', 'called', 'serving'])
+                    ->latest()
+                    ->first();
+                $this->workflow->updateCurrentDepartment($visit, $activeEncounter->department, $actor, $opdQueue);
+                $this->workflow->updateVisitStatus($visit->refresh(), VisitStatus::InConsultation, $actor, $opdQueue);
+            }
             if ($allVisitOrdersTerminal && $this->visitClosure->requiresDoctorReview($visit)) {
                 $opd = Department::query()
                     ->where('facility_id', $visit->facility_id)

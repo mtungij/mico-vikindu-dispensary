@@ -16,7 +16,6 @@ use App\Models\FacilitySetting;
 use App\Models\Patient;
 use App\Models\Service;
 use App\Models\User;
-use App\Models\Visit;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -126,7 +125,7 @@ class AppointmentService
         return DB::transaction(function () use ($appointment, $data, $actor): Appointment {
             $appointment = Appointment::query()->lockForUpdate()->findOrFail($appointment->id);
             $appointment->update(['status' => AppointmentStatus::Rescheduled, 'updated_by' => $actor->id]);
-            $new = $this->create([...$appointment->only(['patient_id','department_id','service_id','appointment_type','priority','reason','notes']), ...$data, 'rescheduled_from' => $appointment->id], $actor);
+            $new = $this->create([...$appointment->only(['patient_id', 'department_id', 'service_id', 'appointment_type', 'priority', 'reason', 'notes']), ...$data, 'rescheduled_from' => $appointment->id], $actor);
             $new->update(['rescheduled_from' => $appointment->id]);
             $this->audit($actor, 'appointment_rescheduled', $new, ['from' => $appointment->appointment_number]);
 
@@ -211,7 +210,7 @@ class AppointmentService
     {
         $start = Carbon::parse($data['scheduled_start']);
 
-        return $this->create([
+        $appointment = $this->create([
             'patient_id' => $encounter->patient_id,
             'department_id' => $data['department_id'] ?? $encounter->department_id,
             'staff_id' => $data['assigned_to_user_id'] ?? null,
@@ -223,6 +222,13 @@ class AppointmentService
             'reason' => $data['reason'] ?? 'OPD follow-up',
             'notes' => $data['notes'] ?? null,
         ], $actor);
+        $appointment->update([
+            'visit_id' => $encounter->visit_id,
+            'clinical_encounter_id' => $encounter->id,
+            'updated_by' => $actor->id,
+        ]);
+
+        return $appointment->refresh();
     }
 
     private function startAt(array $data): Carbon

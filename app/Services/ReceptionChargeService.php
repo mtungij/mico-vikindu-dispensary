@@ -10,10 +10,8 @@ use App\Models\Facility;
 use App\Models\FacilitySetting;
 use App\Models\Invoice;
 use App\Models\Patient;
-use App\Models\PatientPayerProfile;
 use App\Models\Service;
 use App\Models\ServicePrice;
-use App\Models\Visit;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -86,7 +84,7 @@ class ReceptionChargeService
         return $this->requiredPrice($service, $payerType, $insuranceProviderId, $corporateAccountId);
     }
 
-    public function buildChargePreview(Facility $facility, bool $isNewPatient, ?int $destinationDepartmentId, ?int $consultationServiceId, array $payerData): array
+    public function buildChargePreview(Facility $facility, bool $isNewPatient, ?int $destinationDepartmentId, ?int $consultationServiceId, array $payerData, array $laboratoryServiceIds = []): array
     {
         $payerType = PayerType::from($payerData['payer_type'] ?? 'cash');
         $warnings = [];
@@ -123,6 +121,26 @@ class ReceptionChargeService
                 }
             } catch (ValidationException $exception) {
                 $blocking = array_merge($blocking, $this->messages($exception));
+            }
+
+            if (strtoupper((string) $destination->code) === 'LAB') {
+                $laboratoryServices = Service::query()
+                    ->where('facility_id', $facility->id)
+                    ->where('service_type', ServiceType::LaboratoryTest->value)
+                    ->where('is_active', true)
+                    ->whereIn('id', collect($laboratoryServiceIds)->map(fn ($id) => (int) $id)->unique())
+                    ->get();
+                foreach ($laboratoryServices as $service) {
+                    try {
+                        $price = $this->requiredPrice($service, $payerType, $payerData['insurance_provider_id'] ?? null, $payerData['corporate_account_id'] ?? null);
+                        $lines[] = $this->line('laboratory', $service, $price, $payerType, ['charge_source' => 'reception_direct']);
+                    } catch (ValidationException $exception) {
+                        $blocking = array_merge($blocking, $this->messages($exception));
+                    }
+                }
+                if ($laboratoryServices->isEmpty()) {
+                    $blocking[] = 'Chagua angalau kipimo kimoja cha maabara.';
+                }
             }
         }
 
@@ -361,13 +379,13 @@ class ReceptionChargeService
     private function nextStepLabel(PayerType $payerType, float $patientAmount, bool $paymentFirst, ?Department $destination): string
     {
         if ($paymentFirst && $patientAmount > 0) {
-            return 'Awaiting Payment';
+            return 'Cashier/Billing';
         }
 
         if ($destination?->requires_triage) {
             return 'Triage';
         }
 
-        return 'Destination Queue';
+        return strtoupper((string) $destination?->code) === 'LAB' ? 'Laboratory' : 'Destination Queue';
     }
 }

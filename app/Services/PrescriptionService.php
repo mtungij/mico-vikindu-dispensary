@@ -14,6 +14,7 @@ class PrescriptionService
     public function __construct(
         private readonly SequenceNumberService $numbers,
         private readonly VisitClosureService $visitClosure,
+        private readonly PrescriptionBillingService $billing,
     ) {}
 
     public function generatePrescriptionNumber(int $facilityId): string
@@ -68,7 +69,7 @@ class PrescriptionService
         }
         $prescription->update(['status' => PrescriptionStatus::Prescribed, 'updated_by' => $actor->id]);
 
-        return $prescription->refresh();
+        return $this->billing->bill($prescription->refresh(), $actor);
     }
 
     public function cancelPrescription(Prescription $prescription, string $reason, $actor): Prescription

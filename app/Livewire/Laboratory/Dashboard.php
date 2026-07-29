@@ -5,15 +5,30 @@ namespace App\Livewire\Laboratory;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryResult;
 use App\Models\LaboratorySample;
+use App\Services\LaboratoryReportService;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Component;
 
 class Dashboard extends Component
 {
-    public function mount(): void { Gate::authorize('laboratory.view-dashboard'); }
-    public function render(): View
+    public function mount(): void
     {
+        Gate::authorize('laboratory.view-dashboard');
+    }
+
+    public function render(LaboratoryReportService $reports): View
+    {
+        $releasedOrders = LaboratoryOrder::query()
+            ->forCurrentFacility()
+            ->with(['patient', 'visit', 'items.results'])
+            ->whereHas('items', fn ($items) => $items->where('result_status', 'released'))
+            ->latest('completed_at')
+            ->limit(10)
+            ->get()
+            ->filter(fn (LaboratoryOrder $order): bool => $reports->isEligible($order))
+            ->values();
+
         return view('livewire.laboratory.dashboard', [
             'cards' => [
                 'Orders Today' => LaboratoryOrder::query()->forCurrentFacility()->whereDate('ordered_at', today())->count(),
@@ -27,7 +42,14 @@ class Dashboard extends Component
                 'Rejected Samples' => LaboratorySample::query()->forCurrentFacility()->whereIn('sample_status', ['rejected', 'recollection_required'])->count(),
             ],
             'urgent' => LaboratoryOrder::query()->forCurrentFacility()->with('patient')->where('priority', 'urgent')->latest()->limit(8)->get(),
-            'verification' => LaboratoryResult::query()->forCurrentFacility()->with(['order.patient','test'])->where('result_status', 'pending_verification')->latest()->limit(8)->get(),
+            'verification' => LaboratoryResult::query()
+                ->forCurrentFacility()
+                ->with(['order.patient', 'test'])
+                ->whereIn('result_status', ['pending_verification', 'verified'])
+                ->latest()
+                ->limit(8)
+                ->get(),
+            'releasedOrders' => $releasedOrders,
         ])->layout('components.layouts.app', ['title' => 'Laboratory Dashboard', 'description' => 'Muhtasari wa samples, results na verification.']);
     }
 }

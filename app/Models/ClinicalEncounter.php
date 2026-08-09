@@ -77,6 +77,18 @@ class ClinicalEncounter extends Model
         return $this->belongsTo(User::class, 'signed_off_by');
     }
 
+    public function isTerminal(): bool
+    {
+        return (bool) $this->completed_at
+            || in_array($this->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true);
+    }
+
+    public function isReadOnly(): bool
+    {
+        return $this->isTerminal()
+            || in_array($this->visit?->visit_status?->value ?? $this->visit?->visit_status, ['completed', 'cancelled', 'referred', 'discharged'], true);
+    }
+
     public function complaints(): HasMany
     {
         return $this->hasMany(ClinicalComplaint::class);

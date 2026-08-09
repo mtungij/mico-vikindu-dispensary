@@ -22,4 +22,12 @@ class Prescription extends Model
     public function encounter(): BelongsTo { return $this->belongsTo(ClinicalEncounter::class, 'clinical_encounter_id'); }
     public function items(): HasMany { return $this->hasMany(PrescriptionItem::class); }
     public function dispensings(): HasMany { return $this->hasMany(Dispensing::class); }
+
+    public function isEditableDraft(): bool
+    {
+        return $this->status === PrescriptionStatus::Draft
+            && ! $this->encounter?->isReadOnly()
+            && ! $this->items()->where(fn ($query) => $query->whereNotNull('invoice_item_id')->orWhere('dispensed_quantity', '>', 0))->exists()
+            && ! $this->dispensings()->exists();
+    }
 }

@@ -8,7 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-#[Fillable(['prescription_id', 'medicine_id', 'medication_name', 'generic_name', 'strength', 'dosage_form', 'dose', 'route', 'frequency', 'duration_value', 'duration_unit', 'quantity', 'dispensed_quantity', 'remaining_quantity', 'substitution_medicine_id', 'substitution_reason', 'dispensing_status', 'unit_price_snapshot', 'patient_amount', 'insurance_amount', 'payer_amount', 'instructions', 'indication', 'substitution_allowed', 'status', 'service_id', 'invoice_item_id', 'created_by'])]
+#[Fillable(['prescription_id', 'medicine_id', 'medication_name', 'generic_name', 'strength', 'dosage_form', 'dose', 'route', 'frequency', 'duration_value', 'duration_unit', 'quantity', 'dispensed_quantity', 'remaining_quantity', 'substitution_medicine_id', 'substitution_reason', 'dispensing_status', 'unit_price_snapshot', 'patient_amount', 'insurance_amount', 'payer_amount', 'instructions', 'indication', 'substitution_allowed', 'status', 'service_id', 'invoice_item_id', 'created_by', 'updated_by'])]
 class PrescriptionItem extends Model
 {
     use HasFactory, SoftDeletes;

@@ -44,6 +44,10 @@ class Index extends Component
     public bool $require_consultation_service = true;
     public bool $auto_add_registration_fee = true;
     public bool $auto_add_consultation_fee = true;
+    public bool $charge_returning_patient_consultation = false;
+    public ?int $returning_patient_consultation_service_id = null;
+    public bool $charge_emergency_consultation = false;
+    public ?int $emergency_consultation_service_id = null;
 
     public ?TemporaryUploadedFile $logo = null;
     public ?TemporaryUploadedFile $official_stamp = null;
@@ -112,6 +116,10 @@ class Index extends Component
             'require_consultation_service' => ['boolean'],
             'auto_add_registration_fee' => ['boolean'],
             'auto_add_consultation_fee' => ['boolean'],
+            'charge_returning_patient_consultation' => ['boolean'],
+            'returning_patient_consultation_service_id' => ['nullable', 'required_if:charge_returning_patient_consultation,true', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)->where('service_type', 'consultation')->where('is_active', true)],
+            'charge_emergency_consultation' => ['boolean'],
+            'emergency_consultation_service_id' => ['nullable', 'required_if:charge_emergency_consultation,true', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)->where('service_type', 'consultation')->where('is_active', true)],
         ]);
 
         foreach ($validated as $key => $value) {
@@ -179,6 +187,10 @@ class Index extends Component
         $this->require_consultation_service = (bool) $settings->getSetting($this->facility, 'require_consultation_service', true);
         $this->auto_add_registration_fee = (bool) $settings->getSetting($this->facility, 'auto_add_registration_fee', true);
         $this->auto_add_consultation_fee = (bool) $settings->getSetting($this->facility, 'auto_add_consultation_fee', true);
+        $this->charge_returning_patient_consultation = (bool) $settings->getSetting($this->facility, 'charge_returning_patient_consultation', false);
+        $this->returning_patient_consultation_service_id = filled($settings->getSetting($this->facility, 'returning_patient_consultation_service_id')) ? (int) $settings->getSetting($this->facility, 'returning_patient_consultation_service_id') : null;
+        $this->charge_emergency_consultation = (bool) $settings->getSetting($this->facility, 'charge_emergency_consultation', false);
+        $this->emergency_consultation_service_id = filled($settings->getSetting($this->facility, 'emergency_consultation_service_id')) ? (int) $settings->getSetting($this->facility, 'emergency_consultation_service_id') : null;
     }
 
     public function render(): View
@@ -186,6 +198,7 @@ class Index extends Component
         return view('livewire.settings.facility.index', [
             'registrationServices' => Service::query()->where('facility_id', $this->facility->id)->where('service_type', 'registration')->where('is_active', true)->orderBy('name')->get(),
             'administrativeServices' => Service::query()->where('facility_id', $this->facility->id)->whereIn('service_type', ['administrative_service', 'registration'])->where('is_active', true)->orderBy('name')->get(),
+            'consultationServices' => Service::query()->where('facility_id', $this->facility->id)->where('service_type', 'consultation')->where('is_active', true)->orderBy('name')->get(),
         ])
             ->layout('components.layouts.app', [
                 'title' => 'Facility Settings',

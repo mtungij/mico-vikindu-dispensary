@@ -8,6 +8,7 @@ use App\Enums\PayerType;
 use App\Livewire\Patients\Index as PatientsIndex;
 use App\Livewire\Reception\Index as ReceptionIndex;
 use App\Livewire\Services\Categories\Index as ServiceCategoriesIndex;
+use App\Models\ActivityLog;
 use App\Models\Department;
 use App\Models\Facility;
 use App\Models\FacilitySetting;
@@ -19,9 +20,13 @@ use App\Models\Patient;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
+use App\Models\StaffProfile;
 use App\Models\User;
+use App\Models\Visit;
+use App\Models\WorkflowSetting;
 use App\Services\PatientDocumentService;
 use App\Services\PatientDuplicateDetectionService;
+use App\Services\PatientSearchService;
 use App\Services\ReceptionChargeService;
 use App\Services\ReceptionWorkflowService;
 use App\Services\ServicePricingService;
@@ -45,6 +50,18 @@ use Tests\TestCase;
 class Step5FoundationTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_existing_patient_search_is_ranked_and_facility_scoped(): void
+    {
+        $this->bootstrappedFacility();
+        $exact = Patient::factory()->create(['facility_id' => currentFacility()->id, 'patient_number' => 'PAT-EXACT-1', 'first_name' => 'Asha', 'last_name' => 'Mtei', 'primary_phone' => '255712345678']);
+        Patient::factory()->create(['facility_id' => currentFacility()->id, 'patient_number' => 'PAT-OTHER-1', 'first_name' => 'Exact', 'last_name' => 'One']);
+
+        $results = app(PatientSearchService::class)->search('PAT-EXACT-1');
+
+        $this->assertSame($exact->id, $results->first()->id);
+        $this->assertTrue($results->every(fn ($patient) => $patient->facility_id === currentFacility()->id));
+    }
 
     public function test_authorized_user_can_create_service_category(): void
     {
@@ -156,6 +173,254 @@ class Step5FoundationTest extends TestCase
         $this->assertDatabaseCount('clinical_encounters', 0);
         $this->assertDatabaseMissing('patient_queues', ['visit_id' => $result['visit']->id, 'department_id' => Department::query()->where('code', 'OPD')->value('id')]);
         $this->assertDatabaseHas('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $service->id, 'item_type' => 'laboratory_test']);
+        $this->assertFalse($result['invoice']->items()->where('item_type', 'registration')->exists());
+    }
+
+    public function test_emergency_visit_does_not_automatically_receive_new_patient_registration_fee(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $consultation] = $this->opdConsultation();
+        $result = app(ReceptionWorkflowService::class)->registerNewPatientAndVisit([
+            'first_name' => 'Emergency', 'last_name' => 'Patient', 'gender' => 'female', 'age_years' => 31, 'patient_status' => 'active',
+        ], ['payer_type' => 'cash', 'is_primary' => true], [
+            ...$this->visitData($department, $consultation), 'visit_type' => 'emergency', 'require_payment_before_service' => false,
+        ], [], $admin);
+
+        $this->assertFalse($result['invoice']->items()->where('item_type', 'registration')->exists());
+        $this->assertFalse($result['invoice']->items()->where('item_type', 'consultation')->exists());
+        $this->assertNotSame('awaiting_payment', $result['visit']->visit_status->value);
+    }
+
+    public function test_returning_and_emergency_visits_ignore_stale_general_opd_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $general] = $this->opdConsultation();
+        $patient = $this->patient($admin);
+
+        $returningPreview = app(ReceptionChargeService::class)->buildChargePreview(currentFacility(), false, $department->id, $general->id, ['payer_type' => 'cash'], [], 'returning_patient');
+        $this->assertNull($returningPreview['consultation']);
+        $this->assertEquals(0.0, $returningPreview['total']);
+
+        $returning = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], [
+            ...$this->visitData($department, $general), 'consultation_service_id' => $general->id,
+        ], [], $admin);
+        $this->assertNull($returning['visit']->consultation_service_id);
+        $this->assertFalse($returning['invoice']->items()->where('item_type', 'consultation')->exists());
+        $returning['visit']->update(['visit_status' => 'completed']);
+
+        WorkflowSetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'allow_emergency_override'], ['value' => '1', 'type' => 'boolean', 'group' => 'workflow']);
+        $emergencyPreview = app(ReceptionChargeService::class)->buildChargePreview(currentFacility(), true, $department->id, $general->id, ['payer_type' => 'cash', 'require_payment_before_service' => true], [], 'emergency');
+        $this->assertNull($emergencyPreview['consultation']);
+        $this->assertNotSame('Cashier/Billing', $emergencyPreview['next_step']);
+        $emergency = app(ReceptionWorkflowService::class)->registerNewPatientAndVisit([
+            'first_name' => 'Emergency', 'last_name' => 'No General Fee', 'gender' => 'female', 'age_years' => 28, 'patient_status' => 'active',
+        ], ['payer_type' => 'cash', 'is_primary' => true], [
+            ...$this->visitData($department, $general), 'visit_type' => 'emergency', 'consultation_service_id' => $general->id,
+        ], [], $admin);
+        $this->assertNull($emergency['visit']->consultation_service_id);
+        $this->assertFalse($emergency['invoice']->items()->where('item_type', 'consultation')->exists());
+        $this->assertNotSame('awaiting_payment', $emergency['visit']->visit_status->value);
+    }
+
+    public function test_visit_type_specific_consultation_requires_explicit_configuration_and_matches_preview(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $general] = $this->opdConsultation();
+        $specific = $general->replicate();
+        $specific->name = 'Returning OPD Consultation';
+        $specific->code = 'RETURN-OPD-CONSULT';
+        $specific->save();
+        app(ServicePricingService::class)->createPriceVersion($specific, ['payer_type' => 'cash', 'amount' => 2500, 'currency' => 'TZS'], $admin);
+        FacilitySetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'charge_returning_patient_consultation'], ['value' => '1', 'type' => 'boolean', 'group' => 'reception_billing']);
+        FacilitySetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'returning_patient_consultation_service_id'], ['value' => (string) $specific->id, 'type' => 'string', 'group' => 'reception_billing']);
+
+        $preview = app(ReceptionChargeService::class)->buildChargePreview(currentFacility()->refresh(), false, $department->id, $general->id, ['payer_type' => 'cash'], [], 'returning_patient');
+        $this->assertSame($specific->id, $preview['consultation']['service_id']);
+        $patient = $this->patient($admin);
+        $result = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], [
+            ...$this->visitData($department, $general), 'consultation_service_id' => $general->id,
+        ], [], $admin);
+
+        $this->assertSame($specific->id, $result['visit']->consultation_service_id);
+        $this->assertSame((float) $preview['total'], (float) $result['invoice']->refresh()->total_amount);
+        $this->assertSame(1, $result['invoice']->items()->where('item_type', 'consultation')->count());
+        $this->assertDatabaseMissing('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $general->id]);
+
+        $emergencySpecific = $general->replicate();
+        $emergencySpecific->name = 'Emergency OPD Consultation';
+        $emergencySpecific->code = 'EMERGENCY-OPD-CONSULT';
+        $emergencySpecific->save();
+        app(ServicePricingService::class)->createPriceVersion($emergencySpecific, ['payer_type' => 'cash', 'amount' => 3000, 'currency' => 'TZS'], $admin);
+        FacilitySetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'charge_emergency_consultation'], ['value' => '1', 'type' => 'boolean', 'group' => 'reception_billing']);
+        FacilitySetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'emergency_consultation_service_id'], ['value' => (string) $emergencySpecific->id, 'type' => 'string', 'group' => 'reception_billing']);
+        $emergencyPreview = app(ReceptionChargeService::class)->buildChargePreview(currentFacility()->refresh(), true, $department->id, $general->id, ['payer_type' => 'cash'], [], 'emergency');
+        $this->assertSame($emergencySpecific->id, $emergencyPreview['consultation']['service_id']);
+        $emergency = app(ReceptionWorkflowService::class)->registerNewPatientAndVisit([
+            'first_name' => 'Configured', 'last_name' => 'Emergency', 'gender' => 'male', 'age_years' => 35, 'patient_status' => 'active',
+        ], ['payer_type' => 'cash', 'is_primary' => true], [
+            ...$this->visitData($department, $general), 'visit_type' => 'emergency', 'consultation_service_id' => $general->id,
+        ], [], $admin);
+        $this->assertSame($emergencySpecific->id, $emergency['visit']->consultation_service_id);
+        $this->assertSame((float) $emergencyPreview['total'], (float) $emergency['invoice']->refresh()->total_amount);
+        $this->assertNotSame('awaiting_payment', $emergency['visit']->visit_status->value);
+    }
+
+    public function test_changing_new_visit_to_returning_or_emergency_clears_stale_consultation_preview(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $general] = $this->opdConsultation();
+
+        Livewire::actingAs($admin)->test(PatientsIndex::class)
+            ->call('create')
+            ->set('visit.destination_department_id', $department->id)
+            ->set('visit.consultation_service_id', $general->id)
+            ->assertSet('chargePreview.consultation.service_id', $general->id)
+            ->set('visit.visit_type', 'returning_patient')
+            ->assertSet('visit.consultation_service_id', null)
+            ->assertSet('chargePreview.consultation', null)
+            ->set('visit.visit_type', 'new_patient')
+            ->assertSet('visit.consultation_service_id', $general->id)
+            ->assertSet('chargePreview.consultation.service_id', $general->id)
+            ->set('visit.visit_type', 'emergency')
+            ->assertSet('visit.consultation_service_id', null)
+            ->assertSet('chargePreview.consultation', null);
+    }
+
+    public function test_returning_visit_without_selected_patient_is_blocked_and_sent_to_search(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department] = $this->opdConsultation();
+
+        Livewire::actingAs($admin)->test(PatientsIndex::class)
+            ->call('create')
+            ->set('visit.visit_type', 'returning_patient')
+            ->set('visit.destination_department_id', $department->id)
+            ->set('step', 6)
+            ->assertSee('Chagua mgonjwa wa zamani kabla ya kuhifadhi Returning Visit.')
+            ->call('save')
+            ->assertSet('step', 1)
+            ->assertHasErrors(['selectedPatientId', 'save'])
+            ->assertSee('Returning visit requires selecting an existing patient first.');
+
+        $this->assertDatabaseCount('patients', 0);
+        $this->assertDatabaseCount('visits', 0);
+    }
+
+    public function test_selected_existing_patient_persists_and_saves_only_a_returning_visit(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $patient = $this->patient($admin);
+        [$department] = $this->opdConsultation();
+        $patientCount = Patient::query()->count();
+
+        Livewire::actingAs($admin)->test(PatientsIndex::class)
+            ->call('create')
+            ->call('selectExistingPatient', $patient->id)
+            ->assertSet('selectedPatientId', $patient->id)
+            ->assertSet('visit.visit_type', 'returning_patient')
+            ->set('visit.destination_department_id', $department->id)
+            ->set('visit.require_payment_before_service', false)
+            ->set('step', 6)
+            ->assertSee($patient->fullName())
+            ->assertSee($patient->patient_number)
+            ->assertSee('Patient status: Existing')
+            ->assertSee('Inahifadhi...')
+            ->call('save')
+            ->assertHasNoErrors()
+            ->assertRedirect(route('patients.show', $patient));
+
+        $this->assertSame($patientCount, Patient::query()->count());
+        $visit = Visit::query()->where('patient_id', $patient->id)->sole();
+        $this->assertSame('returning_patient', $visit->visit_type->value);
+        $this->assertSame(1, $visit->queues()->count());
+        $this->assertDatabaseHas('activity_logs', ['event' => 'visit_created', 'subject_type' => Visit::class, 'subject_id' => $visit->id]);
+        $this->assertFalse($visit->invoice->items()->where('item_type', 'registration')->exists());
+    }
+
+    public function test_active_visit_blocks_returning_save_without_override_and_is_visible(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $consultation] = $this->opdConsultation();
+        $existing = $this->registerPatient($admin, $department, $consultation, 'cash', 'Active');
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['user_id' => $user->id, 'facility_id' => currentFacility()->id]);
+        $user->givePermissionTo(['patients.view', 'patients.create', 'reception.open-visit']);
+
+        Livewire::actingAs($user)->test(PatientsIndex::class)
+            ->call('create')
+            ->call('selectExistingPatient', $existing['patient']->id)
+            ->set('visit.destination_department_id', $department->id)
+            ->set('step', 6)
+            ->assertSee('Mgonjwa huyu tayari ana active visit '.$existing['visit']->visit_number.'.')
+            ->assertSee('Open Active Visit')
+            ->assertSee('Continue Existing Visit')
+            ->call('save')
+            ->assertHasErrors(['activeVisit']);
+
+        $this->assertSame(1, Visit::query()->where('patient_id', $existing['patient']->id)->count());
+    }
+
+    public function test_active_visit_override_permission_allows_a_new_returning_visit(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $consultation] = $this->opdConsultation();
+        $existing = $this->registerPatient($admin, $department, $consultation, 'cash', 'Override');
+
+        Livewire::actingAs($admin)->test(PatientsIndex::class)
+            ->call('create')
+            ->call('selectExistingPatient', $existing['patient']->id)
+            ->set('visit.destination_department_id', $department->id)
+            ->set('visit.require_payment_before_service', false)
+            ->set('step', 6)
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $this->assertSame(2, Visit::query()->where('patient_id', $existing['patient']->id)->count());
+        $this->assertSame(1, Visit::query()->where('patient_id', $existing['patient']->id)->where('visit_type', 'returning_patient')->count());
+    }
+
+    public function test_returning_registration_idempotency_prevents_duplicate_visit_invoice_and_queue(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $patient = $this->patient($admin);
+        [$department, $consultation] = $this->opdConsultation();
+        $data = [
+            ...$this->visitData($department, $consultation),
+            'visit_type' => 'returning_patient',
+            'registration_idempotency_key' => (string) Str::uuid(),
+            'require_payment_before_service' => false,
+        ];
+
+        $first = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], $data, [], $admin);
+        $second = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient->refresh(), ['payer_type' => 'cash', 'is_primary' => true], $data, [], $admin);
+
+        $this->assertSame($first['visit']->id, $second['visit']->id);
+        $this->assertSame(1, Visit::query()->where('patient_id', $patient->id)->count());
+        $this->assertSame(1, $first['visit']->invoice()->count());
+        $this->assertSame(1, $first['visit']->queues()->count());
+        $this->assertSame(1, ActivityLog::query()->where('event', 'visit_created')->where('subject_type', Visit::class)->where('subject_id', $first['visit']->id)->count());
+    }
+
+    public function test_returning_save_authorization_failure_is_shown_on_final_step(): void
+    {
+        $this->bootstrappedFacility();
+        $admin = User::query()->where('is_super_admin', true)->firstOrFail();
+        $patient = $this->patient($admin);
+        [$department] = $this->opdConsultation();
+        $user = User::factory()->create();
+        StaffProfile::factory()->create(['user_id' => $user->id, 'facility_id' => currentFacility()->id]);
+        $user->givePermissionTo(['patients.view', 'patients.create']);
+
+        Livewire::actingAs($user)->test(PatientsIndex::class)
+            ->call('create')
+            ->call('selectExistingPatient', $patient->id)
+            ->set('visit.destination_department_id', $department->id)
+            ->set('step', 6)
+            ->call('save')
+            ->assertHasErrors(['authorization'])
+            ->assertSee('Huna ruhusa ya kusajili visit hii.');
+
+        $this->assertDatabaseCount('visits', 0);
     }
 
     public function test_direct_laboratory_registration_is_idempotent(): void

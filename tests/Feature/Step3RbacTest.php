@@ -131,6 +131,23 @@ class Step3RbacTest extends TestCase
         }
     }
 
+    public function test_prescription_update_permission_is_preselected_for_default_clinician_roles_only(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->seed(RolePermissionSeeder::class);
+
+        foreach (['administrator', 'doctor', 'clinical-officer'] as $roleName) {
+            $role = Role::query()->where('name', $roleName)->firstOrFail();
+            $this->assertTrue($role->hasPermissionTo('prescriptions.update'));
+            Livewire::actingAs($admin)->test(ManagePermissions::class, ['role' => $role])
+                ->assertSet('selectedPermissions', fn (array $permissions): bool => in_array('prescriptions.update', $permissions, true));
+        }
+
+        foreach (['receptionist', 'cashier', 'pharmacist'] as $roleName) {
+            $this->assertFalse(Role::query()->where('name', $roleName)->firstOrFail()->hasPermissionTo('prescriptions.update'));
+        }
+    }
+
     public function test_user_without_department_permission_cannot_access_department_settings(): void
     {
         $this->bootstrappedFacility();

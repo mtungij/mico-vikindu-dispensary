@@ -15,12 +15,16 @@ use App\Models\LaboratoryTest;
 use App\Models\Patient;
 use App\Models\Service;
 use App\Services\PatientDuplicateDetectionService;
+use App\Services\PatientSearchService;
 use App\Services\ReceptionChargeService;
 use App\Services\ReceptionWorkflowService;
 use App\Support\Notifier;
 use Illuminate\Contracts\View\View;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Str;
+use Throwable;
 use Livewire\Component;
 use Livewire\WithPagination;
 
@@ -52,6 +56,16 @@ class Index extends Component
 
     public array $selectedLaboratoryTestIds = [];
 
+    public string $patientLookup = '';
+
+    public array $patientMatches = [];
+
+    public ?int $selectedPatientId = null;
+
+    public bool $confirmDuplicateCreation = false;
+
+    public ?int $newPatientConsultationServiceId = null;
+
     public function mount(): void
     {
         Gate::authorize('viewAny', Patient::class);
@@ -74,13 +88,56 @@ class Index extends Component
         $this->duplicates = [];
         $this->selectedLaboratoryTestIds = [];
         $this->chargePreview = [];
+        $this->patientLookup = '';
+        $this->patientMatches = [];
+        $this->selectedPatientId = null;
+        $this->confirmDuplicateCreation = false;
+        $this->newPatientConsultationServiceId = null;
         $this->showModal = true;
         $this->refreshChargePreview();
     }
 
     public function searchDuplicates(PatientDuplicateDetectionService $detector): void
     {
-        $this->duplicates = $detector->detect($this->personal->data());
+        $this->duplicates = $detector->detect($this->personal->all());
+    }
+
+    public function updatedPatientLookup(PatientSearchService $search): void
+    {
+        $this->patientMatches = $search->search($this->patientLookup)->map(fn (Patient $patient) => [
+            'id' => $patient->id, 'name' => $patient->fullName(), 'patient_number' => $patient->patient_number,
+            'age' => $patient->ageLabel(), 'sex' => $patient->gender?->label(), 'phone' => $patient->primary_phone,
+            'nida' => $patient->nida_number, 'last_visit' => $patient->latestVisit?->visit_number,
+            'active_visit' => $patient->activeVisit?->visit_number, 'active_visit_id' => $patient->activeVisit?->id,
+            'payer' => $patient->primaryPayerProfile?->payer_type?->label(), 'status' => $patient->patient_status?->label(),
+        ])->all();
+    }
+
+    public function selectExistingPatient(int $patientId): void
+    {
+        $patient = Patient::query()->forCurrentFacility()->with('primaryPayerProfile')->findOrFail($patientId);
+        Gate::authorize('view', $patient);
+        $this->resetErrorBag();
+        $this->selectedPatientId = $patient->id;
+        $this->newPatientConsultationServiceId = $this->visit->consultation_service_id;
+        $this->visit->visit_type = 'returning_patient';
+        $this->visit->consultation_service_id = null;
+        if ($profile = $patient->primaryPayerProfile) {
+            foreach (array_keys($this->payer->rules()) as $field) {
+                $value = $profile->{$field};
+                $this->payer->{$field} = $value instanceof \BackedEnum ? $value->value : $value;
+            }
+        }
+        $this->refreshChargePreview();
+        $this->step = 4;
+    }
+
+    public function clearSelectedPatient(): void
+    {
+        $this->resetErrorBag();
+        $this->selectedPatientId = null;
+        $this->visit->visit_type = 'new_patient';
+        $this->refreshChargePreview();
     }
 
     public function nextStep(): void
@@ -93,6 +150,11 @@ class Index extends Component
         }
         if ($this->step === 5) {
             $this->visit->validate();
+            if ($this->returningPatientIsMissing()) {
+                $this->showMissingReturningPatient();
+
+                return;
+            }
             if ($this->isDirectLaboratory() && $this->selectedLaboratoryTestIds === []) {
                 $this->addError('selectedLaboratoryTestIds', 'Chagua angalau kipimo kimoja cha maabara.');
 
@@ -144,11 +206,21 @@ class Index extends Component
 
     public function updatedVisitConsultationServiceId(): void
     {
+        if ($this->visit->visit_type === 'new_patient') {
+            $this->newPatientConsultationServiceId = $this->visit->consultation_service_id;
+        }
         $this->refreshChargePreview();
     }
 
     public function updatedVisitVisitType(): void
     {
+        if ($this->selectedPatientId) $this->visit->visit_type = 'returning_patient';
+        if ($this->visit->visit_type === 'new_patient') {
+            $this->visit->consultation_service_id = $this->newPatientConsultationServiceId;
+        } else {
+            $this->newPatientConsultationServiceId ??= $this->visit->consultation_service_id;
+            $this->visit->consultation_service_id = null;
+        }
         $this->refreshChargePreview();
     }
 
@@ -160,26 +232,82 @@ class Index extends Component
 
             return;
         }
-        $this->chargePreview = app(ReceptionChargeService::class)->buildChargePreview($facility, true, $this->visit->destination_department_id, $this->visit->consultation_service_id, [
+        $isNewPatient = $this->selectedPatientId === null && $this->visit->visit_type === 'new_patient';
+        $this->chargePreview = app(ReceptionChargeService::class)->buildChargePreview($facility, $isNewPatient, $this->visit->destination_department_id, $this->visit->consultation_service_id, [
             'payer_type' => $this->payer->payer_type,
             'insurance_provider_id' => $this->payer->insurance_provider_id,
             'corporate_account_id' => $this->payer->corporate_account_id,
             'require_payment_before_service' => $this->visit->require_payment_before_service,
-        ], $this->selectedLaboratoryTestIds);
+        ], $this->selectedLaboratoryTestIds, $this->visit->visit_type);
     }
 
-    public function save(ReceptionWorkflowService $workflow): void
+    public function save(ReceptionWorkflowService $workflow): mixed
     {
-        Gate::authorize('create', Patient::class);
-        if ($this->isDirectLaboratory() && $this->selectedLaboratoryTestIds === []) {
-            $this->addError('selectedLaboratoryTestIds', 'Chagua angalau kipimo kimoja cha maabara.');
+        $this->resetErrorBag();
+        if ($this->returningPatientIsMissing()) {
+            $this->showMissingReturningPatient();
 
-            return;
+            return null;
         }
-        $result = $workflow->registerNewPatientAndVisit($this->personal->data(), $this->payer->data(), $this->visit->data(), $this->selectedLaboratoryTestIds, auth()->user());
+
+        try {
+            if ($this->selectedPatientId) {
+                Gate::authorize('reception.open-visit');
+                $patient = Patient::query()->forCurrentFacility()->with(['primaryPayerProfile', 'activeVisit'])->find($this->selectedPatientId);
+                if (! $patient) {
+                    $this->showMissingReturningPatient();
+
+                    return null;
+                }
+                Gate::authorize('view', $patient);
+                if ($patient->activeVisit && ! auth()->user()->can('reception.override-active-visit')) {
+                    throw ValidationException::withMessages([
+                        'activeVisit' => 'Mgonjwa huyu tayari ana active visit '.$patient->activeVisit->visit_number.'.',
+                    ]);
+                }
+            } else {
+                Gate::authorize('create', Patient::class);
+                $duplicates = app(PatientDuplicateDetectionService::class)->detect($this->personal->data());
+                if ($duplicates['status'] !== 'none' && ! $this->confirmDuplicateCreation) {
+                    $this->duplicates = $duplicates;
+                    $this->addError('duplicate', 'Kuna mgonjwa anayefanana. Chagua mgonjwa aliyepo au thibitisha kuunda rekodi mpya.');
+                    $this->step = 1;
+                    Notifier::warning('Tafadhali rekebisha taarifa zifuatazo.');
+
+                    return null;
+                }
+            }
+            if ($this->isDirectLaboratory() && $this->selectedLaboratoryTestIds === []) {
+                throw ValidationException::withMessages([
+                    'selectedLaboratoryTestIds' => 'Chagua angalau kipimo kimoja cha maabara.',
+                ]);
+            }
+            $result = $this->selectedPatientId
+                ? $workflow->openReturningPatientVisit($patient, $this->payer->data(), [...$this->visit->data(), 'visit_type' => 'returning_patient'], $this->selectedLaboratoryTestIds, auth()->user())
+                : $workflow->registerNewPatientAndVisit($this->personal->data(), $this->payer->data(), $this->visit->data(), $this->selectedLaboratoryTestIds, auth()->user());
+        } catch (ValidationException $exception) {
+            $this->showValidationFailure($exception);
+
+            return null;
+        } catch (AuthorizationException) {
+            $message = 'Huna ruhusa ya kusajili visit hii.';
+            $this->addError('authorization', $message);
+            Notifier::error($message);
+
+            return null;
+        } catch (Throwable $exception) {
+            report($exception);
+            $message = 'Imeshindikana kuhifadhi taarifa. Tafadhali jaribu tena.';
+            $this->addError('save', $message);
+            Notifier::error($message);
+
+            return null;
+        }
+
         $this->showModal = false;
         Notifier::success('patients.created');
-        $this->redirectRoute('patients.show', $result['patient']);
+
+        return $this->redirectRoute('patients.show', $result['patient']);
     }
 
     public function render(): View
@@ -193,12 +321,39 @@ class Index extends Component
         $consultationServices = Service::query()->forCurrentFacility()->where('is_active', true)->where('service_type', 'consultation')->when($this->visit->destination_department_id, fn ($q) => $q->where('department_id', $this->visit->destination_department_id))->orderBy('name')->get();
         $laboratoryTests = LaboratoryTest::query()->forCurrentFacility()->with(['service', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get();
 
-        return view('livewire.patients.index', ['patients' => $patients, 'genders' => Gender::cases(), 'statuses' => PatientStatus::cases(), 'payerTypes' => PayerType::cases(), 'departments' => $departments, 'services' => $consultationServices, 'laboratoryTests' => $laboratoryTests, 'providers' => InsuranceProvider::query()->forCurrentFacility()->where('is_active', true)->get(), 'corporates' => CorporateAccount::query()->forCurrentFacility()->where('is_active', true)->get()])
+        $selectedPatient = $this->selectedPatientId
+            ? Patient::query()->forCurrentFacility()->with(['latestVisit', 'activeVisit'])->find($this->selectedPatientId)
+            : null;
+
+        return view('livewire.patients.index', ['patients' => $patients, 'selectedPatient' => $selectedPatient, 'genders' => Gender::cases(), 'statuses' => PatientStatus::cases(), 'payerTypes' => PayerType::cases(), 'departments' => $departments, 'services' => $consultationServices, 'laboratoryTests' => $laboratoryTests, 'providers' => InsuranceProvider::query()->forCurrentFacility()->where('is_active', true)->get(), 'corporates' => CorporateAccount::query()->forCurrentFacility()->where('is_active', true)->get()])
             ->layout('components.layouts.app', ['title' => 'Wagonjwa', 'description' => 'Sajili wagonjwa na fungua visits.']);
     }
 
     public function isDirectLaboratory(): bool
     {
         return Department::query()->forCurrentFacility()->whereKey($this->visit->destination_department_id)->where('code', 'LAB')->exists();
+    }
+
+    public function returningPatientIsMissing(): bool
+    {
+        return $this->visit->visit_type === 'returning_patient' && ! $this->selectedPatientId;
+    }
+
+    private function showMissingReturningPatient(): void
+    {
+        $this->addError('selectedPatientId', 'Returning visit requires selecting an existing patient first.');
+        $this->addError('save', 'Chagua mgonjwa wa zamani kabla ya kuhifadhi Returning Visit.');
+        $this->step = 1;
+        Notifier::warning('Returning visit requires an existing patient.');
+    }
+
+    private function showValidationFailure(ValidationException $exception): void
+    {
+        foreach ($exception->errors() as $field => $messages) {
+            foreach ($messages as $message) {
+                $this->addError($field, $message);
+            }
+        }
+        Notifier::warning('Tafadhali rekebisha taarifa zifuatazo.');
     }
 }

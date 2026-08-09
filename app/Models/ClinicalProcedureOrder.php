@@ -20,4 +20,5 @@ class ClinicalProcedureOrder extends Model
     public function visit(): BelongsTo { return $this->belongsTo(Visit::class); }
     public function encounter(): BelongsTo { return $this->belongsTo(ClinicalEncounter::class, 'clinical_encounter_id'); }
     public function service(): BelongsTo { return $this->belongsTo(Service::class); }
+    public function invoiceItem(): BelongsTo { return $this->belongsTo(InvoiceItem::class); }
 }

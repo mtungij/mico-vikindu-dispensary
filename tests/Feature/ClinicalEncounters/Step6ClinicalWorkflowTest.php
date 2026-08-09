@@ -43,6 +43,8 @@ use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
 use App\Services\PaymentConfirmationService;
+use App\Services\PrescriptionService;
+use App\Services\ProcedureOrderService;
 use App\Services\TriageService;
 use App\Services\VisitClosureService;
 use App\Services\VitalSignAssessmentService;
@@ -63,6 +65,104 @@ use Tests\TestCase;
 class Step6ClinicalWorkflowTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_doctor_and_clinical_officer_can_open_and_update_their_draft_medicine_item(): void
+    {
+        $admin = $this->bootstrappedFacility();
+
+        foreach (['doctor', 'clinical-officer'] as $index => $roleName) {
+            $clinician = $this->staffUser($roleName);
+            $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+            $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $clinician);
+            $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                'medication_name' => 'Draft medicine '.$index, 'dose' => '1 tablet', 'frequency' => 'BD', 'duration_value' => 3, 'duration_unit' => 'days',
+            ]]], $clinician);
+            $item = $prescription->items()->firstOrFail();
+
+            Livewire::actingAs($clinician)->test(OpdConsultation::class, ['visit' => $visit])
+                ->call('editPrescriptionItem', $item->id)
+                ->assertSet('editingPrescriptionItemId', $item->id)
+                ->set('prescriptionItemForm.dose', '2 tablets')
+                ->call('updatePrescriptionItem')
+                ->assertHasNoErrors()
+                ->assertSet('editingPrescriptionItemId', null);
+
+            $this->assertSame(1, $prescription->items()->count());
+            $this->assertSame('2 tablets', $item->refresh()->dose);
+        }
+    }
+
+    public function test_non_clinical_roles_cannot_mutate_a_doctors_draft_prescription(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medication_name' => 'Protected draft', 'dose' => '1 tablet', 'frequency' => 'OD', 'duration_value' => 2, 'duration_unit' => 'days',
+        ]]], $doctor);
+
+        foreach (['receptionist', 'cashier', 'pharmacist'] as $roleName) {
+            $user = $this->staffUser($roleName);
+            $this->assertFalse(Gate::forUser($user)->allows('update', $prescription), $roleName.' unexpectedly has prescription update permission.');
+        }
+    }
+
+    public function test_doctor_can_update_and_remove_a_draft_prescription_item_without_duplication(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medication_name' => 'Paracetamol', 'dose' => '1 tablet', 'frequency' => 'TDS',
+            'duration_value' => 5, 'duration_unit' => 'days',
+        ]]], $admin);
+        $item = $prescription->items()->firstOrFail();
+
+        app(PrescriptionService::class)->updateItem($item, [
+            'medication_name' => 'Paracetamol', 'dose' => '2 tablets', 'frequency' => 'BD',
+            'duration_value' => 3, 'duration_unit' => 'days', 'instructions' => 'After food',
+        ], $admin);
+
+        $this->assertSame(1, $prescription->items()->count());
+        $this->assertSame('12.00', $item->refresh()->quantity);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'prescription_item_updated', 'subject_id' => $item->id]);
+        app(PrescriptionService::class)->removeItem($item, $admin);
+        $this->assertSame(0, $prescription->items()->count());
+        $this->assertDatabaseHas('activity_logs', ['event' => 'prescription_item_removed', 'subject_id' => $item->id]);
+    }
+
+    public function test_non_draft_or_dispensed_prescription_item_cannot_be_silently_edited(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medication_name' => 'Amoxicillin', 'dose' => '1 capsule', 'frequency' => 'TDS', 'duration_value' => 5, 'duration_unit' => 'days',
+        ]]], $admin);
+        $prescription->update(['status' => 'partially_dispensed']);
+
+        $this->expectException(ValidationException::class);
+        app(PrescriptionService::class)->updateItem($prescription->items()->firstOrFail(), [
+            'medication_name' => 'Amoxicillin', 'dose' => '2 capsules', 'frequency' => 'TDS', 'duration_value' => 5, 'duration_unit' => 'days',
+        ], $admin);
+    }
+
+    public function test_procedure_order_creates_one_linked_charge_and_recalculates_invoice(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $service = $this->service('Wound dressing', 'PROC-DRESS', 'procedure', $admin);
+        $service->update(['requires_payment' => true]);
+
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id], $admin);
+
+        $this->assertNotNull($order->invoice_item_id);
+        $this->assertDatabaseHas('invoice_items', ['id' => $order->invoice_item_id, 'reference_type' => $order::class, 'reference_id' => $order->id]);
+        $this->assertGreaterThan(0, (float) $visit->invoice->refresh()->total_amount);
+        $this->assertSame(1, $visit->invoice->items()->where('reference_type', $order::class)->where('reference_id', $order->id)->count());
+    }
 
     public function test_guest_cannot_access_triage(): void
     {
@@ -1202,6 +1302,81 @@ class Step6ClinicalWorkflowTest extends TestCase
             'visit_id' => $visit->id,
             'queue_status' => 'waiting',
         ]);
+    }
+
+    public function test_completed_consultation_refreshes_as_read_only_with_persisted_completion_details(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $this->prepareEncounterForCompletion($encounter, $doctor);
+        $completed = app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $doctor);
+
+        $component = Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit->refresh()])
+            ->assertSet('encounter.id', $completed->id)
+            ->assertSee('Consultation Completed')
+            ->assertSee($doctor->name)
+            ->assertSee($completed->completed_at->format('d M Y H:i'))
+            ->assertSee('Discharged Home')
+            ->assertSee('Print Summary')
+            ->assertDontSee('Save Draft')
+            ->assertDontSee('Complete Consultation')
+            ->assertDontSee('Final Consultation Outcome')
+            ->assertDontSee('Required before completion:')
+            ->assertDontSee('Select a final consultation outcome.');
+
+        $originalSummary = $completed->clinical_summary;
+        $component->set('form.clinical_summary', 'Must not persist')->call('saveDraft')->assertHasErrors(['encounter']);
+        $this->assertSame($originalSummary, $completed->refresh()->clinical_summary);
+
+        $completedAt = $completed->completed_at;
+        $component->call('completeConsultation')->assertHasNoErrors();
+        $this->assertTrue($completedAt->equalTo($completed->refresh()->completed_at));
+        $this->assertSame('discharged_home', $completed->outcome->value);
+    }
+
+    public function test_referred_and_cancelled_encounters_render_terminal_read_only_status(): void
+    {
+        $admin = $this->bootstrappedFacility();
+
+        foreach (['referred', 'cancelled'] as $status) {
+            $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+            $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+            $encounter->update(['status' => $status, 'outcome' => $status === 'referred' ? 'referred' : 'ongoing']);
+
+            Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit->refresh()])
+                ->assertSee('Consultation '.str($status)->title())
+                ->assertDontSee('Save Draft')
+                ->assertDontSee('Complete Consultation')
+                ->assertDontSee('Final Consultation Outcome');
+        }
+    }
+
+    public function test_completed_consultation_rejects_diagnosis_plan_and_prescription_mutations(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'medication_name' => $medicine->name, 'dose' => '1 tablet', 'frequency' => 'OD', 'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => 2,
+        ]]], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        $completed = app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        foreach ([
+            fn () => app(ClinicalEncounterService::class)->saveDraft($completed, ['treatment_plan' => 'Changed plan'], $admin),
+            fn () => app(ClinicalEncounterService::class)->addDiagnosis($completed, ['diagnosis_type' => 'final', 'diagnosis_name' => 'Late diagnosis', 'certainty' => 'confirmed'], $admin),
+            fn () => app(PrescriptionService::class)->updateItem($prescription->items()->firstOrFail(), ['medication_name' => 'Changed', 'dose' => '2 tablets', 'frequency' => 'OD', 'duration_value' => 2, 'duration_unit' => 'days'], $admin),
+        ] as $mutation) {
+            try {
+                $mutation();
+                $this->fail('A completed consultation mutation was accepted.');
+            } catch (ValidationException $exception) {
+                $this->assertStringContainsString('tayari imekamilika', collect($exception->errors())->flatten()->first());
+            }
+        }
     }
 
     public function test_opd_consultation_does_not_render_a_separate_sign_off_action(): void

@@ -24,6 +24,7 @@
         $badge = fn ($status) => $statusTone[$statusValue($status)] ?? 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200';
         $labServiceIdsWithTests = $labTests->pluck('service_id')->filter()->all();
         $catalogueOnlyServices = $labServices->whereNotIn('id', $labServiceIdsWithTests);
+        $isReadOnly = $this->isReadOnly();
     @endphp
 
     <div class="sticky top-16 z-20 rounded-md border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-card-dark">
@@ -52,7 +53,7 @@
         </aside>
 
         <main class="space-y-6">
-            <fieldset class="contents" @disabled((bool) $encounter->signed_off_at)>
+            <fieldset class="contents" @disabled($isReadOnly || (bool) $encounter->signed_off_at)>
             <div class="flex flex-wrap gap-2">
                 @foreach(['summary' => 'Summary', 'history' => 'History', 'exam' => 'Examination', 'diagnoses' => 'Diagnosis', 'orders' => 'Orders', 'results' => 'Results', 'plan' => 'Plan', 'follow' => 'Follow-up'] as $key => $label)
                     <button type="button" wire:click="$set('activeTab','{{ $key }}')" class="rounded-md px-3 py-2 text-sm font-semibold {{ $activeTab === $key ? 'bg-primary text-white' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200' }}">{{ $label }}</button>
@@ -217,6 +218,7 @@
                         <h3 class="mb-3 font-semibold">Medication Orders</h3>
                         <div class="grid gap-3 md:grid-cols-2">
                             @if($medicines->isNotEmpty())
+                                <x-text-input wire:model.live.debounce.300ms="medicineSearch" placeholder="Search medicine..." />
                                 <x-select-input wire:model="prescriptionItemForm.medicine_id"><option value="">Select medicine</option>@foreach($medicines as $medicine)<option value="{{ $medicine->id }}">{{ $medicine->name }} {{ $medicine->strength ? '· '.$medicine->strength : '' }}</option>@endforeach</x-select-input>
                             @else
                                 <x-text-input wire:model="prescriptionItemForm.medication_name" placeholder="Medicine" />
@@ -225,9 +227,16 @@
                             <x-text-input wire:model="prescriptionItemForm.frequency" placeholder="Frequency" />
                             <x-text-input type="number" min="1" wire:model="prescriptionItemForm.duration_value" placeholder="Duration" />
                             <x-select-input wire:model="prescriptionItemForm.duration_unit"><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option></x-select-input>
+                            <x-text-input wire:model="prescriptionItemForm.route" placeholder="Route" />
+                            <x-text-input type="number" min="0" step="0.01" wire:model="prescriptionItemForm.quantity" placeholder="Quantity (auto-calculated where possible)" />
                             <x-text-input wire:model="prescriptionItemForm.instructions" placeholder="Instructions" />
+                            <x-text-input wire:model="prescriptionItemForm.indication" placeholder="Indication" />
                         </div>
-                        <x-primary-button type="button" wire:click="addPrescription" class="mt-3">Add Medication Order</x-primary-button>
+                        @if($editingPrescriptionItemId)
+                            <div class="mt-3 flex gap-2"><x-primary-button type="button" wire:click="updatePrescriptionItem">Update Medicine</x-primary-button><x-secondary-button type="button" wire:click="cancelPrescriptionEdit">Cancel</x-secondary-button></div>
+                        @else
+                            <x-primary-button type="button" wire:click="addPrescription" class="mt-3">Add Medication Order</x-primary-button>
+                        @endif
                     </x-card>
 
                     <x-card><h3 class="mb-3 font-semibold">Procedure Orders</h3><x-select-input wire:model="procedureForm.service_id"><option value="">Select procedure service</option>@foreach($procedureServices as $service)<option value="{{ $service->id }}">{{ $service->name }}</option>@endforeach</x-select-input><x-text-input wire:model="procedureForm.procedure_name_snapshot" placeholder="Or enter procedure name" class="mt-3" /><x-textarea wire:model="procedureForm.instructions" rows="2" class="mt-3" placeholder="Instructions" /><x-primary-button type="button" wire:click="addProcedure" class="mt-3">Order Procedure</x-primary-button></x-card>
@@ -283,27 +292,27 @@
                     || $encounter->laboratoryOrders->where('status', '!=', \App\Enums\ClinicalOrderStatus::Cancelled)->isNotEmpty()
                     || $encounter->procedureOrders->where('status', '!=', \App\Enums\ProcedureOrderStatus::Cancelled)->isNotEmpty();
                 $completionMissing = [];
-                if (blank($form->outcome) || $form->outcome === \App\Enums\ClinicalOutcome::Ongoing->value) {
+                if (! $isReadOnly && (blank($form->outcome) || $form->outcome === \App\Enums\ClinicalOutcome::Ongoing->value)) {
                     $completionMissing[] = 'Select a final consultation outcome.';
                 }
-                if (! $hasClinicalContent) {
+                if (! $isReadOnly && ! $hasClinicalContent) {
                     $completionMissing[] = 'Add a diagnosis, treatment plan, prescription, laboratory order, or clinical summary before completing.';
                 }
-                if ($form->follow_up_required && $form->outcome !== \App\Enums\ClinicalOutcome::FollowUp->value && blank($form->follow_up_date)) {
+                if (! $isReadOnly && $form->follow_up_required && $form->outcome !== \App\Enums\ClinicalOutcome::FollowUp->value && blank($form->follow_up_date)) {
                     $completionMissing[] = 'Select a follow-up date.';
                 }
-                if ($form->outcome === \App\Enums\ClinicalOutcome::Referred->value && $encounter->referrals->isEmpty()) {
+                if (! $isReadOnly && $form->outcome === \App\Enums\ClinicalOutcome::Referred->value && $encounter->referrals->isEmpty()) {
                     $completionMissing[] = 'Add referral details.';
                 }
                 $isAdmissionOutcome = in_array($form->outcome, [
                     \App\Enums\ClinicalOutcome::AdmittedBedRest->value,
                     \App\Enums\ClinicalOutcome::Observation->value,
                 ], true);
-                if ($isAdmissionOutcome && ! $admissionConfigured) {
+                if (! $isReadOnly && $isAdmissionOutcome && ! $admissionConfigured) {
                     $completionMissing[] = 'Select an admission destination.';
                 }
                 $hasFollowUpAppointment = $encounter->appointments->isNotEmpty();
-                if ($form->outcome === \App\Enums\ClinicalOutcome::FollowUp->value && ! $hasFollowUpAppointment) {
+                if (! $isReadOnly && $form->outcome === \App\Enums\ClinicalOutcome::FollowUp->value && ! $hasFollowUpAppointment) {
                     if (blank($form->follow_up_date) && blank($appointmentForm->scheduled_start)) {
                         $completionMissing[] = 'Add a follow-up date.';
                     }
@@ -343,6 +352,28 @@
                 };
             @endphp
             <x-card>
+                @if($isReadOnly)
+                    @php
+                        $terminalStatus = $statusValue($encounter->status);
+                        $createdDestinations = collect([
+                            $encounter->prescriptions->isNotEmpty() ? 'Pharmacy' : null,
+                            $encounter->laboratoryOrders->isNotEmpty() ? 'Laboratory' : null,
+                            $encounter->procedureOrders->isNotEmpty() ? 'Procedure' : null,
+                        ])->filter();
+                    @endphp
+                    <h3 class="font-semibold">{{ $terminalStatus === 'completed' ? 'Consultation Completed' : 'Consultation '.$statusLabel($encounter->status) }}</h3>
+                    <dl class="mt-4 space-y-3 text-sm">
+                        <div><dt class="text-slate-500">Status</dt><dd class="font-medium">{{ $statusLabel($encounter->status) }}</dd></div>
+                        <div><dt class="text-slate-500">Completed by</dt><dd class="font-medium">{{ $encounter->completer?->name ?? '-' }}</dd></div>
+                        <div><dt class="text-slate-500">Completed at</dt><dd class="font-medium">{{ $encounter->completed_at?->format('d M Y H:i') ?? '-' }}</dd></div>
+                        <div><dt class="text-slate-500">Final outcome</dt><dd class="font-medium">{{ $encounter->outcome ? $statusLabel($encounter->outcome) : '-' }}</dd></div>
+                        <div><dt class="text-slate-500">Destinations created</dt><dd class="font-medium">{{ $createdDestinations->isNotEmpty() ? $createdDestinations->join(', ') : 'None' }}</dd></div>
+                    </dl>
+                    <x-secondary-button type="button" wire:click="printSummary" wire:loading.attr="disabled" wire:target="printSummary" class="mt-4 w-full">
+                        <span wire:loading.remove wire:target="printSummary">Print Summary</span>
+                        <span wire:loading wire:target="printSummary">Preparing Summary...</span>
+                    </x-secondary-button>
+                @else
                 <h3 class="mb-3 font-semibold">Complete Consultation</h3>
                 <x-input-label for="final-consultation-outcome" value="Final Consultation Outcome" />
                 <x-select-input id="final-consultation-outcome" wire:model.live="form.outcome" class="mt-1 w-full" :disabled="(bool) $encounter->signed_off_at">
@@ -408,6 +439,7 @@
                         <span wire:loading wire:target="printSummary">Preparing Summary...</span>
                     </x-secondary-button>
                 </div>
+                @endif
             </x-card>
 
             <x-card>
@@ -425,7 +457,7 @@
                         <p class="font-semibold">Medicines</p>
                         @forelse($encounter->prescriptions as $prescription)
                             @foreach($prescription->items as $item)
-                                <p class="mt-1">{{ $item->medication_name }}{{ $item->strength ? ' '.$item->strength : '' }}</p>
+                                <div class="mt-2 rounded-md border border-slate-200 p-2 dark:border-slate-700"><p>{{ $item->medication_name }}{{ $item->strength ? ' '.$item->strength : '' }}</p><p class="text-xs text-slate-500">{{ $item->dose }} × {{ $item->frequency }} × {{ $item->duration_value }} {{ $item->duration_unit }} · Quantity: {{ $item->quantity ?? '-' }} · {{ $item->route }}</p>@can('update', $prescription)@if($prescription->isEditableDraft())<div class="mt-2 flex gap-2"><button type="button" wire:click="editPrescriptionItem({{ $item->id }})" class="text-xs font-semibold text-primary">Edit</button><button type="button" wire:click="removePrescriptionItem({{ $item->id }})" wire:confirm="Una uhakika unataka kuondoa dawa hii?" class="text-xs font-semibold text-red-600">Remove</button></div>@endif@endcan</div>
                             @endforeach
                             <p class="text-xs text-slate-500">{{ $prescriptionStatusLabel($prescription->status) }}</p>
                         @empty

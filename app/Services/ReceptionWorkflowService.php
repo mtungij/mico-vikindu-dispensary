@@ -8,6 +8,7 @@ use App\Models\Department;
 use App\Models\LaboratoryOrder;
 use App\Models\Visit;
 use App\Models\VisitMovement;
+use App\Models\WorkflowSetting;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -25,6 +26,9 @@ class ReceptionWorkflowService
 
     public function registerNewPatientAndVisit(array $patientData, array $payerData, array $visitData, array $serviceIds = [], $actor = null): array
     {
+        if (($visitData['visit_type'] ?? 'new_patient') === 'returning_patient') {
+            throw ValidationException::withMessages(['visit_type' => 'Returning visit lazima ichague mgonjwa aliyesajiliwa tayari.']);
+        }
         if ($existing = $this->existingRegistration($visitData)) {
             return $existing;
         }
@@ -35,8 +39,9 @@ class ReceptionWorkflowService
             $visitData['patient_payer_profile_id'] = $payerProfile->id;
             $visitData['payer_type'] = $payerProfile->payer_type->value;
             $destination = $this->charges->destination($patient->facility, (int) $visitData['destination_department_id']);
-            $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null);
-            [$registration] = $this->charges->validateChargeConfiguration($patient->facility, true, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id);
+            $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null, $visitData['visit_type'] ?? 'new_patient');
+            $visitData['consultation_service_id'] = $consultation?->id;
+            [$registration] = $this->charges->validateChargeConfiguration($patient->facility, true, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id, $visitData['visit_type'] ?? 'new_patient');
             $visit = $this->visits->createVisit($patient, $visitData, $actor);
             $invoice = $this->invoices->createVisitInvoice($visit, [], $actor);
             $invoice = $this->charges->createInitialInvoiceItems($invoice, $registration, $consultation, true, $destination, $actor);
@@ -50,7 +55,7 @@ class ReceptionWorkflowService
                 $laboratoryOrder = $this->laboratoryOrders->createDirectOrder($visit, $invoice, $serviceIds, $actor);
                 $invoice->refresh();
             }
-            $visit = $this->applyPostChargeStatus($visit, $destination, (float) $invoice->items()->sum('patient_amount'), (bool) ($visitData['require_payment_before_service'] ?? true), $actor);
+            $visit = $this->applyPostChargeStatus($visit, $destination, (float) $invoice->items()->sum('patient_amount'), $this->paymentBeforeService($visitData, $patient->facility_id), $actor);
             $queue = null;
             if ($laboratoryOrder && (float) $invoice->balance_amount <= 0) {
                 $this->laboratoryOrders->activateLaboratoryQueue($laboratoryOrder, $actor);
@@ -76,8 +81,14 @@ class ReceptionWorkflowService
 
     public function openReturningPatientVisit($patient, array $payerData, array $visitData, array $serviceIds, $actor): array
     {
+        abort_unless($patient->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+        $visitData['visit_type'] = 'returning_patient';
         if ($existing = $this->existingRegistration($visitData)) {
             return $existing;
+        }
+        $activeVisit = $patient->activeVisit()->first();
+        if ($activeVisit && ! $actor->can('reception.override-active-visit')) {
+            throw ValidationException::withMessages(['patient' => 'Mgonjwa tayari ana visit active '.$activeVisit->visit_number.'. Fungua visit hiyo au omba ruhusa ya kuunda nyingine.']);
         }
 
         $payerProfile = $patient->primaryPayerProfile ?? $this->payers->createProfile($patient, $payerData, $actor);
@@ -86,9 +97,10 @@ class ReceptionWorkflowService
 
         return DB::transaction(function () use ($patient, $payerProfile, $visitData, $serviceIds, $actor): array {
             $destination = $this->charges->destination($patient->facility, (int) $visitData['destination_department_id']);
-            $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null);
-            [$registration] = $this->charges->validateChargeConfiguration($patient->facility, false, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id);
-            $visit = $this->visits->createVisit($patient, $visitData, $actor);
+            $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null, $visitData['visit_type'] ?? 'returning_patient');
+            $visitData['consultation_service_id'] = $consultation?->id;
+            [$registration] = $this->charges->validateChargeConfiguration($patient->facility, false, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id, $visitData['visit_type'] ?? 'returning_patient');
+            $visit = $this->visits->createVisit($patient, $visitData, $actor, $actor->can('reception.override-active-visit'));
             $invoice = $this->invoices->createVisitInvoice($visit, [], $actor);
             $invoice = $this->charges->createInitialInvoiceItems($invoice, $registration, $consultation, false, $destination, $actor);
             $laboratoryOrder = null;
@@ -101,7 +113,7 @@ class ReceptionWorkflowService
                 $laboratoryOrder = $this->laboratoryOrders->createDirectOrder($visit, $invoice, $serviceIds, $actor);
                 $invoice->refresh();
             }
-            $visit = $this->applyPostChargeStatus($visit, $destination, (float) $invoice->items()->sum('patient_amount'), (bool) ($visitData['require_payment_before_service'] ?? true), $actor);
+            $visit = $this->applyPostChargeStatus($visit, $destination, (float) $invoice->items()->sum('patient_amount'), $this->paymentBeforeService($visitData, $patient->facility_id), $actor);
             $queue = null;
             if ($laboratoryOrder && (float) $invoice->balance_amount <= 0) {
                 $this->laboratoryOrders->activateLaboratoryQueue($laboratoryOrder, $actor);
@@ -109,6 +121,17 @@ class ReceptionWorkflowService
             } elseif (! $laboratoryOrder && $this->shouldCreateDestinationQueue($visit, $destination)) {
                 $queue = $this->queues->createQueue($visit->load('destinationDepartment'), $actor);
             }
+
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => 'visit_created',
+                'subject_type' => Visit::class,
+                'subject_id' => $visit->id,
+                'old_values' => [],
+                'new_values' => ['patient_id' => $patient->id, 'invoice_id' => $invoice->id, 'queue_id' => $queue?->id, 'visit_type' => 'returning_patient'],
+                'ip_address' => request()->ip(),
+                'user_agent' => request()->userAgent(),
+            ]);
 
             return compact('patient', 'payerProfile', 'visit', 'invoice', 'queue', 'laboratoryOrder');
         });
@@ -179,6 +202,17 @@ class ReceptionWorkflowService
         ]);
 
         return $visit->refresh();
+    }
+
+    private function paymentBeforeService(array $visitData, int $facilityId): bool
+    {
+        if (($visitData['visit_type'] ?? null) !== 'emergency') {
+            return (bool) ($visitData['require_payment_before_service'] ?? true);
+        }
+
+        $bypass = WorkflowSetting::query()->where('facility_id', $facilityId)->where('key', 'allow_emergency_override')->value('value');
+
+        return ! filter_var($bypass ?? true, FILTER_VALIDATE_BOOL);
     }
 
     private function shouldCreateDestinationQueue(Visit $visit, Department $destination): bool

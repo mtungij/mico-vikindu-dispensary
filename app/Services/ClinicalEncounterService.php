@@ -104,6 +104,7 @@ class ClinicalEncounterService
             $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
             $allowed = $this->draftFields($data);
             $this->ensureMutable($encounter);
+            Gate::forUser($actor)->authorize('update', $encounter);
             $encounter->update([...$allowed, 'updated_by' => $actor->id]);
             $this->audit($actor, 'clinical_encounter_draft_saved', $encounter, ['fields' => array_keys($allowed)]);
 
@@ -390,17 +391,19 @@ class ClinicalEncounterService
 
     private function ensureMutable(ClinicalEncounter $encounter, $actor = null): void
     {
-        if ($encounter->completed_at || in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled], true)) {
+        $encounter->loadMissing('visit');
+        if ($encounter->isReadOnly()) {
             throw ValidationException::withMessages([
-                'encounter' => 'This consultation is completed and cannot be edited.',
+                'encounter' => 'Consultation hii tayari imekamilika na haiwezi kuhaririwa.',
             ]);
         }
     }
 
     private function ensureOpenForFinalization(ClinicalEncounter $encounter): void
     {
-        if ($encounter->completed_at || in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled], true)) {
-            throw ValidationException::withMessages(['encounter' => 'This consultation is already closed.']);
+        $encounter->loadMissing('visit');
+        if ($encounter->isReadOnly()) {
+            throw ValidationException::withMessages(['encounter' => 'Consultation hii tayari imekamilika na haiwezi kuhaririwa.']);
         }
     }
 

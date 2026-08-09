@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\PayerType;
 use App\Enums\ProcedureOrderStatus;
 use App\Enums\ServiceType;
+use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\ClinicalEncounter;
 use App\Models\ClinicalProcedureOrder;
@@ -17,6 +18,7 @@ class ProcedureOrderService
     public function __construct(
         private readonly InvoiceService $invoices,
         private readonly VisitClosureService $visitClosure,
+        private readonly WorkflowService $workflow,
     ) {}
 
     public function createOrder(ClinicalEncounter $encounter, array $data, $actor): ClinicalProcedureOrder
@@ -25,11 +27,6 @@ class ProcedureOrderService
             $service = isset($data['service_id']) ? Service::query()->where('facility_id', $encounter->facility_id)->findOrFail($data['service_id']) : null;
             if ($service && $service->service_type !== ServiceType::Procedure) {
                 throw ValidationException::withMessages(['service_id' => 'Huduma ya procedure pekee ndiyo inaruhusiwa.']);
-            }
-            $invoiceItem = null;
-            if ($service?->requires_payment) {
-                $invoice = $encounter->visit->invoice ?: $this->invoices->createVisitInvoice($encounter->visit, [], $actor);
-                $invoiceItem = $this->invoices->addServiceItem($invoice, $service, $actor);
             }
             $order = ClinicalProcedureOrder::query()->create([
                 'facility_id' => $encounter->facility_id,
@@ -43,13 +40,40 @@ class ProcedureOrderService
                 'priority' => $data['priority'] ?? 'normal',
                 'status' => $encounter->visit->payer_type === PayerType::Cash && $service?->requires_payment ? ProcedureOrderStatus::AwaitingPayment : ProcedureOrderStatus::Ordered,
                 'scheduled_at' => $data['scheduled_at'] ?? null,
-                'invoice_item_id' => $invoiceItem?->id,
                 'notes' => $data['notes'] ?? null,
                 'created_by' => $actor->id,
             ]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_order_created', 'subject_type' => $order::class, 'subject_id' => $order->id]);
 
-            return $order;
+            if ($service?->requires_payment) {
+                $invoice = $encounter->visit->invoice ?: $this->invoices->createVisitInvoice($encounter->visit, [], $actor);
+                $invoiceItem = $invoice->items()->where('reference_type', ClinicalProcedureOrder::class)->where('reference_id', $order->id)->first();
+                if (! $invoiceItem) {
+                    $invoiceItem = $this->invoices->addServiceItem($invoice, $service, $actor);
+                    $invoiceItem->update(['reference_type' => ClinicalProcedureOrder::class, 'reference_id' => $order->id, 'metadata' => [...($invoiceItem->metadata ?? []), 'clinical_procedure_order_id' => $order->id]]);
+                    ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_charge_created', 'subject_type' => $order::class, 'subject_id' => $order->id, 'new_values' => ['invoice_id' => $invoice->id, 'invoice_item_id' => $invoiceItem->id]]);
+                }
+                $order->update(['invoice_item_id' => $invoiceItem->id]);
+                $this->invoices->calculateTotals($invoice);
+            }
+
+            return $order->refresh();
+        });
+    }
+
+    public function releasePaidInvoice(\App\Models\Invoice $invoice, $actor): void
+    {
+        DB::transaction(function () use ($invoice, $actor): void {
+            $invoice = $this->invoices->calculateTotals($invoice);
+            if ((float) $invoice->balance_amount > 0 || $invoice->payment_status !== 'paid') return;
+            ClinicalProcedureOrder::query()->where('facility_id', $invoice->facility_id)->where('visit_id', $invoice->visit_id)->where('status', ProcedureOrderStatus::AwaitingPayment)->with(['service', 'visit'])->lockForUpdate()->get()->each(function ($order) use ($actor, $invoice): void {
+                $order->update(['status' => ProcedureOrderStatus::Ordered, 'updated_by' => $actor->id]);
+                ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_payment_confirmed', 'subject_type' => $order::class, 'subject_id' => $order->id, 'new_values' => ['invoice_id' => $invoice->id]]);
+                if ($order->service?->department && $order->service->department->queue_enabled) {
+                    $this->workflow->createQueue($order->visit, $order->service->department, $actor, VisitStatus::AwaitingDepartment, 'Procedure released after full payment', true, false);
+                }
+                ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_released', 'subject_type' => $order::class, 'subject_id' => $order->id]);
+            });
         });
     }
 
@@ -70,6 +94,11 @@ class ProcedureOrderService
             $order = ClinicalProcedureOrder::query()->lockForUpdate()->findOrFail($order->id);
             if (in_array($order->status, [ProcedureOrderStatus::Completed, ProcedureOrderStatus::Cancelled], true)) {
                 throw ValidationException::withMessages(['procedure' => 'Procedure order tayari imefungwa.']);
+            }
+            if ($order->facility_id !== currentFacility()?->id || ! $actor->belongsToCurrentFacility()) abort(403);
+            if (! $actor->can('procedure-orders.view')) abort(403);
+            if ($order->status === ProcedureOrderStatus::AwaitingPayment && ! $actor->can('procedure-orders.override-payment')) {
+                throw ValidationException::withMessages(['procedure' => 'Procedure haiwezi kufanywa kabla ya malipo kamili bila ruhusa ya override.']);
             }
             $order->update([
                 'status' => ProcedureOrderStatus::Completed,

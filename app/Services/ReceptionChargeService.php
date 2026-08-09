@@ -12,6 +12,7 @@ use App\Models\Invoice;
 use App\Models\Patient;
 use App\Models\Service;
 use App\Models\ServicePrice;
+use App\Models\WorkflowSetting;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -50,10 +51,22 @@ class ReceptionChargeService
         return $service;
     }
 
-    public function resolveConsultationService(Facility $facility, Department $destination, ?int $consultationServiceId): ?Service
+    public function resolveConsultationService(Facility $facility, Department $destination, ?int $consultationServiceId, string $visitType = 'new_patient'): ?Service
     {
         if (! $this->bool($facility, 'auto_add_consultation_fee', true) || ! $this->bool($facility, 'require_consultation_service', true) || ! $destination->requires_consultation) {
             return null;
+        }
+
+        if (in_array($visitType, ['returning_patient', 'emergency'], true)) {
+            $prefix = $visitType === 'returning_patient' ? 'returning_patient' : 'emergency';
+            if (! $this->bool($facility, 'charge_'.$prefix.'_consultation', false)) {
+                return null;
+            }
+            $configuredId = $this->value($facility, $prefix.'_consultation_service_id');
+            $consultationServiceId = filled($configuredId) ? (int) $configuredId : null;
+            if (! $consultationServiceId) {
+                throw ValidationException::withMessages(['consultation_service_id' => 'Huduma maalum ya consultation kwa visit type hii haijasanidiwa.']);
+            }
         }
 
         if (! $consultationServiceId) {
@@ -84,7 +97,7 @@ class ReceptionChargeService
         return $this->requiredPrice($service, $payerType, $insuranceProviderId, $corporateAccountId);
     }
 
-    public function buildChargePreview(Facility $facility, bool $isNewPatient, ?int $destinationDepartmentId, ?int $consultationServiceId, array $payerData, array $laboratoryServiceIds = []): array
+    public function buildChargePreview(Facility $facility, bool $isNewPatient, ?int $destinationDepartmentId, ?int $consultationServiceId, array $payerData, array $laboratoryServiceIds = [], string $visitType = 'new_patient'): array
     {
         $payerType = PayerType::from($payerData['payer_type'] ?? 'cash');
         $warnings = [];
@@ -101,7 +114,9 @@ class ReceptionChargeService
         }
 
         try {
-            $registration = $this->resolveRegistrationService($facility, $isNewPatient);
+            $registration = $destination && $this->shouldApplyRegistrationFee($visitType, $destination)
+                ? $this->resolveRegistrationService($facility, $isNewPatient)
+                : null;
             if ($registration) {
                 $price = $this->resolveRegistrationPrice($registration, $payerType, $payerData['insurance_provider_id'] ?? null, $payerData['corporate_account_id'] ?? null);
                 $lines[] = $this->line('registration', $registration, $price, $payerType, ['charge_source' => 'patient_registration']);
@@ -112,7 +127,7 @@ class ReceptionChargeService
 
         if ($destination) {
             try {
-                $consultation = $this->resolveConsultationService($facility, $destination, $consultationServiceId);
+                $consultation = $this->resolveConsultationService($facility, $destination, $consultationServiceId, $visitType);
                 if ($consultation) {
                     $price = $this->resolveConsultationPrice($consultation, $payerType, $payerData['insurance_provider_id'] ?? null, $payerData['corporate_account_id'] ?? null);
                     $lines[] = $this->line('consultation', $consultation, $price, $payerType, ['destination_department_id' => $destination->id]);
@@ -157,25 +172,37 @@ class ReceptionChargeService
             'payer_amount' => $totals['payer_amount'],
             'warnings' => $warnings,
             'blocking_errors' => $blocking,
-            'next_step' => $this->nextStepLabel($payerType, $totals['patient_amount'], (bool) ($payerData['require_payment_before_service'] ?? true), $destination),
+            'next_step' => $this->nextStepLabel($payerType, $totals['patient_amount'], $this->paymentBeforeService($facility, $visitType, (bool) ($payerData['require_payment_before_service'] ?? true)), $destination),
         ];
     }
 
-    public function validateChargeConfiguration(Facility $facility, bool $isNewPatient, Department $destination, ?Service $consultationService, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): array
+    public function validateChargeConfiguration(Facility $facility, bool $isNewPatient, Department $destination, ?Service $consultationService, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null, string $visitType = 'new_patient'): array
     {
-        $registration = $this->resolveRegistrationService($facility, $isNewPatient);
+        $registration = $this->shouldApplyRegistrationFee($visitType, $destination)
+            ? $this->resolveRegistrationService($facility, $isNewPatient)
+            : null;
         if ($registration) {
             $this->resolveRegistrationPrice($registration, $payerType, $insuranceProviderId, $corporateAccountId);
         }
 
         if ($destination->requires_consultation) {
-            if (! $consultationService) {
+            if (! $consultationService && $visitType === 'new_patient') {
                 throw ValidationException::withMessages(['consultation_service_id' => 'Chagua consultation service kwa destination hii.']);
             }
-            $this->resolveConsultationPrice($consultationService, $payerType, $insuranceProviderId, $corporateAccountId);
+            if ($consultationService) {
+                $this->resolveConsultationPrice($consultationService, $payerType, $insuranceProviderId, $corporateAccountId);
+            }
         }
 
         return [$registration, $consultationService];
+    }
+
+    private function shouldApplyRegistrationFee(string $visitType, Department $destination): bool
+    {
+        if ($visitType === 'emergency') return false;
+        if (in_array(strtoupper((string) $destination->code), ['LAB', 'PHA', 'PHARM', 'PRC', 'PRO'], true)) return false;
+
+        return in_array($visitType, ['new_patient', 'returning_patient'], true);
     }
 
     public function createInitialInvoiceItems(Invoice $invoice, ?Service $registrationService, ?Service $consultationService, bool $isNewPatient, ?Department $destination, $actor): Invoice
@@ -387,5 +414,13 @@ class ReceptionChargeService
         }
 
         return strtoupper((string) $destination?->code) === 'LAB' ? 'Laboratory' : 'Destination Queue';
+    }
+
+    private function paymentBeforeService(Facility $facility, string $visitType, bool $requested): bool
+    {
+        if ($visitType !== 'emergency') return $requested;
+        $bypass = WorkflowSetting::query()->where('facility_id', $facility->id)->where('key', 'allow_emergency_override')->value('value');
+
+        return ! filter_var($bypass ?? true, FILTER_VALIDATE_BOOL);
     }
 }

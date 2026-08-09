@@ -18,9 +18,11 @@ use App\Models\Department;
 use App\Models\LaboratoryTest;
 use App\Models\Medicine;
 use App\Models\PatientQueue;
+use App\Models\PrescriptionItem;
 use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
+use App\Services\PrescriptionService;
 use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
@@ -61,12 +63,17 @@ class Consultation extends Component
 
     public bool $icd10Selected = false;
 
+    public ?int $editingPrescriptionItemId = null;
+
+    public string $medicineSearch = '';
+
     public function mount(Visit $visit, ClinicalEncounterService $service): void
     {
         Gate::authorize('opd.consult');
         abort_unless($visit->facility_id === currentFacility()?->id, 403);
         abort_unless(auth()->user()?->belongsToCurrentFacility(), 403);
-        abort_unless($this->visitCanOpenOpdConsultation($visit), 403);
+        $latestEncounter = $visit->clinicalEncounters()->with('department')->latest('id')->first();
+        abort_unless($this->visitCanOpenOpdConsultation($visit, $latestEncounter), 403);
 
         $this->visit = $visit->load([
             'patient.primaryPayerProfile.insuranceProvider',
@@ -79,16 +86,24 @@ class Consultation extends Component
             'currentAssignedUser',
             'currentQueue',
         ]);
-        $this->encounter = $this->visit->activeClinicalEncounter ?: $service->startEncounter($this->visit, auth()->user());
+        $this->encounter = $this->visit->activeClinicalEncounter
+            ?: ($visit->visit_status !== VisitStatus::AwaitingDoctorReview && $latestEncounter?->isTerminal()
+                ? $latestEncounter
+                : $service->startEncounter($this->visit, auth()->user()));
         Gate::authorize('view', $this->encounter);
         $this->form->fillFromModel($this->encounter);
         $this->appointmentForm->patient_id = $this->visit->patient_id;
         $this->appointmentForm->department_id = $this->encounter->department_id;
     }
 
-    private function visitCanOpenOpdConsultation(Visit $visit): bool
+    private function visitCanOpenOpdConsultation(Visit $visit, ?ClinicalEncounter $latestEncounter = null): bool
     {
         $visit->loadMissing(['currentDepartment', 'activeClinicalEncounter']);
+
+        $visitIsTerminal = in_array($visit->visit_status, [VisitStatus::Completed, VisitStatus::Cancelled, VisitStatus::Referred, VisitStatus::Discharged], true);
+        if ($latestEncounter?->department?->code === 'OPD' && ($latestEncounter->isTerminal() || $visitIsTerminal)) {
+            return true;
+        }
 
         if ($visit->currentDepartment?->code !== 'OPD') {
             return false;
@@ -129,7 +144,10 @@ class Consultation extends Component
 
     public function autosave(ClinicalEncounterService $service): void
     {
-        Gate::authorize('update', $this->encounter);
+        $this->encounter = $this->encounter->refresh();
+        if ($this->encounter->isReadOnly()) {
+            throw ValidationException::withMessages(['encounter' => 'Consultation hii tayari imekamilika na haiwezi kuhaririwa.']);
+        }
         $this->saveState = 'Inahifadhi...';
         $this->validateOnly('form.chief_complaint');
         $this->encounter = $service->saveDraft($this->encounter, $this->form->normalize(), auth()->user());
@@ -141,7 +159,10 @@ class Consultation extends Component
         $this->resetErrorBag();
 
         try {
-            Gate::authorize('update', $this->encounter);
+            $this->encounter = $this->encounter->refresh();
+            if ($this->encounter->isReadOnly()) {
+                throw ValidationException::withMessages(['encounter' => 'Consultation hii tayari imekamilika na haiwezi kuhaririwa.']);
+            }
             $this->form->validate();
             $this->encounter = $service->saveDraft($this->encounter, $this->form->normalize(), auth()->user());
             Notifier::success('Draft saved successfully.');
@@ -241,6 +262,50 @@ class Consultation extends Component
         Notifier::success('Prescription imeundwa.');
     }
 
+    public function editPrescriptionItem(int $prescriptionItemId, PrescriptionService $service): void
+    {
+        $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query->where('clinical_encounter_id', $this->encounter->id)->where('facility_id', currentFacility()?->id))->findOrFail($prescriptionItemId);
+        $service->assertItemEditable($item, auth()->user());
+        $this->prescriptionItemForm->fillFromModel($item);
+        $this->editingPrescriptionItemId = $item->id;
+        $this->activeTab = 'orders';
+    }
+
+    public function updatePrescriptionItem(PrescriptionService $service): void
+    {
+        $this->prescriptionItemForm->validate();
+        $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query->where('clinical_encounter_id', $this->encounter->id)->where('facility_id', currentFacility()?->id))->findOrFail($this->editingPrescriptionItemId);
+        $this->hydrateMedicineSnapshot();
+        $service->updateItem($item, $this->prescriptionItemForm->normalize(), auth()->user());
+        $this->cancelPrescriptionEdit();
+        Notifier::success('Dawa imesasishwa.');
+    }
+
+    public function removePrescriptionItem(int $prescriptionItemId, PrescriptionService $service): void
+    {
+        $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query->where('clinical_encounter_id', $this->encounter->id)->where('facility_id', currentFacility()?->id))->findOrFail($prescriptionItemId);
+        $service->removeItem($item, auth()->user());
+        if ($this->editingPrescriptionItemId === $prescriptionItemId) $this->cancelPrescriptionEdit();
+        Notifier::success('Dawa imeondolewa.');
+    }
+
+    public function cancelPrescriptionEdit(): void
+    {
+        $this->editingPrescriptionItemId = null;
+        $this->prescriptionItemForm->resetForm();
+    }
+
+    private function hydrateMedicineSnapshot(): void
+    {
+        if (! $this->prescriptionItemForm->medicine_id) return;
+        $medicine = Medicine::query()->where('facility_id', $this->encounter->facility_id)->where('is_active', true)->findOrFail($this->prescriptionItemForm->medicine_id);
+        $this->prescriptionItemForm->medication_name = $medicine->name;
+        $this->prescriptionItemForm->generic_name = $medicine->generic?->name;
+        $this->prescriptionItemForm->strength = $medicine->strength;
+        $this->prescriptionItemForm->dosage_form = $medicine->dosageForm?->name;
+        $this->prescriptionItemForm->route = $medicine->route?->name;
+    }
+
     public function addProcedure(ClinicalEncounterService $service): void
     {
         Gate::authorize('procedure-orders.create');
@@ -290,6 +355,12 @@ class Consultation extends Component
     public function completeConsultation(ClinicalEncounterService $service): mixed
     {
         $this->resetErrorBag();
+        $this->encounter = $this->encounter->refresh();
+        if ($this->encounter->isReadOnly()) {
+            $this->form->fillFromModel($this->encounter);
+
+            return null;
+        }
 
         try {
             Gate::authorize('complete', $this->encounter);
@@ -304,6 +375,10 @@ class Consultation extends Component
                     'follow_up_department_id' => $this->appointmentForm->department_id,
                 ],
             );
+            $this->encounter = $this->encounter->refresh();
+            $this->encounter->load(['completer', 'signer']);
+            $this->form->fillFromModel($this->encounter);
+            $this->resetErrorBag();
         } catch (ValidationException $exception) {
             $this->encounter = $this->encounter->refresh();
             $this->showValidationFailure($exception);
@@ -328,6 +403,13 @@ class Consultation extends Component
         Notifier::success($message);
 
         return redirect()->route('opd.index');
+    }
+
+    public function isReadOnly(): bool
+    {
+        $this->encounter->setRelation('visit', $this->visit);
+
+        return $this->encounter->isReadOnly();
     }
 
     public function printSummary(): mixed
@@ -380,6 +462,8 @@ class Consultation extends Component
         $canViewLaboratoryResults = auth()->user()->can('laboratory-results.view');
         $relations = [
             'provider',
+            'completer',
+            'signer',
             'complaints',
             'examinations',
             'diagnoses',
@@ -409,7 +493,7 @@ class Consultation extends Component
             'labTests' => LaboratoryTest::query()->forCurrentFacility()->with(['service', 'category', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get(),
             'labServices' => Service::query()->forCurrentFacility()->where('service_type', 'laboratory_test')->where('is_active', true)->get(),
             'procedureServices' => Service::query()->forCurrentFacility()->where('service_type', 'procedure')->where('is_active', true)->get(),
-            'medicines' => Medicine::query()->forCurrentFacility()->with(['generic', 'dosageForm', 'route'])->where('is_active', true)->orderBy('name')->get(),
+            'medicines' => Medicine::query()->forCurrentFacility()->with(['generic', 'dosageForm', 'route'])->where('is_active', true)->when(strlen($this->medicineSearch) >= 2, fn ($query) => $query->where(fn ($q) => $q->where('name', 'like', '%'.$this->medicineSearch.'%')->orWhere('brand_name', 'like', '%'.$this->medicineSearch.'%')->orWhereHas('generic', fn ($g) => $g->where('name', 'like', '%'.$this->medicineSearch.'%'))))->orderBy('name')->limit(50)->get(),
             'admissionConfigured' => Department::query()->forCurrentFacility()->where('code', 'BED')->where('is_active', true)->where('can_receive_patients', true)->where('queue_enabled', true)->exists(),
             'canViewLaboratoryResults' => $canViewLaboratoryResults,
         ])->layout('components.layouts.app', ['title' => 'OPD Consultation', 'description' => $this->visit->patient->fullName().' - '.$this->visit->visit_number]);

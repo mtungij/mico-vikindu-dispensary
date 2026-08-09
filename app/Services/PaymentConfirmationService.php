@@ -98,6 +98,7 @@ class PaymentConfirmationService
             if ((float) $invoice->balance_amount === 0.0 && $invoice->payment_status === 'paid') {
                 LaboratoryPaymentConfirmed::dispatch($invoice->refresh(), $actor);
                 app(PrescriptionBillingService::class)->releasePaidInvoice($invoice->refresh(), $actor);
+                app(ProcedureOrderService::class)->releasePaidInvoice($invoice->refresh(), $actor);
             }
 
             return $payment->refresh();

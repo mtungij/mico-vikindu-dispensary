@@ -9,6 +9,7 @@ use App\Livewire\Pharmacy\Queue as PharmacyQueue;
 use App\Models\ClinicalEncounter;
 use App\Models\Department;
 use App\Models\Facility;
+use App\Models\Invoice;
 use App\Models\Medicine;
 use App\Models\MedicineBatch;
 use App\Models\MedicineUnit;
@@ -140,6 +141,7 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertSame('partially_dispensed', $prescription->refresh()->status->value);
         $this->assertSame('serving', $queue->refresh()->queue_status->value);
         $this->assertSame('awaiting_pharmacy', $prescription->visit->refresh()->visit_status->value);
+        $this->assertSame(6.0, (float) $prescription->items()->firstOrFail()->invoiceItem->quantity);
     }
 
     public function test_prescription_cancellation_cancels_pharmacy_queue_and_closes_visit(): void
@@ -155,6 +157,32 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertSame('cancelled', $prescription->refresh()->status->value);
         $this->assertSame('cancelled', $queue->refresh()->queue_status->value);
         $this->assertSame('completed', $prescription->visit->refresh()->visit_status->value);
+    }
+
+    public function test_dispensing_reversal_restores_stock_and_reopens_prescription_and_pharmacy_workflow(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'REV', today()->addYear()->toDateString(), 20);
+        $prescription = $this->prescription($admin, $medicine, 6);
+        $this->pharmacyQueue($prescription, $admin);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+        $dispensing = app(PharmacyDispensingService::class)->dispense($prescription, [[
+            'prescription_item_id' => $prescription->items()->first()->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 6,
+        ]], $location, $admin);
+
+        app(PharmacyDispensingService::class)->reverseDispensing($dispensing, $admin, 'Dispensed in error');
+
+        $item = $prescription->items()->firstOrFail()->refresh();
+        $this->assertSame('reversed', $dispensing->refresh()->status->value);
+        $this->assertSame('prescribed', $prescription->refresh()->status->value);
+        $this->assertSame(0.0, (float) $item->dispensed_quantity);
+        $this->assertSame(6.0, (float) $item->remaining_quantity);
+        $this->assertDatabaseHas('medicine_batches', ['batch_number' => 'REV', 'available_quantity' => 20]);
+        $this->assertSame(1, PatientQueue::query()->where('visit_id', $prescription->visit_id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $this->assertSame('awaiting_pharmacy', $prescription->visit->refresh()->visit_status->value);
     }
 
     public function test_expiry_command_marks_expired_batches(): void
@@ -229,7 +257,10 @@ class Step8PharmacyInventoryTest extends TestCase
         $visit = Visit::factory()->create(['facility_id' => $facility->id, 'patient_id' => $patient->id, 'visit_type' => 'new_patient', 'destination_department_id' => $department->id, 'current_department_id' => $department->id, 'created_by' => $admin->id]);
         $encounter = ClinicalEncounter::factory()->create(['facility_id' => $facility->id, 'patient_id' => $patient->id, 'visit_id' => $visit->id, 'department_id' => $department->id, 'provider_user_id' => $admin->id, 'created_by' => $admin->id]);
         $prescription = Prescription::query()->create(['facility_id' => $facility->id, 'patient_id' => $patient->id, 'visit_id' => $visit->id, 'clinical_encounter_id' => $encounter->id, 'prescribed_by' => $admin->id, 'prescription_number' => 'RX-TEST-'.fake()->unique()->numberBetween(1000, 9999), 'status' => 'prescribed', 'prescribed_at' => now(), 'created_by' => $admin->id]);
-        PrescriptionItem::query()->create(['prescription_id' => $prescription->id, 'medicine_id' => $medicine->id, 'service_id' => $medicine->service_id, 'medication_name' => $medicine->name, 'dose' => '1 tab', 'frequency' => 'TDS', 'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => $quantity, 'remaining_quantity' => $quantity, 'status' => 'prescribed', 'created_by' => $admin->id]);
+        $item = PrescriptionItem::query()->create(['prescription_id' => $prescription->id, 'medicine_id' => $medicine->id, 'service_id' => $medicine->service_id, 'medication_name' => $medicine->name, 'dose' => '1 tab', 'frequency' => 'TDS', 'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => $quantity, 'remaining_quantity' => $quantity, 'status' => 'prescribed', 'created_by' => $admin->id]);
+        $invoice = Invoice::query()->create(['facility_id' => $facility->id, 'patient_id' => $patient->id, 'visit_id' => $visit->id, 'invoice_number' => 'INV-RX-'.fake()->unique()->numberBetween(1000, 9999), 'payer_type' => 'cash', 'invoice_status' => 'paid', 'status' => 'paid', 'payment_status' => 'paid', 'issued_at' => now(), 'created_by' => $admin->id]);
+        $invoiceItem = $invoice->items()->create(['facility_id' => $facility->id, 'patient_id' => $patient->id, 'visit_id' => $visit->id, 'service_id' => $medicine->service_id, 'item_type' => 'medicine', 'reference_type' => PrescriptionItem::class, 'reference_id' => $item->id, 'description' => $medicine->name, 'description_snapshot' => $medicine->name, 'quantity' => $quantity, 'unit_price' => 100, 'gross_amount' => $quantity * 100, 'total_amount' => $quantity * 100, 'payer_amount' => 0, 'patient_amount' => 0, 'insurance_amount' => $quantity * 100, 'paid_amount' => 0, 'net_amount' => $quantity * 100, 'status' => 'covered', 'created_by' => $admin->id]);
+        $item->update(['invoice_item_id' => $invoiceItem->id, 'unit_price_snapshot' => 100, 'patient_amount' => 0, 'insurance_amount' => $quantity * 100, 'payer_amount' => $quantity * 100]);
 
         return $prescription->refresh();
     }

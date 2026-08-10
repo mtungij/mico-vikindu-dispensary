@@ -7,6 +7,7 @@ use App\Models\FacilitySetting;
 use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\PaymentMethod;
+use App\Models\PrescriptionItem;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -32,6 +33,11 @@ class PaymentConfirmationService
             );
             $this->statuses->recalculate($invoice);
             $invoice = $invoice->refresh();
+
+            $existing = $this->existingRetry($invoice, $method, $amount, $data);
+            if ($existing) {
+                return $existing;
+            }
 
             if ($amount <= 0) {
                 throw ValidationException::withMessages(['amount' => 'Kiasi cha malipo lazima kiwe zaidi ya sifuri.']);
@@ -65,6 +71,7 @@ class PaymentConfirmationService
                 'amount' => $amount,
                 'currency' => $invoice->currency,
                 'transaction_reference' => $data['transaction_reference'] ?? null,
+                'idempotency_key' => $data['idempotency_key'] ?? null,
                 'payer_name' => $data['payer_name'] ?? null,
                 'payer_phone' => $data['payer_phone'] ?? null,
                 'bank_name' => $data['bank_name'] ?? null,
@@ -77,7 +84,7 @@ class PaymentConfirmationService
                 'notes' => $data['notes'] ?? null,
             ]);
 
-            $payment->allocations()->create(['facility_id' => $invoice->facility_id, 'invoice_id' => $invoice->id, 'allocated_amount' => $amount, 'allocation_type' => 'invoice', 'allocated_by' => $actor->id, 'allocated_at' => now()]);
+            $this->allocateToItems($payment, $invoice, $amount, $actor);
             $invoice = $this->statuses->recalculate($invoice);
             $this->receipts->createForPayment($payment);
             $this->audit->record('payment_confirmed', $payment, [
@@ -95,9 +102,9 @@ class PaymentConfirmationService
             ]);
 
             $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);
+            app(PrescriptionBillingService::class)->releasePaidInvoice($invoice->refresh(), $actor);
             if ((float) $invoice->balance_amount === 0.0 && $invoice->payment_status === 'paid') {
                 LaboratoryPaymentConfirmed::dispatch($invoice->refresh(), $actor);
-                app(PrescriptionBillingService::class)->releasePaidInvoice($invoice->refresh(), $actor);
                 app(ProcedureOrderService::class)->releasePaidInvoice($invoice->refresh(), $actor);
             }
 
@@ -110,5 +117,73 @@ class PaymentConfirmationService
         $value = FacilitySetting::query()->where('facility_id', currentFacility()?->id)->where('key', $key)->value('value');
 
         return $value === null ? $default : filter_var($value, FILTER_VALIDATE_BOOL);
+    }
+
+    private function existingRetry(Invoice $invoice, PaymentMethod $method, float $amount, array $data): ?Payment
+    {
+        $query = Payment::query()->where('facility_id', $invoice->facility_id)->where('status', 'confirmed');
+        if (filled($data['idempotency_key'] ?? null)) {
+            $existing = (clone $query)->where('idempotency_key', $data['idempotency_key'])->lockForUpdate()->first();
+        } elseif (filled($data['transaction_reference'] ?? null)) {
+            $existing = (clone $query)
+                ->where('payment_method_id', $method->id)
+                ->where('transaction_reference', $data['transaction_reference'])
+                ->lockForUpdate()
+                ->first();
+        } else {
+            return null;
+        }
+        if (! $existing) {
+            return null;
+        }
+        if ($existing->invoice_id !== $invoice->id || abs((float) $existing->amount - $amount) > 0.005) {
+            throw ValidationException::withMessages(['payment' => 'This payment reference was already used for a different payment.']);
+        }
+
+        return $existing;
+    }
+
+    private function allocateToItems(Payment $payment, Invoice $invoice, float $amount, $actor): void
+    {
+        $remaining = $amount;
+        $items = $invoice->items()
+            ->whereNotIn('status', ['cancelled', 'reversed', 'non_billable'])
+            ->orderByRaw('case when reference_type = ? then 0 else 1 end', [PrescriptionItem::class])
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+
+        foreach ($items as $item) {
+            if ($remaining <= 0.005) {
+                break;
+            }
+            $outstanding = max(0, (float) $item->patient_amount - (float) $item->paid_amount);
+            $allocated = min($remaining, $outstanding);
+            if ($allocated <= 0) {
+                continue;
+            }
+            $payment->allocations()->create([
+                'facility_id' => $invoice->facility_id,
+                'invoice_id' => $invoice->id,
+                'invoice_item_id' => $item->id,
+                'allocated_amount' => $allocated,
+                'allocation_type' => 'invoice_item',
+                'allocated_by' => $actor->id,
+                'allocated_at' => now(),
+            ]);
+            $item->update(['paid_amount' => (float) $item->paid_amount + $allocated]);
+            $remaining -= $allocated;
+        }
+
+        if ($remaining > 0.005) {
+            $payment->allocations()->create([
+                'facility_id' => $invoice->facility_id,
+                'invoice_id' => $invoice->id,
+                'allocated_amount' => $remaining,
+                'allocation_type' => 'invoice',
+                'allocated_by' => $actor->id,
+                'allocated_at' => now(),
+            ]);
+        }
     }
 }

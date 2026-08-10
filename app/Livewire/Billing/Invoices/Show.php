@@ -7,10 +7,13 @@ use App\Models\CashierSession;
 use App\Models\Invoice;
 use App\Models\Payment;
 use App\Models\PaymentMethod;
+use App\Models\Prescription;
 use App\Services\CashierSessionService;
 use App\Services\PaymentConfirmationService;
+use App\Services\PrescriptionBillingService;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Component;
 use Masmerise\Toaster\Toaster as Notifier;
@@ -27,6 +30,8 @@ class Show extends Component
     public string $amount = '0';
 
     public ?string $transaction_reference = null;
+
+    public ?string $payment_idempotency_key = null;
 
     public bool $showOpenSessionPrompt = false;
 
@@ -53,6 +58,7 @@ class Show extends Component
         $this->resetErrorBag();
         $this->invoice = $this->loadInvoice($this->invoice->refresh());
         $this->amount = (string) $this->invoice->balance_amount;
+        $this->payment_idempotency_key = (string) Str::uuid();
         $this->showPaymentModal = true;
     }
 
@@ -123,7 +129,7 @@ class Show extends Component
         $this->resetErrorBag('transaction_reference');
     }
 
-    public function confirmPayment(PaymentConfirmationService $service): void
+    public function confirmPayment(PaymentConfirmationService $service, PrescriptionBillingService $prescriptionBilling): void
     {
         Gate::authorize('create', Payment::class);
 
@@ -131,6 +137,7 @@ class Show extends Component
             'payment_method_id' => ['required', 'integer'],
             'amount' => ['required', 'numeric', 'min:0.01'],
             'transaction_reference' => ['nullable', 'string', 'max:120'],
+            'payment_idempotency_key' => ['required', 'uuid'],
         ]);
 
         try {
@@ -142,19 +149,28 @@ class Show extends Component
                 ->where('is_active', true)
                 ->findOrFail($data['payment_method_id']);
 
+            $data['idempotency_key'] = $data['payment_idempotency_key'];
             $payment = $service->confirmPayment($invoice, $method, (float) $data['amount'], auth()->user(), $data);
 
             $this->payment_method_id = null;
             $this->transaction_reference = null;
+            $this->payment_idempotency_key = null;
             $this->invoice = $this->loadInvoice($payment->invoice()->firstOrFail());
             $this->amount = (string) $this->invoice->balance_amount;
             $this->showPaymentModal = false;
 
             $payment->loadMissing('receipt');
             $receiptNumber = $payment->receipt?->receipt_number;
-            $message = $this->invoice->payment_status === 'partial'
-                ? 'Malipo ya sehemu yamepokelewa. Salio ni TSh '.number_format((float) $this->invoice->balance_amount, 2).'.'
-                : 'Malipo yamethibitishwa'.($receiptNumber ? " na risiti namba {$receiptNumber} imetengenezwa." : '.');
+            $medicineReady = Prescription::query()
+                ->where('visit_id', $this->invoice->visit_id)
+                ->where('status', 'prescribed')
+                ->get()
+                ->contains(fn ($prescription) => $prescriptionBilling->isCleared($prescription));
+            $message = $medicineReady
+                ? 'Payment confirmed. Patient is ready for Pharmacy.'
+                : ($this->invoice->payment_status === 'partial'
+                    ? 'Partial payment recorded. Medicine balance remains unpaid.'
+                    : 'Malipo yamethibitishwa'.($receiptNumber ? " na risiti namba {$receiptNumber} imetengenezwa." : '.'));
 
             Notifier::success($message);
             $this->dispatch('payment-confirmed', invoiceId: $this->invoice->id);
@@ -176,9 +192,9 @@ class Show extends Component
         }
     }
 
-    public function receivePayment(PaymentConfirmationService $service): void
+    public function receivePayment(PaymentConfirmationService $service, PrescriptionBillingService $prescriptionBilling): void
     {
-        $this->confirmPayment($service);
+        $this->confirmPayment($service, $prescriptionBilling);
     }
 
     public function render()
@@ -210,5 +226,4 @@ class Show extends Component
             throw ValidationException::withMessages(['amount' => 'Invoice hii haina salio la kulipwa.']);
         }
     }
-
 }

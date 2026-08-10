@@ -285,7 +285,9 @@ class Consultation extends Component
     {
         $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query->where('clinical_encounter_id', $this->encounter->id)->where('facility_id', currentFacility()?->id))->findOrFail($prescriptionItemId);
         $service->removeItem($item, auth()->user());
-        if ($this->editingPrescriptionItemId === $prescriptionItemId) $this->cancelPrescriptionEdit();
+        if ($this->editingPrescriptionItemId === $prescriptionItemId) {
+            $this->cancelPrescriptionEdit();
+        }
         Notifier::success('Dawa imeondolewa.');
     }
 
@@ -297,7 +299,9 @@ class Consultation extends Component
 
     private function hydrateMedicineSnapshot(): void
     {
-        if (! $this->prescriptionItemForm->medicine_id) return;
+        if (! $this->prescriptionItemForm->medicine_id) {
+            return;
+        }
         $medicine = Medicine::query()->where('facility_id', $this->encounter->facility_id)->where('is_active', true)->findOrFail($this->prescriptionItemForm->medicine_id);
         $this->prescriptionItemForm->medication_name = $medicine->name;
         $this->prescriptionItemForm->generic_name = $medicine->generic?->name;
@@ -391,14 +395,17 @@ class Consultation extends Component
         }
 
         $destinations = $service->completionDestinations($this->encounter);
+        $hasAwaitingMedicinePayment = $this->encounter->prescriptions()->where('status', 'awaiting_payment')->exists();
         $message = match ($this->encounter->outcome) {
             ClinicalOutcome::AdmittedBedRest => 'Consultation completed. Patient forwarded for admission.',
             ClinicalOutcome::Observation => 'Consultation completed. Patient forwarded to Observation.',
             ClinicalOutcome::Referred => 'Consultation completed. Referral recorded successfully.',
             ClinicalOutcome::FollowUp => 'Consultation completed. Follow-up scheduled successfully.',
-            default => $destinations === []
+            default => $hasAwaitingMedicinePayment
+                ? 'Consultation completed. Medicine charges were sent to Billing.'
+                : ($destinations === []
                 ? 'Consultation completed. Visit completed.'
-                : 'Consultation completed. Patient forwarded to '.collect($destinations)->join(', ', ' and ').'.',
+                : 'Consultation completed. Patient forwarded to '.collect($destinations)->join(', ', ' and').'.'),
         };
         Notifier::success($message);
 

@@ -16,6 +16,8 @@ use App\Models\ClinicalEncounter;
 use App\Models\Department;
 use App\Models\Facility;
 use App\Models\Icd10Code;
+use App\Models\InsuranceCoverageRule;
+use App\Models\InsuranceProvider;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\LaboratoryOrder;
@@ -27,6 +29,8 @@ use App\Models\Medicine;
 use App\Models\MedicineUnit;
 use App\Models\ObservationAdmission;
 use App\Models\Patient;
+use App\Models\PatientInsuranceMembership;
+use App\Models\PatientPayerProfile;
 use App\Models\PatientQueue;
 use App\Models\PaymentMethod;
 use App\Models\Permission;
@@ -40,6 +44,7 @@ use App\Models\StaffProfile;
 use App\Models\TriageAssessment;
 use App\Models\User;
 use App\Models\Visit;
+use App\Services\BillingChargeService;
 use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
 use App\Services\PaymentConfirmationService;
@@ -58,6 +63,7 @@ use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
@@ -728,7 +734,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         ], $admin);
 
         $this->assertSame('in_progress', $encounter->refresh()->status->value);
-        $this->assertSame(VisitStatus::AwaitingPayment, $visit->refresh()->visit_status);
+        $this->assertSame(VisitStatus::AwaitingPharmacy, $visit->refresh()->visit_status);
     }
 
     public function test_missing_opd_consult_permission_returns_403(): void
@@ -1482,6 +1488,143 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->where('department_id', $pharmacy->id)
             ->whereIn('queue_status', ['waiting', 'called', 'serving'])
             ->count());
+    }
+
+    public function test_cash_medicine_is_billed_and_pharmacy_queue_waits_for_full_medicine_payment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $billable = $this->service('Billable Paracetamol', 'MED-BILL-'.fake()->unique()->numerify('###'), 'medicine', $admin);
+        $medicine->update(['service_id' => $billable->id]);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id,
+            'medication_name' => $medicine->name,
+            'dose' => '1 tablet',
+            'frequency' => 'TDS',
+            'duration_value' => 3,
+            'duration_unit' => 'days',
+            'quantity' => 9,
+        ]]], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $item = $prescription->items()->firstOrFail()->refresh();
+        $this->assertSame('awaiting_payment', $prescription->refresh()->status->value);
+        $this->assertNotNull($item->invoice_item_id);
+        $this->assertSame(9000.0, (float) $item->invoiceItem->patient_amount);
+        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $this->assertSame(VisitStatus::AwaitingPayment, $visit->refresh()->visit_status);
+
+        $unrelatedService = $this->service('Unrelated Outstanding Service', 'OTHER-'.fake()->unique()->numerify('###'), 'consultation', $admin);
+        app(BillingChargeService::class)->addServiceCharge($visit->invoice->refresh(), $unrelatedService, $admin);
+
+        $method = PaymentMethod::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Cash', 'code' => 'CASH-MED', 'type' => 'cash', 'is_cash' => true, 'is_active' => true]);
+        app(PaymentConfirmationService::class)->confirmPayment($visit->invoice->refresh(), $method, 4000, $admin, ['idempotency_key' => (string) Str::uuid()]);
+        $this->assertSame('awaiting_payment', $prescription->refresh()->status->value);
+        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+
+        $finalPaymentKey = (string) Str::uuid();
+        $finalPayment = app(PaymentConfirmationService::class)->confirmPayment($visit->invoice->refresh(), $method, 5000, $admin, ['idempotency_key' => $finalPaymentKey]);
+        $retry = app(PaymentConfirmationService::class)->confirmPayment($visit->invoice->refresh(), $method, 5000, $admin, ['idempotency_key' => $finalPaymentKey]);
+        $this->assertSame('prescribed', $prescription->refresh()->status->value);
+        $this->assertSame(1, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        // The medicine stream is released independently; the unrelated charge still owns the visit-level payment state.
+        $this->assertSame(VisitStatus::AwaitingPayment, $visit->refresh()->visit_status);
+        $this->assertSame(1000.0, (float) $visit->invoice->refresh()->balance_amount);
+        $this->assertSame($finalPayment->id, $retry->id);
+        $this->assertSame(2, $visit->invoice->payments()->count());
+    }
+
+    public function test_insurance_medicine_coverage_copay_and_authorization_control_pharmacy_release(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $provider = InsuranceProvider::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Test Insurer', 'code' => 'INS-MED', 'provider_type' => 'private_insurance', 'claim_submission_method' => 'manual_report', 'is_active' => true]);
+
+        foreach ([
+            ['coverage' => 100, 'authorization' => false, 'expected' => 'prescribed', 'patient' => 0],
+            ['coverage' => 80, 'authorization' => false, 'expected' => 'awaiting_payment', 'patient' => 1800],
+            ['coverage' => 100, 'authorization' => true, 'expected' => 'awaiting_payment', 'patient' => 0],
+        ] as $index => $case) {
+            $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+            $profile = PatientPayerProfile::query()->create(['facility_id' => currentFacility()->id, 'patient_id' => $visit->patient_id, 'payer_type' => 'insurance', 'insurance_provider_id' => $provider->id, 'membership_number' => 'MEM-'.$index, 'coverage_status' => 'active', 'is_primary' => true, 'created_by' => $admin->id]);
+            $visit->update(['payer_type' => 'insurance', 'patient_payer_profile_id' => $profile->id]);
+            $membership = PatientInsuranceMembership::query()->create(['facility_id' => currentFacility()->id, 'patient_id' => $visit->patient_id, 'insurance_provider_id' => $provider->id, 'membership_number' => 'MEM-'.$index, 'membership_type' => 'principal', 'verification_status' => 'verified', 'is_primary' => true, 'is_active' => true, 'created_by' => $admin->id]);
+            $encounter = app(ClinicalEncounterService::class)->startEncounter($visit->refresh(), $admin);
+            $medicine = $this->medicine($admin);
+            $service = $this->service('Insurance Medicine '.$index, 'INS-MED-'.$index, 'medicine', $admin);
+            $service->prices()->where('payer_type', 'insurance')->update(['insurance_provider_id' => $provider->id]);
+            $medicine->update(['service_id' => $service->id]);
+            InsuranceCoverageRule::query()->create(['facility_id' => currentFacility()->id, 'insurance_provider_id' => $provider->id, 'rule_scope' => 'medicine', 'medicine_id' => $medicine->id, 'coverage_status' => $case['authorization'] ? 'authorization_required' : ($case['coverage'] < 100 ? 'partially_covered' : 'covered'), 'coverage_percentage' => $case['coverage'], 'requires_pre_authorization' => $case['authorization'], 'priority' => 100, 'is_active' => true]);
+            $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                'medicine_id' => $medicine->id, 'medication_name' => $medicine->name, 'dose' => '1 tablet', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 9,
+            ]]], $admin);
+            $this->prepareEncounterForCompletion($encounter, $admin);
+            app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+            $invoiceItem = $prescription->items()->firstOrFail()->invoiceItem;
+            $this->assertSame($case['expected'], $prescription->refresh()->status->value);
+            $this->assertSame((float) $case['patient'], (float) $invoiceItem->patient_amount);
+            $this->assertSame($membership->id, $invoiceItem->patient_insurance_membership_id);
+            $this->assertSame($case['expected'] === 'prescribed' ? 1 : 0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+            if ($case['coverage'] === 100 && ! $case['authorization']) {
+                $this->assertSame('covered', $visit->invoice->refresh()->payment_status);
+                $this->assertSame('covered_by_insurance', $visit->invoice->invoice_status->value);
+            }
+        }
+    }
+
+    public function test_medicine_payment_never_reopens_a_referred_visit(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $billable = $this->service('Referral Medicine', 'REF-MED', 'medicine', $admin);
+        $medicine->update(['service_id' => $billable->id]);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'medication_name' => $medicine->name, 'dose' => '1 tablet', 'frequency' => 'OD', 'duration_value' => 1, 'duration_unit' => 'days', 'quantity' => 1,
+        ]]], $admin);
+        app(ClinicalEncounterService::class)->createReferral($encounter, ['destination_facility_name' => 'Regional Hospital', 'reason' => 'Specialist care', 'urgency' => 'urgent'], $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin, ['clinical_summary' => 'Referred for specialist care', 'outcome' => 'referred']);
+        $this->assertSame(VisitStatus::Referred, $visit->refresh()->visit_status);
+
+        $method = PaymentMethod::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Cash', 'code' => 'CASH-REF', 'type' => 'cash', 'is_cash' => true, 'is_active' => true]);
+        app(PaymentConfirmationService::class)->confirmPayment($visit->invoice->refresh(), $method, 1000, $admin, ['idempotency_key' => (string) Str::uuid()]);
+
+        $this->assertSame('prescribed', $prescription->refresh()->status->value);
+        $this->assertSame(VisitStatus::Referred, $visit->refresh()->visit_status);
+        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+    }
+
+    public function test_prescription_billing_reconciliation_is_dry_run_and_reports_ambiguous_quantities(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $service = $this->service('Legacy Medicine', 'LEGACY-MED', 'medicine', $admin);
+        $medicine->update(['service_id' => $service->id]);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'medication_name' => $medicine->name, 'dose' => '1 tablet', 'frequency' => 'OD', 'duration_value' => 1, 'duration_unit' => 'days', 'quantity' => 1,
+        ]]], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $item = $prescription->items()->firstOrFail();
+        $invoiceItemId = $item->invoice_item_id;
+        $item->update(['invoice_item_id' => null, 'quantity' => null]);
+
+        $this->artisan('pharmacy:reconcile-prescription-billing')
+            ->expectsOutputToContain('null_or_invalid_quantity [manual review]')
+            ->expectsOutputToContain('missing_invoice_item_linkage [manual review]')
+            ->assertSuccessful();
+
+        $this->assertNull($item->refresh()->invoice_item_id);
+        $this->assertNull($item->quantity);
+        $this->assertDatabaseHas('invoice_items', ['id' => $invoiceItemId]);
     }
 
     public function test_completion_waits_for_laboratory_results_and_does_not_route_back_after_release(): void
@@ -2389,20 +2532,30 @@ class Step6ClinicalWorkflowTest extends TestCase
 
     private function medicine(User $admin): Medicine
     {
-        $unit = MedicineUnit::query()->create([
+        $unit = MedicineUnit::query()->firstOrCreate(
+            ['facility_id' => currentFacility()->id, 'name' => 'Tablet'],
+            ['symbol' => 'tab', 'is_active' => true, 'created_by' => $admin->id],
+        );
+
+        $category = ServiceCategory::query()->first() ?: ServiceCategory::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Clinical', 'code' => 'CLIN', 'category_type' => 'consultation', 'is_active' => true, 'created_by' => $admin->id]);
+        $service = Service::query()->create([
             'facility_id' => currentFacility()->id,
-            'name' => 'Tablet',
-            'symbol' => 'tab',
+            'service_category_id' => $category->id,
+            'name' => 'Explicitly free test medicine '.fake()->unique()->numerify('######'),
+            'code' => 'FREE-MED-'.fake()->unique()->numerify('######'),
+            'service_type' => 'medicine',
+            'requires_payment' => false,
             'is_active' => true,
             'created_by' => $admin->id,
         ]);
 
         return Medicine::query()->create([
             'facility_id' => currentFacility()->id,
+            'service_id' => $service->id,
             'purchase_unit_id' => $unit->id,
             'dispensing_unit_id' => $unit->id,
             'name' => 'Paracetamol',
-            'code' => 'PCM-TEST',
+            'code' => 'PCM-'.fake()->unique()->numerify('######'),
             'strength' => '500mg',
             'pack_size' => 1,
             'purchase_to_dispensing_factor' => 1,

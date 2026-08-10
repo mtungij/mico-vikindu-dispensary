@@ -17,6 +17,7 @@ use App\Models\LaboratoryOrder;
 use App\Models\ObservationAdmission;
 use App\Models\PatientQueue;
 use App\Models\PhysicalExamination;
+use App\Models\Prescription;
 use App\Models\Visit;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -35,6 +36,7 @@ class ClinicalEncounterService
         private readonly ReferralService $referrals,
         private readonly WorkflowService $workflow,
         private readonly VisitClosureService $visitClosure,
+        private readonly PrescriptionBillingService $prescriptionBilling,
     ) {}
 
     public function startEncounter(Visit $visit, $actor): ClinicalEncounter
@@ -484,6 +486,9 @@ class ClinicalEncounterService
     private function createDownstreamQueues(ClinicalEncounter $encounter, array $destinations, $actor): void
     {
         foreach ($destinations as $name => $department) {
+            if ($name === 'Pharmacy' && (! $this->hasReadyPharmacyWork($encounter) || $encounter->outcome === ClinicalOutcome::Referred)) {
+                continue;
+            }
             $status = match ($name) {
                 'Laboratory' => VisitStatus::AwaitingLab,
                 'Pharmacy' => VisitStatus::AwaitingPharmacy,
@@ -714,8 +719,8 @@ class ClinicalEncounterService
                 PrescriptionStatus::Prescribed->value,
                 PrescriptionStatus::PartiallyDispensed->value,
             ])
-            ->exists()
-            && (float) ($encounter->visit->invoice?->balance_amount ?? 0) <= 0;
+            ->get()
+            ->contains(fn (Prescription $prescription) => $this->prescriptionBilling->isCleared($prescription));
     }
 
     private function hasPatientFacingLaboratoryWork(ClinicalEncounter $encounter): bool

@@ -44,6 +44,11 @@ class InvoiceItem extends Model
         return $this->belongsTo(PatientInsuranceMembership::class, 'patient_insurance_membership_id');
     }
 
+    public function insurancePreAuthorization(): BelongsTo
+    {
+        return $this->belongsTo(InsurancePreAuthorization::class, 'insurance_pre_authorization_id');
+    }
+
     public function patient(): BelongsTo
     {
         return $this->belongsTo(Patient::class);

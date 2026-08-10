@@ -6,6 +6,7 @@ use App\Models\InsuranceClaim;
 use App\Models\Invoice;
 use App\Models\InvoiceItem;
 use App\Models\PatientInsuranceMembership;
+use App\Models\PrescriptionItem;
 use Illuminate\Support\Facades\DB;
 
 class InsuranceClaimPreparationService
@@ -24,7 +25,9 @@ class InsuranceClaimPreparationService
     {
         return DB::transaction(function () use ($invoice, $membership, $claimType): InsuranceClaim {
             $existing = InsuranceClaim::query()->where('facility_id', $invoice->facility_id)->where('invoice_id', $invoice->id)->whereNull('parent_claim_id')->first();
-            if ($existing) return $existing;
+            if ($existing) {
+                return $existing;
+            }
 
             $claim = InsuranceClaim::query()->create([
                 'facility_id' => $invoice->facility_id,
@@ -46,11 +49,15 @@ class InsuranceClaimPreparationService
                 'created_by' => auth()->id() ?? $membership->created_by,
             ]);
 
-            $invoice->items()->where('insurance_amount', '>', 0)->whereNotIn('status', ['cancelled','reversed'])->each(function (InvoiceItem $item) use ($claim): void {
+            $invoice->items()->where('insurance_amount', '>', 0)->whereNotIn('status', ['cancelled', 'reversed'])->each(function (InvoiceItem $item) use ($claim): void {
+                $medicine = $item->reference_type === PrescriptionItem::class
+                    ? PrescriptionItem::query()->with('medicine')->find($item->reference_id)?->medicine
+                    : null;
                 $claim->items()->create([
                     'facility_id' => $claim->facility_id,
                     'invoice_item_id' => $item->id,
                     'service_id' => $item->service_id,
+                    'medicine_id' => $medicine?->id,
                     'item_type' => $item->item_type,
                     'service_code_snapshot' => $item->service?->code,
                     'payer_service_code' => $item->metadata['payer_service_code'] ?? null,
@@ -62,6 +69,10 @@ class InsuranceClaimPreparationService
                     'patient_amount' => $item->patient_amount,
                     'claimed_amount' => $item->insurance_amount,
                     'coverage_status' => $item->claimable_status === 'claimable' ? 'covered' : ($item->claimable_status ?: 'not_configured'),
+                    'medicine_code' => $medicine?->code,
+                    'authorization_number' => $item->insurance_pre_authorization_id
+                        ? $item->insurancePreAuthorization?->authorization_number
+                        : null,
                     'status' => 'draft',
                     'metadata' => ['invoice_item_status' => $item->status],
                 ]);

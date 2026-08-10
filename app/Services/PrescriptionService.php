@@ -134,14 +134,33 @@ class PrescriptionService
         }
         $prescription->update(['status' => PrescriptionStatus::Prescribed, 'updated_by' => $actor->id]);
 
-        return $this->billing->bill($prescription->refresh(), $actor);
+        $prescription = $this->billing->bill($prescription->refresh(), $actor);
+        ActivityLog::query()->create([
+            'user_id' => $actor->id,
+            'event' => $prescription->status === PrescriptionStatus::AwaitingPayment ? 'prescription_awaiting_payment' : 'prescription_finalized',
+            'subject_type' => $prescription::class,
+            'subject_id' => $prescription->id,
+            'new_values' => ['facility_id' => $prescription->facility_id, 'patient_id' => $prescription->patient_id, 'visit_id' => $prescription->visit_id],
+        ]);
+
+        return $prescription;
     }
 
     public function cancelPrescription(Prescription $prescription, string $reason, $actor): Prescription
     {
+        abort_unless($prescription->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
         if (blank($reason)) {
             throw ValidationException::withMessages(['reason' => 'Sababu ya kufuta prescription inahitajika.']);
         }
+        if ($prescription->items()->where('dispensed_quantity', '>', 0)->exists()) {
+            throw ValidationException::withMessages(['prescription' => 'A partially dispensed prescription cannot be cancelled; decline only the unfilled remainder.']);
+        }
+        $prescription->items()->with('invoiceItem')->get()->each(function (PrescriptionItem $item) use ($actor, $reason): void {
+            if ($item->invoiceItem && ! in_array($item->invoiceItem->status, ['cancelled', 'reversed'], true)) {
+                app(BillingChargeService::class)->cancelCharge($item->invoiceItem, $actor, $reason);
+            }
+            $item->update(['status' => 'cancelled', 'terminal_status' => 'cancelled', 'terminal_reason' => $reason, 'terminal_at' => now(), 'terminal_by' => $actor->id, 'remaining_quantity' => 0]);
+        });
         $prescription->update(['status' => PrescriptionStatus::Cancelled, 'cancelled_at' => now(), 'cancellation_reason' => $reason, 'updated_by' => $actor->id]);
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_cancelled', 'subject_type' => $prescription::class, 'subject_id' => $prescription->id]);
         if (! Prescription::query()
@@ -158,5 +177,60 @@ class PrescriptionService
         $this->visitClosure->evaluate($prescription->visit->refresh(), $actor);
 
         return $prescription->refresh();
+    }
+
+    public function terminallyDeclineItem(PrescriptionItem $item, string $status, string $reason, $actor): PrescriptionItem
+    {
+        if (! in_array($status, ['declined', 'unavailable', 'substituted_elsewhere'], true)) {
+            throw ValidationException::withMessages(['status' => 'Invalid terminal medicine status.']);
+        }
+        if (blank($reason)) {
+            throw ValidationException::withMessages(['reason' => 'A reason is required.']);
+        }
+
+        return DB::transaction(function () use ($item, $status, $reason, $actor): PrescriptionItem {
+            $item = PrescriptionItem::query()->with(['prescription.visit', 'invoiceItem'])->lockForUpdate()->findOrFail($item->id);
+            abort_unless(
+                $item->prescription->facility_id === currentFacility()?->id
+                && $actor->belongsToCurrentFacility()
+                && $actor->can('pharmacy.dispense'),
+                403
+            );
+            if ($item->terminal_status || (float) $item->remaining_quantity <= 0) {
+                throw ValidationException::withMessages(['item' => 'This medicine item is already terminal.']);
+            }
+            if ($item->invoiceItem) {
+                app(BillingChargeService::class)->adjustChargeQuantity($item->invoiceItem, (float) $item->dispensed_quantity, $actor, $reason);
+            }
+            $item->update([
+                'status' => $status,
+                'dispensing_status' => $status,
+                'terminal_status' => $status,
+                'terminal_reason' => $reason,
+                'terminal_at' => now(),
+                'terminal_by' => $actor->id,
+                'remaining_quantity' => 0,
+                'updated_by' => $actor->id,
+            ]);
+            $prescription = $item->prescription;
+            $active = $prescription->items()->whereNull('terminal_status')->whereColumn('dispensed_quantity', '<', 'quantity')->exists();
+            if (! $active) {
+                $allDeclined = ! $prescription->items()->where('dispensed_quantity', '>', 0)->exists();
+                $prescription->update([
+                    'status' => $allDeclined ? PrescriptionStatus::Cancelled : PrescriptionStatus::Dispensed,
+                    'dispensed_at' => $allDeclined ? null : now(),
+                    'cancellation_reason' => $allDeclined ? $reason : null,
+                    'cancelled_at' => $allDeclined ? now() : null,
+                    'updated_by' => $actor->id,
+                ]);
+                $this->visitClosure->completeDepartmentQueues($prescription->visit, 'PHA', $actor);
+            } else {
+                $prescription->update(['status' => PrescriptionStatus::PartiallyDispensed, 'updated_by' => $actor->id]);
+            }
+            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'medicine_terminally_declined', 'subject_type' => $item::class, 'subject_id' => $item->id, 'new_values' => ['status' => $status, 'reason' => $reason, 'visit_id' => $prescription->visit_id]]);
+            $this->visitClosure->evaluate($prescription->visit->refresh(), $actor);
+
+            return $item->refresh();
+        });
     }
 }

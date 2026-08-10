@@ -38,11 +38,14 @@
                                 'consultation' => 'Consultation',
                                 'laboratory_test', 'laboratory' => 'Laboratory',
                                 'radiology', 'imaging' => 'Radiology',
-                                'medicine', 'pharmacy' => 'Pharmacy',
+                                'medicine', 'pharmacy' => 'Pharmacy / Medicines',
                                 'procedure' => 'Procedure',
                                 default => str($item->item_type)->replace('_', ' ')->title()->toString(),
                             })->filter()->unique()->values();
                             $departments = $invoice->items->pluck('department.name')->filter()->unique()->values();
+                            $medicineItems = $invoice->items->where('reference_type', \App\Models\PrescriptionItem::class)->whereNotIn('status', ['cancelled', 'reversed']);
+                            $medicinePatient = (float) $medicineItems->sum('patient_amount');
+                            $medicinePaid = (float) $medicineItems->sum('paid_amount');
                             $clinicians = $invoice->items
                                 ->map(fn ($item) => $item->laboratoryOrderItem?->order?->orderingClinician?->name)
                                 ->filter()->unique()->values();
@@ -52,7 +55,7 @@
                                 <a class="font-semibold text-primary" href="{{ route('billing.invoices.show', $invoice) }}">{{ $invoice->invoice_number }}</a>
                                 <div class="text-xs text-slate-500">{{ $invoice->visit?->visit_number ?? 'No visit' }}</div>
                             </td>
-                            <td class="px-3 py-3">{{ $invoice->patient?->first_name }} {{ $invoice->patient?->last_name }}</td>
+                            <td class="px-3 py-3">{{ $invoice->patient?->first_name }} {{ $invoice->patient?->last_name }}<div class="text-xs text-slate-500">{{ $invoice->patient?->patient_number }}</div></td>
                             <td class="px-3 py-3">{{ $invoice->payer_type?->label() ?? str($invoice->payer_type)->title() }}</td>
                             <td class="px-3 py-3">
                                 <div class="flex flex-wrap gap-1">
@@ -61,7 +64,7 @@
                             </td>
                             <td class="px-3 py-3">{{ $departments->implode(', ') ?: ($sources->contains('Laboratory') ? 'Laboratory' : '—') }}</td>
                             <td class="px-3 py-3">{{ $clinicians->implode(', ') ?: '—' }}</td>
-                            <td class="px-3 py-3 font-semibold">{{ number_format($invoice->balance_amount, 2) }}</td>
+                            <td class="px-3 py-3 font-semibold">{{ number_format($invoice->balance_amount, 2) }}@if($medicineItems->isNotEmpty())<div class="text-xs font-normal text-slate-500">Medicines: {{ number_format($medicinePatient, 2) }} / paid {{ number_format($medicinePaid, 2) }}</div>@endif</td>
                             <td class="px-3 py-3">{{ str($invoice->payment_status)->replace('_', ' ')->title() }}</td>
                             <td class="px-3 py-3">
                                 {{ $invoice->issued_at?->format('d/m/Y H:i') }}

@@ -39,6 +39,8 @@ class PaymentConfirmationService
                 return $existing;
             }
 
+            $invoice = $this->statuses->ensureCanReceivePayment($invoice, false);
+
             if ($amount <= 0) {
                 throw ValidationException::withMessages(['amount' => 'Kiasi cha malipo lazima kiwe zaidi ya sifuri.']);
             }

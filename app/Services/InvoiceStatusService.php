@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\InvoiceStatus;
 use App\Models\Invoice;
+use Illuminate\Validation\ValidationException;
 
 class InvoiceStatusService
 {
@@ -30,12 +31,15 @@ class InvoiceStatusService
         $paymentStatus = $balance <= 0 && (float) $invoice->patient_amount <= 0
             ? 'covered'
             : ($paid <= 0 ? 'unpaid' : ($balance > 0 ? 'partial' : ($paid > (float) $invoice->patient_amount ? 'overpaid' : 'paid')));
+        $terminalStatuses = ['cancelled', 'void', 'voided', 'refunded', 'written_off', 'reversed', 'replaced'];
         $status = match (true) {
-            $invoice->status === 'voided' => 'voided',
+            in_array($invoice->status, $terminalStatuses, true) => $invoice->status,
             $paymentStatus === 'covered' => InvoiceStatus::CoveredByInsurance->value,
             $paymentStatus === 'paid', $paymentStatus === 'overpaid' => 'paid',
             $paymentStatus === 'partial' => 'partially_paid',
-            default => $invoice->status ?: 'open',
+            $invoice->status === 'finalized' => 'finalized',
+            $invoice->status === InvoiceStatus::Draft->value => InvoiceStatus::Draft->value,
+            default => 'open',
         };
 
         $invoice->update([
@@ -43,7 +47,7 @@ class InvoiceStatusService
             'balance_amount' => $balance,
             'payment_status' => $paymentStatus,
             'status' => $status,
-            'invoice_status' => InvoiceStatus::tryFrom($status) ?? $invoice->invoice_status,
+            'invoice_status' => $this->invoiceStatusFor($status),
         ]);
 
         return $invoice->refresh();
@@ -54,5 +58,53 @@ class InvoiceStatusService
         $invoice->update(['status' => 'finalized', 'finalized_at' => now(), 'finalized_by' => $actor->id]);
 
         return $this->recalculate($invoice);
+    }
+
+    public function ensureCanReceivePayment(Invoice $invoice, bool $recalculate = true): Invoice
+    {
+        $invoice = $recalculate ? $this->recalculate($invoice) : $invoice->refresh();
+        $invoiceStatus = $invoice->invoice_status?->value ?? (string) $invoice->invoice_status;
+
+        if ($invoice->voided_at || in_array($invoice->status, ['void', 'voided'], true)) {
+            throw ValidationException::withMessages(['payment' => 'Invoice hii imebatilishwa.']);
+        }
+        if ($invoice->status === 'cancelled' || $invoiceStatus === InvoiceStatus::Cancelled->value) {
+            throw ValidationException::withMessages(['payment' => 'Invoice hii imefutwa.']);
+        }
+        if ($invoice->status === 'refunded' || $invoiceStatus === InvoiceStatus::Refunded->value) {
+            throw ValidationException::withMessages(['payment' => 'Invoice hii imerejeshewa malipo.']);
+        }
+        if ($invoice->status === 'written_off' || $invoiceStatus === InvoiceStatus::WrittenOff->value) {
+            throw ValidationException::withMessages(['payment' => 'Invoice hii imeondolewa kwenye madai.']);
+        }
+        if (in_array($invoice->status, ['reversed', 'replaced'], true)) {
+            throw ValidationException::withMessages(['payment' => 'Invoice hii imebadilishwa na haiwezi kupokea malipo.']);
+        }
+        if ($invoice->status === InvoiceStatus::Draft->value || $invoiceStatus === InvoiceStatus::Draft->value) {
+            throw ValidationException::withMessages(['payment' => 'Invoice hii bado haijafinalize.']);
+        }
+        if (in_array($invoice->payment_status, ['paid', 'overpaid'], true) || $invoice->status === 'paid') {
+            throw ValidationException::withMessages(['amount' => 'Invoice hii tayari imelipwa kikamilifu.']);
+        }
+        if ((float) $invoice->patient_amount <= 0) {
+            throw ValidationException::withMessages(['amount' => 'Invoice hii haina sehemu ya malipo ya mgonjwa.']);
+        }
+        if ((float) $invoice->balance_amount <= 0) {
+            throw ValidationException::withMessages(['amount' => 'Invoice hii haina salio la kulipwa.']);
+        }
+        if (! in_array($invoice->status, ['open', 'finalized', 'partially_paid'], true)) {
+            throw ValidationException::withMessages(['payment' => 'Hali ya invoice hii hairuhusu kupokea malipo.']);
+        }
+
+        return $invoice;
+    }
+
+    private function invoiceStatusFor(string $status): InvoiceStatus
+    {
+        return match ($status) {
+            'open', 'finalized' => InvoiceStatus::Pending,
+            'void', 'voided' => InvoiceStatus::Cancelled,
+            default => InvoiceStatus::tryFrom($status) ?? InvoiceStatus::Pending,
+        };
     }
 }

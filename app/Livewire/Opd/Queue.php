@@ -42,6 +42,8 @@ class Queue extends Component
             ->oldest('registered_at')
             ->paginate(10);
 
+            
+
         return view('livewire.opd.queue', [
             'visits' => $visits,
             'queues' => PatientQueue::query()->forCurrentFacility()->whereDate('queue_date', today())->get()->keyBy('visit_id'),

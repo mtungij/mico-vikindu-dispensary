@@ -324,8 +324,9 @@
                     }
                 }
                 $prescriptionStatusLabel = fn ($status) => match ($statusValue($status)) {
-                    'draft' => 'Ready to send to Pharmacy',
-                    'prescribed', 'awaiting_payment' => 'Sent to Pharmacy',
+                    'draft' => 'Draft — Pending Consultation Completion',
+                    'awaiting_payment' => 'Awaiting Medicine Payment',
+                    'prescribed' => 'Ready for Pharmacy',
                     'partially_dispensed' => 'Partially Dispensed',
                     'dispensed' => 'Dispensed',
                     'cancelled' => 'Cancelled',

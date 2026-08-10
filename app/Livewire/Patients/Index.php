@@ -8,6 +8,7 @@ use App\Enums\PayerType;
 use App\Livewire\Forms\PatientPayerForm;
 use App\Livewire\Forms\PatientPersonalForm;
 use App\Livewire\Forms\VisitForm;
+use App\Models\ActivityLog;
 use App\Models\CorporateAccount;
 use App\Models\Department;
 use App\Models\InsuranceProvider;
@@ -19,14 +20,14 @@ use App\Services\PatientSearchService;
 use App\Services\ReceptionChargeService;
 use App\Services\ReceptionWorkflowService;
 use App\Support\Notifier;
-use Illuminate\Contracts\View\View;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
-use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Str;
-use Throwable;
+use Illuminate\Validation\ValidationException;
 use Livewire\Component;
 use Livewire\WithPagination;
+use Throwable;
 
 class Index extends Component
 {
@@ -64,6 +65,14 @@ class Index extends Component
 
     public bool $confirmDuplicateCreation = false;
 
+    public bool $showStrongDuplicateOverride = false;
+
+    public string $duplicateOverrideReason = '';
+
+    public ?string $duplicateReviewFingerprint = null;
+
+    public string $activeVisitOverrideReason = '';
+
     public ?int $newPatientConsultationServiceId = null;
 
     public function mount(): void
@@ -92,6 +101,10 @@ class Index extends Component
         $this->patientMatches = [];
         $this->selectedPatientId = null;
         $this->confirmDuplicateCreation = false;
+        $this->showStrongDuplicateOverride = false;
+        $this->duplicateOverrideReason = '';
+        $this->duplicateReviewFingerprint = null;
+        $this->activeVisitOverrideReason = '';
         $this->newPatientConsultationServiceId = null;
         $this->showModal = true;
         $this->refreshChargePreview();
@@ -99,23 +112,45 @@ class Index extends Component
 
     public function searchDuplicates(PatientDuplicateDetectionService $detector): void
     {
-        $this->duplicates = $detector->detect($this->personal->all());
+        $this->validateOnly('personal.primary_phone');
+        $this->duplicates = $detector->detect($this->personal->all(), $this->payer->all());
+        $this->resetDuplicateReview();
+        if (($this->duplicates['status'] ?? 'none') !== 'none') {
+            ActivityLog::query()->create([
+                'user_id' => auth()->id(),
+                'event' => 'patient_duplicate_warning_shown',
+                'subject_type' => Patient::class,
+                'subject_id' => $this->duplicates['matched_patient_ids'][0] ?? null,
+                'new_values' => [
+                    'facility_id' => currentFacility()?->id,
+                    'matched_patient_ids' => $this->duplicates['matched_patient_ids'],
+                    'match_severity' => $this->duplicates['status'],
+                    'match_reasons' => $this->duplicates['reasons'],
+                ],
+            ]);
+        }
     }
 
     public function updatedPatientLookup(PatientSearchService $search): void
     {
-        $this->patientMatches = $search->search($this->patientLookup)->map(fn (Patient $patient) => [
-            'id' => $patient->id, 'name' => $patient->fullName(), 'patient_number' => $patient->patient_number,
-            'age' => $patient->ageLabel(), 'sex' => $patient->gender?->label(), 'phone' => $patient->primary_phone,
-            'nida' => $patient->nida_number, 'last_visit' => $patient->latestVisit?->visit_number,
-            'active_visit' => $patient->activeVisit?->visit_number, 'active_visit_id' => $patient->activeVisit?->id,
-            'payer' => $patient->primaryPayerProfile?->payer_type?->label(), 'status' => $patient->patient_status?->label(),
-        ])->all();
+        $this->patientMatches = $search->searchWithReasons($this->patientLookup)->map(function (array $searchMatch): array {
+            $patient = $searchMatch['patient'];
+
+            return [
+                'id' => $patient->id, 'name' => $patient->fullName(), 'patient_number' => $patient->patient_number,
+                'age' => $patient->ageLabel(), 'sex' => $patient->gender?->label(), 'phone' => $patient->primary_phone,
+                'nida' => $patient->nida_number, 'last_visit' => $patient->latestVisit?->visit_number,
+                'active_visit' => $patient->activeVisit?->visit_number, 'active_visit_id' => $patient->activeVisit?->id,
+                'payer' => $patient->primaryPayerProfile?->payer_type?->label(), 'status' => $patient->patient_status?->label(),
+                'match_reason' => $searchMatch['reason'],
+                'active_visit_url' => $patient->activeVisit ? $this->activeVisitUrl($patient) : null,
+            ];
+        })->all();
     }
 
     public function selectExistingPatient(int $patientId): void
     {
-        $patient = Patient::query()->forCurrentFacility()->with('primaryPayerProfile')->findOrFail($patientId);
+        $patient = Patient::query()->forCurrentFacility()->with(['primaryPayerProfile', 'activeVisit'])->findOrFail($patientId);
         Gate::authorize('view', $patient);
         $this->resetErrorBag();
         $this->selectedPatientId = $patient->id;
@@ -130,6 +165,13 @@ class Index extends Component
         }
         $this->refreshChargePreview();
         $this->step = 4;
+        ActivityLog::query()->create([
+            'user_id' => auth()->id(),
+            'event' => 'existing_patient_selected',
+            'subject_type' => $patient::class,
+            'subject_id' => $patient->id,
+            'new_values' => ['facility_id' => $patient->facility_id, 'patient_id' => $patient->id, 'active_visit_id' => $patient->activeVisit?->id],
+        ]);
     }
 
     public function clearSelectedPatient(): void
@@ -137,7 +179,50 @@ class Index extends Component
         $this->resetErrorBag();
         $this->selectedPatientId = null;
         $this->visit->visit_type = 'new_patient';
+        $this->activeVisitOverrideReason = '';
         $this->refreshChargePreview();
+        $this->step = 1;
+    }
+
+    public function confirmDifferentPatient(PatientDuplicateDetectionService $detector): void
+    {
+        $this->duplicates = $detector->detect($this->personal->all(), $this->payer->all());
+        if (($this->duplicates['status'] ?? 'none') === 'exact') {
+            $this->addError('duplicate', 'Mgonjwa huyu anaonekana tayari yupo kwenye mfumo. Chagua rekodi iliyopo.');
+
+            return;
+        }
+        if (($this->duplicates['status'] ?? 'none') === 'probable' && mb_strlen(trim($this->duplicateOverrideReason)) < 5) {
+            $this->addError('duplicateOverrideReason', 'Eleza kwa nini huyu ni mgonjwa tofauti.');
+
+            return;
+        }
+        $this->confirmDuplicateCreation = true;
+        $this->duplicateReviewFingerprint = $this->duplicateFingerprint();
+    }
+
+    public function requestDuplicateOverride(): void
+    {
+        Gate::authorize('patients.override-duplicate-warning');
+        $this->showStrongDuplicateOverride = true;
+    }
+
+    public function confirmDuplicateOverride(PatientDuplicateDetectionService $detector): void
+    {
+        Gate::authorize('patients.override-duplicate-warning');
+        $this->duplicates = $detector->detect($this->personal->all(), $this->payer->all());
+        if (($this->duplicates['status'] ?? 'none') !== 'exact') {
+            $this->confirmDifferentPatient($detector);
+
+            return;
+        }
+        if (mb_strlen(trim($this->duplicateOverrideReason)) < 10) {
+            $this->addError('duplicateOverrideReason', 'Eleza sababu yenye maana kwa angalau herufi 10.');
+
+            return;
+        }
+        $this->confirmDuplicateCreation = true;
+        $this->duplicateReviewFingerprint = $this->duplicateFingerprint();
     }
 
     public function nextStep(): void
@@ -214,7 +299,9 @@ class Index extends Component
 
     public function updatedVisitVisitType(): void
     {
-        if ($this->selectedPatientId) $this->visit->visit_type = 'returning_patient';
+        if ($this->selectedPatientId) {
+            $this->visit->visit_type = 'returning_patient';
+        }
         if ($this->visit->visit_type === 'new_patient') {
             $this->visit->consultation_service_id = $this->newPatientConsultationServiceId;
         } else {
@@ -267,10 +354,16 @@ class Index extends Component
                 }
             } else {
                 Gate::authorize('create', Patient::class);
-                $duplicates = app(PatientDuplicateDetectionService::class)->detect($this->personal->data());
-                if ($duplicates['status'] !== 'none' && ! $this->confirmDuplicateCreation) {
+                $personalData = $this->personal->data();
+                $payerData = $this->payer->data();
+                $duplicates = app(PatientDuplicateDetectionService::class)->detect($personalData, $payerData);
+                $reviewIsCurrent = $this->confirmDuplicateCreation && hash_equals((string) $this->duplicateReviewFingerprint, $this->duplicateFingerprint());
+                if ($duplicates['status'] !== 'none' && ! $reviewIsCurrent) {
                     $this->duplicates = $duplicates;
-                    $this->addError('duplicate', 'Kuna mgonjwa anayefanana. Chagua mgonjwa aliyepo au thibitisha kuunda rekodi mpya.');
+                    $message = $duplicates['status'] === 'exact'
+                        ? 'Mgonjwa huyu anaonekana tayari yupo kwenye mfumo. Chagua rekodi iliyopo.'
+                        : 'Kuna mgonjwa anayefanana. Hakiki rekodi iliyopo kabla ya kuunda mpya.';
+                    $this->addError('duplicate', $message);
                     $this->step = 1;
                     Notifier::warning('Tafadhali rekebisha taarifa zifuatazo.');
 
@@ -283,8 +376,11 @@ class Index extends Component
                 ]);
             }
             $result = $this->selectedPatientId
-                ? $workflow->openReturningPatientVisit($patient, $this->payer->data(), [...$this->visit->data(), 'visit_type' => 'returning_patient'], $this->selectedLaboratoryTestIds, auth()->user())
-                : $workflow->registerNewPatientAndVisit($this->personal->data(), $this->payer->data(), $this->visit->data(), $this->selectedLaboratoryTestIds, auth()->user());
+                ? $workflow->openReturningPatientVisit($patient, $this->payer->data(), [...$this->visit->data(), 'visit_type' => 'returning_patient'], $this->selectedLaboratoryTestIds, auth()->user(), $this->activeVisitOverrideReason)
+                : $workflow->registerNewPatientAndVisit($personalData, $payerData, $this->visit->data(), $this->selectedLaboratoryTestIds, auth()->user(), [
+                    'confirmed' => $reviewIsCurrent,
+                    'reason' => $this->duplicateOverrideReason,
+                ]);
         } catch (ValidationException $exception) {
             $this->showValidationFailure($exception);
 
@@ -322,7 +418,7 @@ class Index extends Component
         $laboratoryTests = LaboratoryTest::query()->forCurrentFacility()->with(['service', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get();
 
         $selectedPatient = $this->selectedPatientId
-            ? Patient::query()->forCurrentFacility()->with(['latestVisit', 'activeVisit'])->find($this->selectedPatientId)
+            ? Patient::query()->forCurrentFacility()->with(['latestVisit', 'activeVisit.currentDepartment', 'activeVisit.invoice', 'activeVisit.laboratoryOrders'])->find($this->selectedPatientId)
             : null;
 
         return view('livewire.patients.index', ['patients' => $patients, 'selectedPatient' => $selectedPatient, 'genders' => Gender::cases(), 'statuses' => PatientStatus::cases(), 'payerTypes' => PayerType::cases(), 'departments' => $departments, 'services' => $consultationServices, 'laboratoryTests' => $laboratoryTests, 'providers' => InsuranceProvider::query()->forCurrentFacility()->where('is_active', true)->get(), 'corporates' => CorporateAccount::query()->forCurrentFacility()->where('is_active', true)->get()])
@@ -355,5 +451,49 @@ class Index extends Component
             }
         }
         Notifier::warning('Tafadhali rekebisha taarifa zifuatazo.');
+    }
+
+    public function activeVisitUrl(?Patient $patient): string
+    {
+        $visit = $patient?->activeVisit;
+        if (! $visit) {
+            return route('patients.show', $patient);
+        }
+        if ($visit->visit_status->value === 'awaiting_payment' && $visit->invoice && auth()->user()->can('billing.view-invoice')) {
+            return route('billing.invoices.show', $visit->invoice);
+        }
+        if ($visit->currentDepartment?->code === 'OPD' && auth()->user()->can('opd.consult')) {
+            return route('opd.consultation', $visit);
+        }
+        if ($visit->currentDepartment?->code === 'LAB' && $visit->laboratoryOrders->isNotEmpty() && auth()->user()->can('laboratory.view-order')) {
+            return route('laboratory.orders.show', $visit->laboratoryOrders->last());
+        }
+        if ($visit->currentDepartment?->code === 'PHA' && auth()->user()->can('pharmacy.view-queue')) {
+            return route('pharmacy.index');
+        }
+
+        return route('patients.show', $patient);
+    }
+
+    private function duplicateFingerprint(): string
+    {
+        return hash('sha256', json_encode([
+            'first_name' => mb_strtolower(trim((string) $this->personal->first_name)),
+            'last_name' => mb_strtolower(trim((string) $this->personal->last_name)),
+            'date_of_birth' => $this->personal->date_of_birth,
+            'age_years' => $this->personal->age_years,
+            'gender' => $this->personal->gender,
+            'primary_phone' => trim((string) $this->personal->primary_phone),
+            'nida_number' => mb_strtolower(trim((string) $this->personal->nida_number)),
+            'passport_number' => mb_strtolower(trim((string) $this->personal->passport_number)),
+            'membership_number' => mb_strtolower(trim((string) $this->payer->membership_number)),
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    private function resetDuplicateReview(): void
+    {
+        $this->confirmDuplicateCreation = false;
+        $this->showStrongDuplicateOverride = false;
+        $this->duplicateReviewFingerprint = null;
     }
 }

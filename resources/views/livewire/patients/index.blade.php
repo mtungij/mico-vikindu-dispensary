@@ -60,8 +60,8 @@
                 <div class="space-y-3">
                     @if($selectedPatient)
                         <div class="flex flex-col justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-950/40 md:flex-row">
-                            <div><p class="font-semibold">Existing patient selected: {{ $selectedPatient->fullName() }}</p><p class="text-sm text-slate-600 dark:text-slate-300">{{ $selectedPatient->patient_number }} · {{ $selectedPatient->primary_phone ?: '-' }} · Last visit: {{ $selectedPatient->latestVisit?->visit_number ?: '-' }}</p></div>
-                            <x-secondary-button type="button" wire:click="clearSelectedPatient">Create New Patient</x-secondary-button>
+                            <div><p class="font-semibold">Existing patient selected: {{ $selectedPatient->fullName() }}</p><p class="text-sm text-slate-600 dark:text-slate-300">{{ $selectedPatient->patient_number }} · {{ $selectedPatient->primary_phone ?: '-' }} · Last visit: {{ $selectedPatient->latestVisit?->visit_number ?: '-' }}</p>@if($selectedPatient->activeVisit)<p class="mt-1 font-semibold text-amber-700">Active visit: {{ $selectedPatient->activeVisit->visit_number }}</p>@endif</div>
+                            <x-secondary-button type="button" wire:click="clearSelectedPatient">Change Patient</x-secondary-button>
                         </div>
                     @endif
                     <p class="text-sm text-slate-500">Tafuta kwa namba ya mgonjwa, jina, simu, NIDA au namba ya bima.</p>
@@ -69,13 +69,45 @@
                     @if(mb_strlen($patientLookup) >= 2)
                         <div class="space-y-2">
                             @forelse($patientMatches as $match)
-                                <div class="rounded-md border border-slate-200 p-3 dark:border-slate-700"><div class="flex flex-col justify-between gap-3 md:flex-row"><div><p class="font-semibold">{{ $match['name'] }} · {{ $match['patient_number'] }}</p><p class="text-xs text-slate-500">{{ $match['age'] }} · {{ $match['sex'] }} · {{ $match['phone'] ?: '-' }} · NIDA {{ $match['nida'] ?: '-' }}</p><p class="text-xs text-slate-500">Last visit: {{ $match['last_visit'] ?: '-' }} · Payer: {{ $match['payer'] ?: '-' }} · Status: {{ $match['status'] ?: '-' }}</p>@if($match['active_visit'])<p class="mt-1 font-semibold text-amber-700">Active visit: {{ $match['active_visit'] }}</p>@endif</div><div class="flex flex-wrap gap-2"><x-primary-button type="button" wire:click="selectExistingPatient({{ $match['id'] }})">Select Patient</x-primary-button><a href="{{ route('patients.show', $match['id']) }}" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold">View Patient</a>@if($match['active_visit_id'])<a href="{{ route('patients.show', $match['id']) }}" class="rounded-md border border-amber-400 px-3 py-2 text-xs font-semibold text-amber-700">Open Active Visit</a>@endif</div></div></div>
+                                <div class="rounded-md border border-slate-200 p-3 dark:border-slate-700"><div class="flex flex-col justify-between gap-3 md:flex-row"><div><p class="font-semibold">{{ $match['name'] }} · {{ $match['patient_number'] }}</p><p class="text-xs font-semibold text-primary">{{ $match['match_reason'] }}</p><p class="text-xs text-slate-500">{{ $match['age'] }} · {{ $match['sex'] }} · {{ $match['phone'] ?: '-' }} · NIDA {{ $match['nida'] ?: '-' }}</p><p class="text-xs text-slate-500">Last visit: {{ $match['last_visit'] ?: '-' }} · Payer: {{ $match['payer'] ?: '-' }} · Status: {{ $match['status'] ?: '-' }}</p>@if($match['active_visit'])<p class="mt-1 font-semibold text-amber-700">Active visit: {{ $match['active_visit'] }}</p>@endif</div><div class="flex flex-wrap gap-2"><x-primary-button type="button" wire:click="selectExistingPatient({{ $match['id'] }})">Select Patient</x-primary-button><a href="{{ route('patients.show', $match['id']) }}" class="rounded-md border border-slate-300 px-3 py-2 text-xs font-semibold">View Patient</a>@if($match['active_visit_id'])<a href="{{ $match['active_visit_url'] }}" class="rounded-md border border-amber-400 px-3 py-2 text-xs font-semibold text-amber-700">Open Active Visit</a>@endif</div></div></div>
                             @empty
                                 <p class="rounded-md bg-slate-50 p-4 text-sm text-slate-500 dark:bg-slate-800">Hakuna mgonjwa aliyepatikana.</p>
                             @endforelse
                         </div>
                     @endif
-                    <div class="border-t border-slate-200 pt-3 dark:border-slate-700"><div class="mb-2 flex items-center justify-between gap-3"><p class="text-sm font-semibold">Au anza rekodi mpya</p>@if($selectedPatient)<x-secondary-button type="button" wire:click="clearSelectedPatient">Create New Patient</x-secondary-button>@endif</div><div class="grid gap-3 md:grid-cols-3"><x-text-input wire:model="personal.first_name" placeholder="First name" /><x-text-input wire:model="personal.last_name" placeholder="Last name" /><x-text-input wire:model="personal.primary_phone" placeholder="Phone" /></div><x-secondary-button type="button" wire:click="searchDuplicates" class="mt-3"><x-lucide-search class="h-4 w-4" /> Kagua duplicate</x-secondary-button>@if($duplicates)<div class="mt-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800">Status: {{ $duplicates['status'] ?? 'none' }}</div>@endif<x-input-error :messages="$errors->get('duplicate')" class="mt-2" />@if(($duplicates['status'] ?? 'none') !== 'none')<label class="mt-2 flex items-center gap-2 text-sm"><x-checkbox wire:model="confirmDuplicateCreation" /> Nimethibitisha kuunda rekodi mpya licha ya uwezekano wa duplicate.</label>@endif</div>
+                    <div class="border-t border-slate-200 pt-3 dark:border-slate-700">
+                        <p class="mb-2 text-sm font-semibold">Au anza rekodi mpya</p>
+                        <div class="grid gap-3 md:grid-cols-3"><x-text-input wire:model="personal.first_name" placeholder="First name" /><x-text-input wire:model="personal.last_name" placeholder="Last name" /><x-text-input wire:model="personal.primary_phone" placeholder="Phone" /></div>
+                        <x-input-error :messages="$errors->get('personal.primary_phone')" class="mt-2" />
+                        <x-secondary-button type="button" wire:click="searchDuplicates" class="mt-3"><x-lucide-search class="h-4 w-4" /> Kagua duplicate</x-secondary-button>
+                        <x-input-error :messages="$errors->get('duplicate')" class="mt-2" />
+                        @if(($duplicates['status'] ?? 'none') !== 'none')
+                            @php($severity = $duplicates['status'])
+                            <div class="mt-3 rounded-md border p-4 {{ $severity === 'exact' ? 'border-red-300 bg-red-50 text-red-900' : 'border-amber-300 bg-amber-50 text-amber-900' }}">
+                                <p class="font-semibold">{{ $severity === 'exact' ? 'Mgonjwa huyu anaonekana tayari yupo kwenye mfumo. Chagua rekodi iliyopo.' : 'Kuna mgonjwa anayefanana. Hakiki rekodi iliyopo kabla ya kuunda mpya.' }}</p>
+                                <div class="mt-3 space-y-2">
+                                    @foreach($duplicates['matches'] as $duplicateMatch)
+                                        @php($matchedPatient = $duplicateMatch['patient'])
+                                        <div class="rounded border border-current/20 bg-white/60 p-3" wire:key="duplicate-match-{{ $matchedPatient->id }}">
+                                            <p class="font-semibold">{{ $matchedPatient->fullName() }} · {{ $matchedPatient->patient_number }}</p>
+                                            <p class="text-xs">{{ implode(', ', $duplicateMatch['reasons']) }}</p>
+                                            @if($matchedPatient->activeVisit)<p class="mt-1 text-xs font-semibold">Active visit: {{ $matchedPatient->activeVisit->visit_number }}</p>@endif
+                                            <div class="mt-2 flex flex-wrap gap-2"><x-primary-button type="button" wire:click="selectExistingPatient({{ $matchedPatient->id }})">Select Patient</x-primary-button><a href="{{ route('patients.show', $matchedPatient) }}" class="rounded-md border border-slate-400 px-3 py-2 text-xs font-semibold">View Patient</a>@if($matchedPatient->activeVisit)<a href="{{ route('patients.show', $matchedPatient) }}" class="rounded-md border border-amber-500 px-3 py-2 text-xs font-semibold">Open Active Visit</a>@endif</div>
+                                        </div>
+                                    @endforeach
+                                </div>
+                                @if($severity === 'exact')
+                                    @can('patients.override-duplicate-warning')
+                                        @if(!$showStrongDuplicateOverride)<x-secondary-button type="button" wire:click="requestDuplicateOverride" class="mt-3">Request New Record Override</x-secondary-button>@else<div class="mt-3 space-y-2"><p class="font-semibold">Thibitisha kuwa huyu ni mgonjwa tofauti na eleza sababu.</p><x-textarea wire:model="duplicateOverrideReason" rows="2" placeholder="Sababu ya kuunda rekodi mpya" /><x-input-error :messages="$errors->get('duplicateOverrideReason')" /><x-primary-button type="button" wire:click="confirmDuplicateOverride">Confirm New Record Override</x-primary-button>@if($confirmDuplicateCreation)<p class="text-sm font-semibold text-emerald-700">Duplicate override approved</p>@endif</div>@endif
+                                    @endcan
+                                @else
+                                    @if($severity === 'probable')<div class="mt-3"><x-textarea wire:model="duplicateOverrideReason" rows="2" placeholder="Kwa nini huyu ni mgonjwa tofauti?" /><x-input-error :messages="$errors->get('duplicateOverrideReason')" /></div>@endif
+                                    <x-secondary-button type="button" wire:click="confirmDifferentPatient" class="mt-3">This is a Different Patient</x-secondary-button>
+                                    @if($confirmDuplicateCreation)<p class="mt-2 text-sm font-semibold text-emerald-700">Confirmed as a different patient.</p>@endif
+                                @endif
+                            </div>
+                        @endif
+                    </div>
                 </div>
             @endif
 
@@ -99,9 +131,9 @@
 
             @if($step === 6)
                 @if($this->returningPatientIsMissing())<div class="rounded-md border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">Chagua mgonjwa wa zamani kabla ya kuhifadhi Returning Visit.</div>@endif
-                @if($selectedPatient?->activeVisit && !auth()->user()->can('reception.override-active-visit'))<div class="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"><p class="font-semibold">Mgonjwa huyu tayari ana active visit {{ $selectedPatient->activeVisit->visit_number }}.</p><div class="mt-3 flex flex-wrap gap-2"><a href="{{ route('patients.show', $selectedPatient) }}" class="rounded-md border border-amber-500 px-3 py-2 font-semibold">Open Active Visit</a><a href="{{ route('patients.show', $selectedPatient) }}" class="rounded-md border border-amber-500 px-3 py-2 font-semibold">Continue Existing Visit</a></div></div>@endif
+                @if($selectedPatient?->activeVisit)<div class="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"><p class="font-semibold">Mgonjwa huyu tayari ana visit inayoendelea: {{ $selectedPatient->activeVisit->visit_number }}.</p><div class="mt-3 flex flex-wrap gap-2"><a href="{{ $this->activeVisitUrl($selectedPatient) }}" class="rounded-md border border-amber-500 px-3 py-2 font-semibold">Open Active Visit</a><a href="{{ $this->activeVisitUrl($selectedPatient) }}" class="rounded-md border border-amber-500 px-3 py-2 font-semibold">Continue Existing Visit</a></div>@can('reception.override-active-visit')<div class="mt-3"><x-input-label value="Reason for creating another visit" /><x-textarea wire:model="activeVisitOverrideReason" rows="2" placeholder="Eleza sababu ya kuunda visit nyingine" /><x-input-error :messages="$errors->get('activeVisitOverrideReason')" /></div>@endcan</div>@endif
                 <div class="grid gap-4 md:grid-cols-2">
-                    <x-card><h3 class="font-semibold">Patient</h3>@if($selectedPatient)<p>{{ $selectedPatient->fullName() }}</p><p class="text-sm text-slate-500">{{ $selectedPatient->patient_number }} · {{ $selectedPatient->primary_phone ?: '-' }}</p><p class="text-sm text-slate-500">Last visit: {{ $selectedPatient->latestVisit?->visit_number ?: '-' }}</p><p class="text-sm font-medium text-emerald-700">Patient status: Existing</p>@else<p>{{ $personal->first_name }} {{ $personal->last_name }}</p><p class="text-sm text-slate-500">Patient status: New</p>@endif</x-card>
+                    <x-card><h3 class="font-semibold">Patient</h3>@if($selectedPatient)<p>{{ $selectedPatient->fullName() }}</p><p class="text-sm text-slate-500">{{ $selectedPatient->patient_number }} · {{ $selectedPatient->primary_phone ?: '-' }}</p><p class="text-sm text-slate-500">Last visit: {{ $selectedPatient->latestVisit?->visit_number ?: '-' }}</p><p class="text-sm font-medium text-emerald-700">Patient status: Existing</p>@else<p>{{ $personal->first_name }} {{ $personal->last_name }}</p><p class="text-sm text-slate-500">Patient status: New</p>@if($confirmDuplicateCreation && ($duplicates['status'] ?? 'none') === 'exact')<p class="mt-1 text-sm font-semibold text-amber-700">Duplicate override approved</p>@endif @endif</x-card>
                     <x-card><h3 class="font-semibold">Payer</h3><p>{{ $payer->payer_type }}</p></x-card>
                     <x-card><h3 class="font-semibold">Visit</h3><p>{{ $selectedPatient ? 'Returning' : $visit->visit_type }} / {{ $visit->priority }}</p><p class="text-sm text-slate-500">Destination: {{ $departments->firstWhere('id', (int) $visit->destination_department_id)?->name ?? '-' }}</p><p class="text-sm text-slate-500">Consultation: {{ $chargePreview['consultation']['service_name'] ?? '-' }}</p><p class="text-sm text-slate-500">Next step: {{ $chargePreview['next_step'] ?? '-' }}</p></x-card>
                     <x-card><h3 class="font-semibold">Charges</h3><div class="mt-2 space-y-1 text-sm">@foreach(($chargePreview['lines'] ?? []) as $line)<div class="flex justify-between"><span>{{ $line['service_name'] }}</span><span>TSh {{ number_format($line['amount'], 2) }}</span></div>@endforeach<div class="flex justify-between border-t border-slate-200 pt-2 font-semibold dark:border-slate-700"><span>Total</span><span>TSh {{ number_format($chargePreview['total'] ?? 0, 2) }}</span></div><div class="flex justify-between"><span>Patient</span><span>TSh {{ number_format($chargePreview['patient_amount'] ?? 0, 2) }}</span></div><div class="flex justify-between"><span>Payer</span><span>TSh {{ number_format($chargePreview['payer_amount'] ?? 0, 2) }}</span></div></div></x-card>
@@ -109,7 +141,7 @@
                 </div>
             @endif
 
-            @php($saveBlocked = $this->returningPatientIsMissing() || ($selectedPatient?->activeVisit && !auth()->user()->can('reception.override-active-visit')))
+            @php($saveBlocked = $this->returningPatientIsMissing() || ($selectedPatient?->activeVisit && (!auth()->user()->can('reception.override-active-visit') || mb_strlen(trim($activeVisitOverrideReason)) < 10)))
             <div class="flex justify-between border-t border-slate-200 pt-4 dark:border-slate-700">
                 <x-secondary-button type="button" wire:click="previousStep">Nyuma</x-secondary-button>
                 @if($step < 6)

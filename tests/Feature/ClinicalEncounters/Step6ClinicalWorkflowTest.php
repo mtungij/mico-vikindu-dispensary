@@ -1727,7 +1727,7 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->test(OpdConsultation::class, ['visit' => $visit])
             ->set('form.outcome', 'admitted_bed_rest')
             ->assertSee('Next Destinations')
-            ->assertSee('Ready to send to Pharmacy')
+            ->assertSee('Draft — Pending Consultation Completion')
             ->assertSee('Verified')
             ->assertDontSee('Admission —')
             ->assertDontSee('Referral —')

@@ -65,6 +65,7 @@ class RolePermissionSeeder extends Seeder
     {
         return [
             'laboratory-technician' => ['laboratory.override-payment'],
+            'receptionist' => ['patients.override-duplicate-warning', 'reception.override-active-visit'],
         ];
     }
 }

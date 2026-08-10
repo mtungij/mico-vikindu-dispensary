@@ -9,6 +9,7 @@ use App\Models\Payment;
 use App\Models\PaymentMethod;
 use App\Models\Prescription;
 use App\Services\CashierSessionService;
+use App\Services\InvoiceStatusService;
 use App\Services\PaymentConfirmationService;
 use App\Services\PrescriptionBillingService;
 use Illuminate\Support\Facades\Gate;
@@ -218,12 +219,6 @@ class Show extends Component
 
     private function ensureInvoiceCanReceivePayment(Invoice $invoice): void
     {
-        if (! in_array($invoice->status, ['open', 'finalized', 'partially_paid'], true)) {
-            throw ValidationException::withMessages(['payment' => 'Invoice hii haipo kwenye hali inayoruhusu kupokea malipo.']);
-        }
-
-        if ((float) $invoice->patient_amount <= 0 || (float) $invoice->balance_amount <= 0) {
-            throw ValidationException::withMessages(['amount' => 'Invoice hii haina salio la kulipwa.']);
-        }
+        app(InvoiceStatusService::class)->ensureCanReceivePayment($invoice);
     }
 }

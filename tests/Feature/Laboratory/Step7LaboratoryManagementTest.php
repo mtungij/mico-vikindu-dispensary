@@ -840,6 +840,7 @@ class Step7LaboratoryManagementTest extends TestCase
 
         Livewire::actingAs($admin)
             ->test(Dashboard::class)
+            ->set('worklistTab', 'released')
             ->assertSee('Angalia Majibu')
             ->assertSee('Pakua Majibu')
             ->assertSee('Chapisha Majibu');
@@ -856,6 +857,45 @@ class Step7LaboratoryManagementTest extends TestCase
             ->assertSee('Angalia Majibu')
             ->assertSee('Pakua Majibu')
             ->assertSee('Chapisha Majibu');
+    }
+
+    public function test_dashboard_worklists_keep_old_pending_results_actionable_and_move_released_results_to_history(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$order, $result] = $this->directLaboratoryOrderWithResult($admin);
+        $order->patient->update(['first_name' => 'Worklist', 'last_name' => 'Patient']);
+        $result->update(['entered_at' => now()->subDays(90)]);
+
+        Livewire::actingAs($admin)
+            ->test(Dashboard::class)
+            ->assertSee('Worklist Patient')
+            ->assertSee('Awaiting Verification')
+            ->set('search', $order->order_number)
+            ->assertSee('Worklist Patient')
+            ->set('search', 'Worklist')
+            ->assertSee($order->order_number)
+            ->set('sourceFilter', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
+            ->assertSee('Direct Reception Laboratory');
+
+        $verified = app(LaboratoryResultVerificationService::class)->verify($result->refresh(), $admin);
+
+        Livewire::actingAs($admin)
+            ->test(Dashboard::class)
+            ->assertDontSee('Worklist Patient')
+            ->set('worklistTab', 'verified')
+            ->assertSee('Worklist Patient')
+            ->assertSee('Release Results');
+
+        app(LaboratoryResultReleaseService::class)->release($verified->refresh(), $admin);
+
+        Livewire::actingAs($admin)
+            ->test(Dashboard::class)
+            ->assertDontSee('Worklist Patient')
+            ->set('worklistTab', 'verified')
+            ->assertDontSee('Worklist Patient')
+            ->set('worklistTab', 'released')
+            ->assertSee('Worklist Patient')
+            ->assertSee('Released / Completed');
     }
 
     public function test_reception_and_laboratory_users_can_download_released_direct_report(): void

@@ -568,6 +568,40 @@ class Step13BillingCashierTest extends TestCase
         $this->assertSame(1, Payment::query()->where('invoice_id', $invoice->id)->count());
     }
 
+    public function test_terminal_and_draft_invoices_reject_payment_with_specific_reasons(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        $cases = [
+            'cancelled' => 'imefutwa',
+            'voided' => 'imebatilishwa',
+            'refunded' => 'imerejeshewa',
+            'written_off' => 'imeondolewa',
+            'reversed' => 'imebadilishwa',
+            'replaced' => 'imebadilishwa',
+            'draft' => 'haijafinalize',
+        ];
+
+        foreach ($cases as $status => $message) {
+            $invoice = $this->createCashInvoice($admin, 'INV-BIL-'.strtoupper($status), 10000);
+            $invoice->update([
+                'status' => $status,
+                'invoice_status' => $status === 'draft' ? 'draft' : $invoice->invoice_status,
+                'voided_at' => $status === 'voided' ? now() : null,
+            ]);
+
+            try {
+                app(PaymentConfirmationService::class)->confirmPayment($invoice->refresh(), $cash, 10000, $admin);
+                $this->fail("{$status} invoice accepted payment.");
+            } catch (ValidationException $exception) {
+                $this->assertStringContainsString($message, collect($exception->errors())->flatten()->first());
+            }
+        }
+
+        $this->assertDatabaseCount('payments', 0);
+    }
+
     public function test_facility_scoping_hides_other_facility_payment_methods(): void
     {
         $admin = $this->bootstrappedFacility();

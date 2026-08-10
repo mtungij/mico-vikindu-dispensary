@@ -1617,10 +1617,12 @@ class Step6ClinicalWorkflowTest extends TestCase
         $invoiceItemId = $item->invoice_item_id;
         $item->update(['invoice_item_id' => null, 'quantity' => null]);
 
-        $this->artisan('pharmacy:reconcile-prescription-billing')
-            ->expectsOutputToContain('null_or_invalid_quantity [manual review]')
-            ->expectsOutputToContain('missing_invoice_item_linkage [manual review]')
-            ->assertSuccessful();
+        $this->assertSame(0, Artisan::call('pharmacy:reconcile-prescription-billing', ['--ids' => [$prescription->id]]));
+        $output = Artisan::output();
+        $this->assertStringContainsString('invalid_quantity', $output);
+        $this->assertStringContainsString('classification=safe_reconstructable_quantity', $output);
+        $this->assertStringContainsString('existing_charge_missing_link', $output);
+        $this->assertStringContainsString("invoice_item={$invoiceItemId}", $output);
 
         $this->assertNull($item->refresh()->invoice_item_id);
         $this->assertNull($item->quantity);

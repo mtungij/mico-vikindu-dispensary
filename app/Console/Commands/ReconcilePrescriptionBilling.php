@@ -65,6 +65,7 @@ class ReconcilePrescriptionBilling extends Command
             }
         }
 
+        $this->inspectStructuralMismatches($ids);
         $this->inspectStockMismatches($ids);
         $this->info(($apply ? 'Applied' : 'Dry run')." — issues: {$this->issues}; deterministic repairs: {$this->fixed}");
 
@@ -323,6 +324,18 @@ class ReconcilePrescriptionBilling extends Command
 
     private function inspectPrescriptionState(Prescription $prescription, PrescriptionBillingService $billing, VisitClosureService $closure, bool $apply): void
     {
+        if ($prescription->items->isEmpty()) {
+            $code = $prescription->status === PrescriptionStatus::Draft
+                ? 'empty_draft_prescription'
+                : 'empty_non_draft_prescription';
+            $this->issue($prescription, null, $code, true, [
+                'encounter_status' => $this->value($prescription->encounter?->status),
+                'created_at' => $prescription->created_at?->toDateTimeString() ?? 'NULL',
+                'updated_at' => $prescription->updated_at?->toDateTimeString() ?? 'NULL',
+                'prescribed_by' => $prescription->prescribed_by,
+            ]);
+        }
+
         $duplicateCharges = DB::table('invoice_items')
             ->select(['invoice_id', 'reference_type', 'reference_id', 'service_id'])
             ->where('reference_type', PrescriptionItem::class)
@@ -462,6 +475,34 @@ class ReconcilePrescriptionBilling extends Command
         if ($count > 0) {
             $this->issues += $count;
             $this->warn("Stock movement inconsistencies: {$count} [manual review]");
+        }
+    }
+
+    private function inspectStructuralMismatches(Collection $ids): void
+    {
+        $multipleDrafts = DB::table('prescriptions')
+            ->select(['clinical_encounter_id', DB::raw('COUNT(*) as draft_count')])
+            ->whereNull('deleted_at')
+            ->where('status', PrescriptionStatus::Draft->value)
+            ->when($ids->isNotEmpty(), fn ($query) => $query->whereIn('id', $ids))
+            ->groupBy('clinical_encounter_id')
+            ->havingRaw('COUNT(*) > 1')
+            ->get();
+        foreach ($multipleDrafts as $row) {
+            $this->issues++;
+            $this->line("Encounter {$row->clinical_encounter_id}: multiple_draft_prescriptions count={$row->draft_count} [manual review]");
+        }
+
+        $orphanItems = DB::table('prescription_items as pi')
+            ->leftJoin('prescriptions as p', 'p.id', '=', 'pi.prescription_id')
+            ->whereNull('pi.deleted_at')
+            ->where(fn ($query) => $query->whereNull('p.id')->orWhereNotNull('p.deleted_at'))
+            ->when($ids->isNotEmpty(), fn ($query) => $query->whereIn('pi.prescription_id', $ids))
+            ->select(['pi.id', 'pi.prescription_id'])
+            ->get();
+        foreach ($orphanItems as $row) {
+            $this->issues++;
+            $this->line("Prescription item {$row->id}: missing_active_parent prescription_id={$row->prescription_id} [manual review]");
         }
     }
 

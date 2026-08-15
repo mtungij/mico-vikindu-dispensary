@@ -44,10 +44,14 @@ use Database\Seeders\ServicePriceSeeder;
 use Database\Seeders\ServiceSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
+use Mockery;
+use RuntimeException;
 use Tests\TestCase;
 
 class Step5FoundationTest extends TestCase
@@ -194,6 +198,71 @@ class Step5FoundationTest extends TestCase
         $this->assertDatabaseCount('visits', 0);
         $this->assertDatabaseCount('invoices', 0);
         $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertDatabaseCount('patient_queues', 0);
+    }
+
+    public function test_unexpected_registration_exception_is_explicitly_logged_and_transaction_is_rolled_back(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$department, $consultation] = $this->opdConsultation();
+        $exception = new RuntimeException('Synthetic registration infrastructure failure', 731);
+        $workflow = Mockery::mock(ReceptionWorkflowService::class);
+        $workflow->shouldReceive('registerNewPatientAndVisit')
+            ->once()
+            ->andReturnUsing(function (array $patientData, array $payerData, array $visitData, array $serviceIds, User $actor) use ($exception): never {
+                DB::transaction(function () use ($patientData, $actor, $exception): never {
+                    Patient::query()->create([
+                        ...$patientData,
+                        'facility_id' => currentFacility()->id,
+                        'patient_number' => 'PAT-DIAGNOSTIC-ROLLBACK',
+                        'registered_at' => now(),
+                        'created_by' => $actor->id,
+                        'updated_by' => $actor->id,
+                    ]);
+
+                    throw $exception;
+                });
+            });
+        $this->app->instance(ReceptionWorkflowService::class, $workflow);
+        Log::spy();
+
+        Livewire::actingAs($admin)->test(PatientsIndex::class)
+            ->call('create')
+            ->set('personal.first_name', 'Diagnostic')
+            ->set('personal.last_name', 'Rollback')
+            ->set('personal.gender', 'female')
+            ->set('personal.age_years', 30)
+            ->set('payer.payer_type', 'cash')
+            ->set('visit.visit_type', 'new_patient')
+            ->set('visit.destination_department_id', $department->id)
+            ->set('visit.consultation_service_id', $consultation->id)
+            ->set('visit.priority', 'normal')
+            ->set('step', 6)
+            ->call('save')
+            ->assertHasErrors(['save'])
+            ->assertSee('Imeshindikana kuhifadhi taarifa. Tafadhali jaribu tena.');
+
+        Log::shouldHaveReceived('error')
+            ->once()
+            ->with('Patient registration save failed', Mockery::on(fn (array $context): bool => $context['exception_class'] === RuntimeException::class
+                && $context['message'] === $exception->getMessage()
+                && $context['code'] === 731
+                && $context['user_id'] === $admin->id
+                && $context['facility_id'] === currentFacility()->id
+                && $context['visit_type'] === 'new_patient'
+                && $context['destination_department_id'] === $department->id
+                && $context['destination_department_code'] === 'OPD'
+                && $context['payer_type'] === 'cash'
+                && $context['selected_laboratory_test_ids'] === []
+                && $context['is_direct_laboratory'] === false
+                && $context['step'] === 6
+                && $context['exception'] === $exception));
+
+        $this->assertDatabaseCount('patients', 0);
+        $this->assertDatabaseCount('visits', 0);
+        $this->assertDatabaseCount('invoices', 0);
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertDatabaseCount('laboratory_orders', 0);
         $this->assertDatabaseCount('patient_queues', 0);
     }
 

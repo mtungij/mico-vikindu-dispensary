@@ -268,8 +268,17 @@ class ClinicalEncounterService
 
             $encounter->prescriptions()
                 ->where('status', PrescriptionStatus::Draft->value)
+                ->lockForUpdate()
                 ->get()
-                ->each(fn ($prescription) => $this->prescriptions->finalizePrescription($prescription, $actor));
+                ->each(function (Prescription $prescription) use ($actor): void {
+                    if ($prescription->items()->exists()) {
+                        $this->prescriptions->finalizePrescription($prescription, $actor);
+
+                        return;
+                    }
+
+                    $this->prescriptions->deleteEmptyDraftIfSafe($prescription, $actor);
+                });
 
             $encounter->load('visit.invoice');
             $destinations = $this->resolveRequiredDestinations($encounter);
@@ -593,7 +602,7 @@ class ClinicalEncounterService
             || filled($encounter->assessment_notes)
             || filled($encounter->treatment_plan)
             || $encounter->diagnoses()->where('status', '!=', 'entered_in_error')->exists()
-            || $encounter->prescriptions()->where('status', '!=', 'cancelled')->exists()
+            || $encounter->prescriptions()->where('status', '!=', 'cancelled')->whereHas('items')->exists()
             || $encounter->laboratoryOrders()->where('status', '!=', 'cancelled')->exists()
             || $encounter->procedureOrders()->where('status', '!=', 'cancelled')->exists();
         if (! $hasClinicalContent) {
@@ -709,6 +718,7 @@ class ClinicalEncounterService
     {
         return $encounter->prescriptions()
             ->whereIn('status', ['draft', 'prescribed', 'awaiting_payment', 'partially_dispensed'])
+            ->whereHas('items')
             ->exists();
     }
 

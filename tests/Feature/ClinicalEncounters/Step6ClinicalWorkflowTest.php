@@ -35,6 +35,7 @@ use App\Models\PatientQueue;
 use App\Models\PaymentMethod;
 use App\Models\Permission;
 use App\Models\Prescription;
+use App\Models\PrescriptionItem;
 use App\Models\Role;
 use App\Models\Service;
 use App\Models\ServiceCategory;
@@ -135,7 +136,141 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->assertDatabaseHas('activity_logs', ['event' => 'prescription_item_updated', 'subject_id' => $item->id]);
         app(PrescriptionService::class)->removeItem($item, $admin);
         $this->assertSame(0, $prescription->items()->count());
+        $this->assertSoftDeleted('prescriptions', ['id' => $prescription->id]);
         $this->assertDatabaseHas('activity_logs', ['event' => 'prescription_item_removed', 'subject_id' => $item->id]);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'empty_draft_prescription_removed', 'subject_id' => $prescription->id]);
+    }
+
+    public function test_multiple_medicines_reuse_one_encounter_draft_prescription(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+
+        foreach (['Paracetamol', 'Amoxicillin', 'Cetirizine'] as $medicineName) {
+            app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                'medication_name' => $medicineName,
+                'dose' => '1 tablet',
+                'frequency' => 'OD',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]]], $admin);
+        }
+
+        $prescription = $encounter->prescriptions()->sole();
+        $this->assertSame('draft', $prescription->status->value);
+        $this->assertSame(3, $prescription->items()->count());
+        $this->assertSame(['prescribed'], $prescription->items()->distinct()->pluck('status')->all());
+    }
+
+    public function test_three_persisted_medicines_complete_and_bill_without_empty_prescription_error(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+
+        foreach (['Paracetamol', 'Amoxicillin', 'Cetirizine'] as $medicineName) {
+            $medicine = $this->medicine($admin);
+            $medicine->update(['name' => $medicineName]);
+            app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                'medicine_id' => $medicine->id,
+                'medication_name' => $medicineName,
+                'dose' => '1 tablet',
+                'frequency' => 'OD',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]]], $admin);
+        }
+
+        $prescription = $encounter->prescriptions()->sole();
+        $itemIds = $prescription->items()->pluck('id');
+        $this->assertCount(3, $itemIds);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        Livewire::actingAs($admin)
+            ->test(OpdConsultation::class, ['visit' => $visit->refresh()])
+            ->call('completeConsultation')
+            ->assertHasNoErrors()
+            ->assertRedirect(route('opd.index'));
+        $completed = $encounter->refresh();
+
+        $this->assertSame('completed', $completed->status->value);
+        $this->assertSame('prescribed', $prescription->refresh()->status->value);
+        $this->assertSame(3, PrescriptionItem::query()->whereKey($itemIds)->whereNotNull('invoice_item_id')->count());
+        $this->assertSame(3, InvoiceItem::query()->where('reference_type', PrescriptionItem::class)->whereIn('reference_id', $itemIds)->count());
+    }
+
+    public function test_stale_empty_unbilled_draft_does_not_block_valid_medicines(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $valid = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id,
+            'medication_name' => $medicine->name,
+            'dose' => '1 tablet',
+            'frequency' => 'OD',
+            'duration_value' => 3,
+            'duration_unit' => 'days',
+        ]]], $admin);
+        $stale = Prescription::query()->create([
+            'facility_id' => $encounter->facility_id,
+            'patient_id' => $encounter->patient_id,
+            'visit_id' => $encounter->visit_id,
+            'clinical_encounter_id' => $encounter->id,
+            'prescribed_by' => $admin->id,
+            'prescription_number' => 'RX-STALE-'.$encounter->id,
+            'status' => 'draft',
+            'prescribed_at' => now(),
+            'created_by' => $admin->id,
+        ]);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        $completed = app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $this->assertSame('completed', $completed->status->value);
+        $this->assertSame('prescribed', $valid->refresh()->status->value);
+        $this->assertSoftDeleted('prescriptions', ['id' => $stale->id]);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'empty_draft_prescription_removed', 'subject_id' => $stale->id]);
+    }
+
+    public function test_empty_draft_with_historical_billing_is_never_deleted_or_reused(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $historicalMedicine = $this->medicine($admin);
+        $historical = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $historicalMedicine->id,
+            'medication_name' => $historicalMedicine->name,
+            'dose' => '1 tablet',
+            'frequency' => 'OD',
+            'duration_value' => 3,
+            'duration_unit' => 'days',
+        ]]], $admin);
+        $historical = app(PrescriptionService::class)->finalizePrescription($historical, $admin);
+        $historicalItem = $historical->items()->firstOrFail();
+        $historical->update(['status' => 'draft']);
+        $historicalItem->delete();
+
+        $currentMedicine = $this->medicine($admin);
+        $current = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $currentMedicine->id,
+            'medication_name' => $currentMedicine->name,
+            'dose' => '1 tablet',
+            'frequency' => 'BD',
+            'duration_value' => 3,
+            'duration_unit' => 'days',
+        ]]], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $this->assertNotSame($historical->id, $current->id);
+        $this->assertNotSoftDeleted('prescriptions', ['id' => $historical->id]);
+        $this->assertDatabaseHas('prescription_items', ['id' => $historicalItem->id, 'invoice_item_id' => $historicalItem->invoice_item_id]);
+        $this->assertSame('prescribed', $current->refresh()->status->value);
     }
 
     public function test_non_draft_or_dispensed_prescription_item_cannot_be_silently_edited(): void

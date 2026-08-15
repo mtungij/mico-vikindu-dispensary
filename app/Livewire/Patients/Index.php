@@ -23,6 +23,7 @@ use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Component;
@@ -392,6 +393,38 @@ class Index extends Component
 
             return null;
         } catch (Throwable $exception) {
+            $destinationCode = null;
+            try {
+                $destinationCode = Department::query()
+                    ->where('facility_id', currentFacility()?->id)
+                    ->whereKey($this->visit->destination_department_id)
+                    ->value('code');
+            } catch (Throwable) {
+                // Diagnostic enrichment must never mask the original exception.
+            }
+
+            Log::error('Patient registration save failed', [
+                'exception_class' => $exception::class,
+                'message' => $exception->getMessage(),
+                'code' => $exception->getCode(),
+                'file' => $exception->getFile(),
+                'line' => $exception->getLine(),
+                'user_id' => auth()->id(),
+                'facility_id' => currentFacility()?->id,
+                'selected_patient_id' => $this->selectedPatientId,
+                'visit_type' => $this->visit->visit_type ?? null,
+                'destination_department_id' => $this->visit->destination_department_id ?? null,
+                'destination_department_code' => $destinationCode,
+                'payer_type' => $this->payer->payer_type ?? null,
+                'selected_laboratory_test_ids' => $this->selectedLaboratoryTestIds,
+                'is_direct_laboratory' => $this->isDirectLaboratory(),
+                'step' => $this->step,
+                'duplicate_review_status' => $this->duplicates['status'] ?? 'none',
+                'duplicate_creation_confirmed' => $this->confirmDuplicateCreation,
+                'active_visit_override_requested' => filled($this->activeVisitOverrideReason),
+                'registration_idempotency_key' => $this->visit->registration_idempotency_key ?? null,
+                'exception' => $exception,
+            ]);
             report($exception);
             $message = 'Imeshindikana kuhifadhi taarifa. Tafadhali jaribu tena.';
             $this->addError('save', $message);

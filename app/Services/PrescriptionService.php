@@ -26,23 +26,42 @@ class PrescriptionService
 
     public function createPrescription(ClinicalEncounter $encounter, array $data, $actor): Prescription
     {
+        validator($data, ['items' => ['required', 'array', 'min:1']])->validate();
+
         return DB::transaction(function () use ($encounter, $data, $actor) {
-            $prescription = Prescription::query()->create([
-                'facility_id' => $encounter->facility_id,
-                'patient_id' => $encounter->patient_id,
-                'visit_id' => $encounter->visit_id,
-                'clinical_encounter_id' => $encounter->id,
-                'prescribed_by' => $actor->id,
-                'prescription_number' => $this->generatePrescriptionNumber($encounter->facility_id),
-                'status' => PrescriptionStatus::Draft,
-                'notes' => $data['notes'] ?? null,
-                'prescribed_at' => now(),
-                'created_by' => $actor->id,
-            ]);
+            $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
+            $prescription = Prescription::query()
+                ->where('clinical_encounter_id', $encounter->id)
+                ->where('status', PrescriptionStatus::Draft->value)
+                ->whereDoesntHave('items', fn ($query) => $query->withTrashed()
+                    ->whereNotNull('invoice_item_id')
+                    ->orWhere('dispensed_quantity', '>', 0))
+                ->whereDoesntHave('dispensings')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->first();
+
+            if (! $prescription) {
+                $prescription = Prescription::query()->create([
+                    'facility_id' => $encounter->facility_id,
+                    'patient_id' => $encounter->patient_id,
+                    'visit_id' => $encounter->visit_id,
+                    'clinical_encounter_id' => $encounter->id,
+                    'prescribed_by' => $actor->id,
+                    'prescription_number' => $this->generatePrescriptionNumber($encounter->facility_id),
+                    'status' => PrescriptionStatus::Draft,
+                    'notes' => $data['notes'] ?? null,
+                    'prescribed_at' => now(),
+                    'created_by' => $actor->id,
+                ]);
+                ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_created', 'subject_type' => $prescription::class, 'subject_id' => $prescription->id]);
+            } elseif (array_key_exists('notes', $data)) {
+                $prescription->update(['notes' => $data['notes'], 'updated_by' => $actor->id]);
+            }
+
             foreach ($data['items'] ?? [] as $item) {
                 $this->addItem($prescription, $item, $actor);
             }
-            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_created', 'subject_type' => $prescription::class, 'subject_id' => $prescription->id]);
 
             return $prescription->refresh();
         });
@@ -82,7 +101,34 @@ class PrescriptionService
             $old = $item->toArray();
             $item->delete();
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_item_removed', 'subject_type' => $item::class, 'subject_id' => $item->id, 'old_values' => $old, 'new_values' => []]);
+            $this->deleteEmptyDraftIfSafe($item->prescription, $actor);
         });
+    }
+
+    public function deleteEmptyDraftIfSafe(Prescription $prescription, $actor): bool
+    {
+        $prescription = Prescription::query()->lockForUpdate()->find($prescription->id);
+        if (! $prescription
+            || $prescription->status !== PrescriptionStatus::Draft
+            || $prescription->items()->exists()
+            || $prescription->items()->withTrashed()->where(fn ($query) => $query
+                ->whereNotNull('invoice_item_id')
+                ->orWhere('dispensed_quantity', '>', 0))->exists()
+            || $prescription->dispensings()->exists()) {
+            return false;
+        }
+
+        ActivityLog::query()->create([
+            'user_id' => $actor->id,
+            'event' => 'empty_draft_prescription_removed',
+            'subject_type' => $prescription::class,
+            'subject_id' => $prescription->id,
+            'old_values' => ['status' => PrescriptionStatus::Draft->value, 'clinical_encounter_id' => $prescription->clinical_encounter_id],
+            'new_values' => [],
+        ]);
+        $prescription->delete();
+
+        return true;
     }
 
     public function updateDraft(Prescription $prescription, array $data, $actor): Prescription
@@ -129,7 +175,7 @@ class PrescriptionService
 
     public function finalizePrescription(Prescription $prescription, $actor): Prescription
     {
-        if (! $prescription->items()->exists()) {
+        if (! $prescription->items()->whereNull('terminal_status')->whereNotIn('status', ['cancelled', 'declined', 'unavailable', 'substituted_elsewhere'])->exists()) {
             throw ValidationException::withMessages(['items' => 'Prescription lazima iwe na dawa angalau moja.']);
         }
         $prescription->update(['status' => PrescriptionStatus::Prescribed, 'updated_by' => $actor->id]);

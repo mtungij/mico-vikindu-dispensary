@@ -14,11 +14,49 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 class ClinicalProcedureOrder extends Model
 {
     use HasFactory, SoftDeletes;
-    protected function casts(): array { return ['status' => ProcedureOrderStatus::class, 'scheduled_at' => 'datetime', 'performed_at' => 'datetime']; }
-    public function scopeForCurrentFacility(Builder $query): Builder { return $query->where('facility_id', currentFacility()?->id); }
-    public function patient(): BelongsTo { return $this->belongsTo(Patient::class); }
-    public function visit(): BelongsTo { return $this->belongsTo(Visit::class); }
-    public function encounter(): BelongsTo { return $this->belongsTo(ClinicalEncounter::class, 'clinical_encounter_id'); }
-    public function service(): BelongsTo { return $this->belongsTo(Service::class); }
-    public function invoiceItem(): BelongsTo { return $this->belongsTo(InvoiceItem::class); }
+
+    protected function casts(): array
+    {
+        return ['status' => ProcedureOrderStatus::class, 'scheduled_at' => 'datetime', 'performed_at' => 'datetime'];
+    }
+
+    public function scopeForCurrentFacility(Builder $query): Builder
+    {
+        return $query->where('facility_id', currentFacility()?->id);
+    }
+
+    public function patient(): BelongsTo
+    {
+        return $this->belongsTo(Patient::class);
+    }
+
+    public function visit(): BelongsTo
+    {
+        return $this->belongsTo(Visit::class);
+    }
+
+    public function encounter(): BelongsTo
+    {
+        return $this->belongsTo(ClinicalEncounter::class, 'clinical_encounter_id');
+    }
+
+    public function service(): BelongsTo
+    {
+        return $this->belongsTo(Service::class);
+    }
+
+    public function invoiceItem(): BelongsTo
+    {
+        return $this->belongsTo(InvoiceItem::class);
+    }
+
+    public function isSafelyEditable(): bool
+    {
+        return $this->status === ProcedureOrderStatus::Ordered
+            && ! $this->invoice_item_id
+            && ! $this->scheduled_at
+            && ! $this->performed_at
+            && ! $this->performed_by
+            && ! $this->encounter?->isReadOnly();
+    }
 }

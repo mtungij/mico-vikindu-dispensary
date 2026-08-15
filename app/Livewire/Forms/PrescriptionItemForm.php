@@ -26,7 +26,7 @@ class PrescriptionItemForm extends Form
 
     public string $duration_unit = 'days';
 
-    public ?string $quantity = null;
+    public ?string $quantity = '1';
 
     public ?string $instructions = null;
 
@@ -36,7 +36,16 @@ class PrescriptionItemForm extends Form
 
     public function rules(): array
     {
-        return ['medicine_id' => ['nullable', 'integer'], 'medication_name' => ['required_without:medicine_id', 'nullable', 'string', 'max:255'], 'dose' => ['required'], 'frequency' => ['required'], 'duration_value' => ['required', 'integer', 'min:1'], 'duration_unit' => ['required'], 'quantity' => ['nullable', 'numeric', 'min:0']];
+        return ['medicine_id' => ['nullable', 'integer'], 'medication_name' => ['required_without:medicine_id', 'nullable', 'string', 'max:255'], 'dose' => ['required'], 'frequency' => ['required'], 'duration_value' => ['required', 'integer', 'min:1'], 'duration_unit' => ['required'], 'quantity' => ['required', 'numeric', 'min:1']];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'quantity.required' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+            'quantity.numeric' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+            'quantity.min' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+        ];
     }
 
     public function validationAttributes(): array
@@ -61,6 +70,7 @@ class PrescriptionItemForm extends Form
     {
         $this->reset();
         $this->duration_unit = 'days';
+        $this->quantity = '1';
         $this->substitution_allowed = true;
     }
 }

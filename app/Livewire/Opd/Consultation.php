@@ -14,6 +14,7 @@ use App\Livewire\Forms\PrescriptionItemForm;
 use App\Livewire\Forms\ProcedureOrderForm;
 use App\Livewire\Forms\ReferralForm;
 use App\Models\ClinicalEncounter;
+use App\Models\ClinicalProcedureOrder;
 use App\Models\Department;
 use App\Models\LaboratoryTest;
 use App\Models\Medicine;
@@ -23,6 +24,7 @@ use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
 use App\Services\PrescriptionService;
+use App\Services\ProcedureOrderService;
 use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
@@ -64,6 +66,8 @@ class Consultation extends Component
     public bool $icd10Selected = false;
 
     public ?int $editingPrescriptionItemId = null;
+
+    public ?int $editingProcedureOrderId = null;
 
     public string $medicineSearch = '';
 
@@ -245,18 +249,7 @@ class Consultation extends Component
     {
         Gate::authorize('prescriptions.create');
         $this->prescriptionItemForm->validate();
-        if ($this->prescriptionItemForm->medicine_id) {
-            $medicine = Medicine::query()
-                ->where('facility_id', $this->encounter->facility_id)
-                ->where('is_active', true)
-                ->findOrFail($this->prescriptionItemForm->medicine_id);
-
-            $this->prescriptionItemForm->medication_name = $medicine->name;
-            $this->prescriptionItemForm->generic_name = $medicine->generic?->name;
-            $this->prescriptionItemForm->strength = $medicine->strength;
-            $this->prescriptionItemForm->dosage_form = $medicine->dosageForm?->name;
-            $this->prescriptionItemForm->route = $medicine->route?->name;
-        }
+        $this->hydrateMedicineSnapshot();
         $service->addPrescription($this->encounter, ['items' => [$this->prescriptionItemForm->normalize()]], auth()->user());
         $this->prescriptionItemForm->resetForm();
         Notifier::success('Prescription imeundwa.');
@@ -317,6 +310,47 @@ class Consultation extends Component
         $service->addProcedureOrder($this->encounter, $this->procedureForm->normalize(), auth()->user());
         $this->procedureForm->resetForm();
         Notifier::success('Procedure order imeundwa.');
+    }
+
+    public function editProcedureOrder(int $procedureOrderId, ProcedureOrderService $service): void
+    {
+        $order = $this->encounterProcedureOrder($procedureOrderId);
+        $service->assertOrderEditable($order, auth()->user());
+        $this->procedureForm->fillFromModel($order);
+        $this->editingProcedureOrderId = $order->id;
+        $this->activeTab = 'orders';
+    }
+
+    public function updateProcedureOrder(ProcedureOrderService $service): void
+    {
+        $this->procedureForm->validate();
+        $order = $this->encounterProcedureOrder((int) $this->editingProcedureOrderId);
+        $service->updateOrder($order, $this->procedureForm->normalize(), auth()->user());
+        $this->cancelProcedureEdit();
+        Notifier::success('Procedure imesasishwa.');
+    }
+
+    public function removeProcedureOrder(int $procedureOrderId, ProcedureOrderService $service): void
+    {
+        $service->removeOrder($this->encounterProcedureOrder($procedureOrderId), auth()->user());
+        if ($this->editingProcedureOrderId === $procedureOrderId) {
+            $this->cancelProcedureEdit();
+        }
+        Notifier::success('Procedure imeondolewa.');
+    }
+
+    public function cancelProcedureEdit(): void
+    {
+        $this->editingProcedureOrderId = null;
+        $this->procedureForm->resetForm();
+    }
+
+    private function encounterProcedureOrder(int $procedureOrderId): ClinicalProcedureOrder
+    {
+        return ClinicalProcedureOrder::query()
+            ->where('clinical_encounter_id', $this->encounter->id)
+            ->where('facility_id', currentFacility()?->id)
+            ->findOrFail($procedureOrderId);
     }
 
     public function createFollowUp(ClinicalEncounterService $service): void
@@ -477,7 +511,7 @@ class Consultation extends Component
             'laboratoryOrders' => fn ($query) => $query->where('facility_id', currentFacility()?->id),
             'laboratoryOrders.items',
             'prescriptions.items.medicine',
-            'procedureOrders',
+            'procedureOrders.invoiceItem',
             'appointments',
             'referrals',
             'amendments',

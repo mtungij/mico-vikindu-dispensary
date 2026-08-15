@@ -214,6 +214,7 @@
                         </div>
                     </x-card>
 
+                    @unless($isReadOnly)
                     <x-card>
                         <h3 class="mb-3 font-semibold">Medication Orders</h3>
                         <div class="grid gap-3 md:grid-cols-2">
@@ -228,7 +229,10 @@
                             <x-text-input type="number" min="1" wire:model="prescriptionItemForm.duration_value" placeholder="Duration" />
                             <x-select-input wire:model="prescriptionItemForm.duration_unit"><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option></x-select-input>
                             <x-text-input wire:model="prescriptionItemForm.route" placeholder="Route" />
-                            <x-text-input type="number" min="0" step="0.01" wire:model="prescriptionItemForm.quantity" placeholder="Quantity (auto-calculated where possible)" />
+                            <div>
+                                <x-text-input type="number" min="1" step="0.01" wire:model="prescriptionItemForm.quantity" placeholder="Quantity" class="w-full" />
+                                <x-input-error :messages="$errors->get('prescriptionItemForm.quantity')" class="mt-1" />
+                            </div>
                             <x-text-input wire:model="prescriptionItemForm.instructions" placeholder="Instructions" />
                             <x-text-input wire:model="prescriptionItemForm.indication" placeholder="Indication" />
                         </div>
@@ -239,7 +243,18 @@
                         @endif
                     </x-card>
 
-                    <x-card><h3 class="mb-3 font-semibold">Procedure Orders</h3><x-select-input wire:model="procedureForm.service_id"><option value="">Select procedure service</option>@foreach($procedureServices as $service)<option value="{{ $service->id }}">{{ $service->name }}</option>@endforeach</x-select-input><x-text-input wire:model="procedureForm.procedure_name_snapshot" placeholder="Or enter procedure name" class="mt-3" /><x-textarea wire:model="procedureForm.instructions" rows="2" class="mt-3" placeholder="Instructions" /><x-primary-button type="button" wire:click="addProcedure" class="mt-3">Order Procedure</x-primary-button></x-card>
+                    <x-card>
+                        <h3 class="mb-3 font-semibold">Procedure Orders</h3>
+                        <x-select-input wire:model="procedureForm.service_id"><option value="">Select procedure service</option>@foreach($procedureServices as $service)<option value="{{ $service->id }}">{{ $service->name }}</option>@endforeach</x-select-input>
+                        <x-text-input wire:model="procedureForm.procedure_name_snapshot" placeholder="Or enter procedure name" class="mt-3" />
+                        <x-textarea wire:model="procedureForm.instructions" rows="2" class="mt-3" placeholder="Instructions" />
+                        @if($editingProcedureOrderId)
+                            <div class="mt-3 flex flex-wrap gap-2"><x-primary-button type="button" wire:click="updateProcedureOrder">Update Procedure</x-primary-button><x-secondary-button type="button" wire:click="cancelProcedureEdit">Cancel</x-secondary-button></div>
+                        @else
+                            <x-primary-button type="button" wire:click="addProcedure" class="mt-3">Add Procedure</x-primary-button>
+                        @endif
+                    </x-card>
+                    @endunless
 
                     <x-card><h3 class="mb-3 font-semibold">Radiology Orders</h3><div class="rounded-md border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500 dark:border-slate-700">Coming Soon</div></x-card>
 
@@ -458,7 +473,14 @@
                         <p class="font-semibold">Medicines</p>
                         @forelse($encounter->prescriptions as $prescription)
                             @foreach($prescription->items as $item)
-                                <div class="mt-2 rounded-md border border-slate-200 p-2 dark:border-slate-700"><p>{{ $item->medication_name }}{{ $item->strength ? ' '.$item->strength : '' }}</p><p class="text-xs text-slate-500">{{ $item->dose }} × {{ $item->frequency }} × {{ $item->duration_value }} {{ $item->duration_unit }} · Quantity: {{ $item->quantity ?? '-' }} · {{ $item->route }}</p>@can('update', $prescription)@if($prescription->isEditableDraft())<div class="mt-2 flex gap-2"><button type="button" wire:click="editPrescriptionItem({{ $item->id }})" class="text-xs font-semibold text-primary">Edit</button><button type="button" wire:click="removePrescriptionItem({{ $item->id }})" wire:confirm="Una uhakika unataka kuondoa dawa hii?" class="text-xs font-semibold text-red-600">Remove</button></div>@endif@endcan</div>
+                                @php($hasValidQuantity = is_numeric($item->quantity) && (float) $item->quantity >= 1)
+                                <div class="mt-2 rounded-md border p-3 {{ $hasValidQuantity ? 'border-slate-200 dark:border-slate-700' : 'border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20' }}">
+                                    <p class="font-medium">{{ $item->medication_name }}{{ $item->strength ? ' '.$item->strength : '' }}</p>
+                                    <p class="mt-1 text-xs text-slate-500">Dose: {{ $item->dose }} · Frequency: {{ $item->frequency }} · Duration: {{ $item->duration_value }} {{ $item->duration_unit }}</p>
+                                    <p class="text-xs text-slate-500">Quantity: {{ $hasValidQuantity ? $item->quantity : 'Missing' }}{{ $item->route ? ' · '.$item->route : '' }}</p>
+                                    @unless($hasValidQuantity)<p class="mt-1 text-xs font-semibold text-amber-700 dark:text-amber-300">⚠ Quantity must be corrected before completing consultation.</p>@endunless
+                                    @can('update', $prescription)@if(! $isReadOnly && $prescription->isEditableDraft())<div class="mt-2 flex flex-wrap gap-3"><button type="button" wire:click="editPrescriptionItem({{ $item->id }})" class="text-xs font-semibold text-primary">Edit</button><button type="button" wire:click="removePrescriptionItem({{ $item->id }})" wire:confirm="Una uhakika unataka kuondoa dawa hii?" class="text-xs font-semibold text-red-600">Remove</button></div>@endif@endcan
+                                </div>
                             @endforeach
                             <p class="text-xs text-slate-500">{{ $prescriptionStatusLabel($prescription->status) }}</p>
                         @empty
@@ -468,7 +490,16 @@
                     <div>
                         <p class="font-semibold">Procedures</p>
                         @forelse($encounter->procedureOrders as $procedure)
-                            <div class="mt-1"><p>{{ $procedure->procedure_name_snapshot }}</p><p class="text-xs text-slate-500">{{ $procedureStatusLabel($procedure->status) }}</p></div>
+                            <div class="mt-2 rounded-md border border-slate-200 p-3 dark:border-slate-700">
+                                <p class="font-medium">{{ $procedure->procedure_name_snapshot }}</p>
+                                <p class="text-xs text-slate-500">{{ ! $isReadOnly && $procedure->isSafelyEditable() ? 'Draft — Pending Consultation Completion' : $procedureStatusLabel($procedure->status) }}</p>
+                                @if(! $isReadOnly && $procedure->isSafelyEditable())
+                                    <div class="mt-2 flex flex-wrap gap-3">
+                                        @can('update', $procedure)<button type="button" wire:click="editProcedureOrder({{ $procedure->id }})" class="text-xs font-semibold text-primary">Edit</button>@endcan
+                                        @can('cancel', $procedure)<button type="button" wire:click="removeProcedureOrder({{ $procedure->id }})" wire:confirm="Una uhakika unataka kuondoa procedure hii?" class="text-xs font-semibold text-red-600">Remove</button>@endcan
+                                    </div>
+                                @endif
+                            </div>
                         @empty
                             <p class="text-xs text-slate-500">None</p>
                         @endforelse

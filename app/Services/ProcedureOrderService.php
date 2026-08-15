@@ -9,8 +9,10 @@ use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\ClinicalEncounter;
 use App\Models\ClinicalProcedureOrder;
+use App\Models\Invoice;
 use App\Models\Service;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
 
 class ProcedureOrderService
@@ -24,10 +26,10 @@ class ProcedureOrderService
     public function createOrder(ClinicalEncounter $encounter, array $data, $actor): ClinicalProcedureOrder
     {
         return DB::transaction(function () use ($encounter, $data, $actor) {
-            $service = isset($data['service_id']) ? Service::query()->where('facility_id', $encounter->facility_id)->findOrFail($data['service_id']) : null;
-            if ($service && $service->service_type !== ServiceType::Procedure) {
-                throw ValidationException::withMessages(['service_id' => 'Huduma ya procedure pekee ndiyo inaruhusiwa.']);
-            }
+            $encounter = ClinicalEncounter::query()->with('visit')->lockForUpdate()->findOrFail($encounter->id);
+            Gate::forUser($actor)->authorize('create', ClinicalProcedureOrder::class);
+            $this->ensureEncounterMutable($encounter, $actor);
+            $service = $this->validatedService($encounter, $data);
             $order = ClinicalProcedureOrder::query()->create([
                 'facility_id' => $encounter->facility_id,
                 'patient_id' => $encounter->patient_id,
@@ -61,11 +63,70 @@ class ProcedureOrderService
         });
     }
 
-    public function releasePaidInvoice(\App\Models\Invoice $invoice, $actor): void
+    public function assertOrderEditable(ClinicalProcedureOrder $order, $actor): void
+    {
+        $order->loadMissing(['encounter.visit', 'invoiceItem']);
+        Gate::forUser($actor)->authorize('update', $order);
+        $this->ensureEncounterMutable($order->encounter, $actor);
+        $this->ensureOrderSafelyEditable($order);
+    }
+
+    public function updateOrder(ClinicalProcedureOrder $order, array $data, $actor): ClinicalProcedureOrder
+    {
+        return DB::transaction(function () use ($order, $data, $actor): ClinicalProcedureOrder {
+            $order = ClinicalProcedureOrder::query()->with(['encounter.visit', 'invoiceItem'])->lockForUpdate()->findOrFail($order->id);
+            $this->assertOrderEditable($order, $actor);
+            $service = $this->validatedService($order->encounter, $data);
+            $old = $order->only(['service_id', 'procedure_name_snapshot', 'instructions', 'priority', 'scheduled_at', 'notes']);
+            $order->update([
+                'service_id' => $service?->id,
+                'procedure_name_snapshot' => $service?->name ?? $data['procedure_name_snapshot'],
+                'instructions' => $data['instructions'] ?? null,
+                'priority' => $data['priority'] ?? 'normal',
+                'scheduled_at' => $data['scheduled_at'] ?? null,
+                'notes' => $data['notes'] ?? null,
+                'updated_by' => $actor->id,
+            ]);
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => 'procedure_order_updated',
+                'subject_type' => $order::class,
+                'subject_id' => $order->id,
+                'old_values' => $old,
+                'new_values' => $order->fresh()->only(array_keys($old)),
+            ]);
+
+            return $order->refresh();
+        });
+    }
+
+    public function removeOrder(ClinicalProcedureOrder $order, $actor): void
+    {
+        DB::transaction(function () use ($order, $actor): void {
+            $order = ClinicalProcedureOrder::query()->with(['encounter.visit', 'invoiceItem'])->lockForUpdate()->findOrFail($order->id);
+            Gate::forUser($actor)->authorize('cancel', $order);
+            $this->ensureEncounterMutable($order->encounter, $actor);
+            $this->ensureOrderSafelyEditable($order);
+            $old = $order->toArray();
+            $order->delete();
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => 'procedure_order_removed',
+                'subject_type' => $order::class,
+                'subject_id' => $order->id,
+                'old_values' => $old,
+                'new_values' => [],
+            ]);
+        });
+    }
+
+    public function releasePaidInvoice(Invoice $invoice, $actor): void
     {
         DB::transaction(function () use ($invoice, $actor): void {
             $invoice = $this->invoices->calculateTotals($invoice);
-            if ((float) $invoice->balance_amount > 0 || $invoice->payment_status !== 'paid') return;
+            if ((float) $invoice->balance_amount > 0 || $invoice->payment_status !== 'paid') {
+                return;
+            }
             ClinicalProcedureOrder::query()->where('facility_id', $invoice->facility_id)->where('visit_id', $invoice->visit_id)->where('status', ProcedureOrderStatus::AwaitingPayment)->with(['service', 'visit'])->lockForUpdate()->get()->each(function ($order) use ($actor, $invoice): void {
                 $order->update(['status' => ProcedureOrderStatus::Ordered, 'updated_by' => $actor->id]);
                 ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_payment_confirmed', 'subject_type' => $order::class, 'subject_id' => $order->id, 'new_values' => ['invoice_id' => $invoice->id]]);
@@ -95,8 +156,12 @@ class ProcedureOrderService
             if (in_array($order->status, [ProcedureOrderStatus::Completed, ProcedureOrderStatus::Cancelled], true)) {
                 throw ValidationException::withMessages(['procedure' => 'Procedure order tayari imefungwa.']);
             }
-            if ($order->facility_id !== currentFacility()?->id || ! $actor->belongsToCurrentFacility()) abort(403);
-            if (! $actor->can('procedure-orders.view')) abort(403);
+            if ($order->facility_id !== currentFacility()?->id || ! $actor->belongsToCurrentFacility()) {
+                abort(403);
+            }
+            if (! $actor->can('procedure-orders.view')) {
+                abort(403);
+            }
             if ($order->status === ProcedureOrderStatus::AwaitingPayment && ! $actor->can('procedure-orders.override-payment')) {
                 throw ValidationException::withMessages(['procedure' => 'Procedure haiwezi kufanywa kabla ya malipo kamili bila ruhusa ya override.']);
             }
@@ -135,5 +200,40 @@ class ProcedureOrderService
             ->all();
         $this->visitClosure->completeQueuesForDepartments($order->visit, $departmentIds, $actor);
         $this->visitClosure->evaluate($order->visit->refresh(), $actor);
+    }
+
+    private function validatedService(ClinicalEncounter $encounter, array $data): ?Service
+    {
+        validator($data, [
+            'service_id' => ['nullable', 'integer'],
+            'procedure_name_snapshot' => ['required_without:service_id', 'nullable', 'string', 'max:255'],
+            'priority' => ['sometimes', 'required'],
+            'scheduled_at' => ['nullable', 'date'],
+        ])->validate();
+        $service = isset($data['service_id'])
+            ? Service::query()->where('facility_id', $encounter->facility_id)->findOrFail($data['service_id'])
+            : null;
+        if ($service && $service->service_type !== ServiceType::Procedure) {
+            throw ValidationException::withMessages(['service_id' => 'Huduma ya procedure pekee ndiyo inaruhusiwa.']);
+        }
+
+        return $service;
+    }
+
+    private function ensureEncounterMutable(ClinicalEncounter $encounter, $actor): void
+    {
+        abort_unless($encounter->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+        if ($encounter->isReadOnly()) {
+            throw ValidationException::withMessages(['procedure' => 'Consultation hii tayari imekamilika na procedure haiwezi kubadilishwa.']);
+        }
+    }
+
+    private function ensureOrderSafelyEditable(ClinicalProcedureOrder $order): void
+    {
+        if (! $order->isSafelyEditable()) {
+            throw ValidationException::withMessages([
+                'procedure' => 'Procedure hii haiwezi kuhaririwa au kuondolewa kwa sababu tayari imetumwa Billing, imelipiwa, imepangwa, imeanza, au imekamilika.',
+            ]);
+        }
     }
 }

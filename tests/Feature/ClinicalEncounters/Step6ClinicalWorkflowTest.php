@@ -73,6 +73,174 @@ class Step6ClinicalWorkflowTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_medicine_quantity_defaults_to_one_and_invalid_values_never_persist_from_livewire(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $component = Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->assertSet('prescriptionItemForm.quantity', '1')
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose', '4 tablets')
+            ->set('prescriptionItemForm.frequency', '4')
+            ->set('prescriptionItemForm.duration_value', '4')
+            ->set('prescriptionItemForm.duration_unit', 'days');
+
+        foreach ([null, '0', '-1', 'invalid'] as $invalidQuantity) {
+            $component->set('prescriptionItemForm.quantity', $invalidQuantity)
+                ->call('addPrescription')
+                ->assertHasErrors(['prescriptionItemForm.quantity'])
+                ->assertSet('prescriptionItemForm.medicine_id', $medicine->id);
+            $this->assertDatabaseCount('prescriptions', 0);
+            $this->assertDatabaseCount('prescription_items', 0);
+        }
+
+        $component->set('prescriptionItemForm.quantity', '5')
+            ->call('addPrescription')
+            ->assertHasNoErrors()
+            ->assertSet('prescriptionItemForm.quantity', '1');
+
+        $this->assertDatabaseCount('prescriptions', 1);
+        $this->assertDatabaseCount('prescription_items', 1);
+        $this->assertSame('5.00', PrescriptionItem::query()->sole()->quantity);
+
+        try {
+            app(ClinicalEncounterService::class)->addPrescription(
+                ClinicalEncounter::query()->where('visit_id', $visit->id)->sole(),
+                ['items' => [[
+                    'medicine_id' => $medicine->id, 'medication_name' => $medicine->name,
+                    'dose' => '1 tablet', 'frequency' => 'TDS', 'duration_value' => 2,
+                    'duration_unit' => 'days', 'quantity' => 0,
+                ]]],
+                $admin,
+            );
+            $this->fail('Service accepted an explicitly invalid medicine quantity.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('quantity', $exception->errors());
+        }
+        $this->assertDatabaseCount('prescription_items', 1);
+    }
+
+    public function test_legacy_missing_quantity_is_visible_and_livewire_edit_repairs_same_item_without_billing_duplication(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medication_name' => 'Legacy medicine', 'dose' => '1 tablet', 'frequency' => 'OD',
+            'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => 2,
+        ]]], $admin);
+        $item = $prescription->items()->firstOrFail();
+        $item->update(['quantity' => null]);
+
+        Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->assertSee('Quantity: Missing')
+            ->assertSee('Quantity must be corrected before completing consultation.')
+            ->call('editPrescriptionItem', $item->id)
+            ->assertSet('editingPrescriptionItemId', $item->id)
+            ->set('prescriptionItemForm.frequency', 'CUSTOM')
+            ->set('prescriptionItemForm.quantity', '6')
+            ->call('updatePrescriptionItem')
+            ->assertHasNoErrors()
+            ->assertSet('editingPrescriptionItemId', null);
+
+        $this->assertSame('6.00', $item->refresh()->quantity);
+        $this->assertSame(1, PrescriptionItem::query()->where('prescription_id', $prescription->id)->count());
+        $this->assertSame(1, Prescription::query()->where('clinical_encounter_id', $encounter->id)->count());
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'prescription_item_updated', 'subject_id' => $item->id]);
+    }
+
+    public function test_doctor_edits_and_removes_same_safe_procedure_order_from_livewire(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $service = $this->service('Wound dressing', 'PROC-EDIT', 'procedure', $admin);
+        $service->update(['requires_payment' => false]);
+        $order = app(ClinicalEncounterService::class)->addProcedureOrder($encounter, ['service_id' => $service->id], $doctor);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('editProcedureOrder', $order->id)
+            ->assertSet('editingProcedureOrderId', $order->id)
+            ->set('procedureForm.instructions', 'Updated sterile dressing')
+            ->call('updateProcedureOrder')
+            ->assertHasNoErrors()
+            ->assertSet('editingProcedureOrderId', null);
+
+        $this->assertSame('Updated sterile dressing', $order->refresh()->instructions);
+        $this->assertSame(1, $encounter->procedureOrders()->count());
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'procedure_order_updated', 'subject_id' => $order->id]);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('removeProcedureOrder', $order->id)
+            ->assertHasNoErrors();
+        $this->assertSoftDeleted('clinical_procedure_orders', ['id' => $order->id]);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'procedure_order_removed', 'subject_id' => $order->id]);
+    }
+
+    public function test_completed_consultation_rejects_medicine_and_procedure_mutation_at_services(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'medication_name' => $medicine->name, 'dose' => '1 tablet', 'frequency' => 'OD',
+            'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => 2,
+        ]]], $admin);
+        $procedureService = $this->service('Terminal procedure', 'PROC-TERMINAL', 'procedure', $admin);
+        $procedureService->update(['requires_payment' => false]);
+        $procedure = app(ClinicalEncounterService::class)->addProcedureOrder($encounter, ['service_id' => $procedureService->id], $admin);
+        $encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+
+        foreach ([
+            fn () => app(PrescriptionService::class)->updateItem($prescription->items()->firstOrFail(), [
+                'medication_name' => 'Changed', 'dose' => '1 tablet', 'frequency' => 'OD',
+                'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => 2,
+            ], $admin),
+            fn () => app(ProcedureOrderService::class)->updateOrder($procedure, [
+                'service_id' => $procedureService->id, 'priority' => 'normal', 'instructions' => 'Changed',
+            ], $admin),
+        ] as $mutation) {
+            try {
+                $mutation();
+                $this->fail('Terminal consultation mutation was accepted.');
+            } catch (ValidationException $exception) {
+                $this->assertNotEmpty($exception->errors());
+            }
+        }
+    }
+
+    public function test_billed_procedure_cannot_be_edited_or_removed_before_completion(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $service = $this->service('Paid procedure', 'PROC-BILLED-LOCK', 'procedure', $admin);
+        $service->update(['requires_payment' => true]);
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id], $admin);
+        $this->assertNotNull($order->invoice_item_id);
+
+        foreach ([
+            fn () => app(ProcedureOrderService::class)->updateOrder($order, ['service_id' => $service->id, 'priority' => 'normal'], $admin),
+            fn () => app(ProcedureOrderService::class)->removeOrder($order, $admin),
+        ] as $mutation) {
+            try {
+                $mutation();
+                $this->fail('Billed procedure mutation was accepted.');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('procedure', $exception->errors());
+            }
+        }
+
+        $this->assertNotSoftDeleted('clinical_procedure_orders', ['id' => $order->id]);
+        $this->assertSame(1, InvoiceItem::query()->whereKey($order->invoice_item_id)->count());
+    }
+
     public function test_doctor_and_clinical_officer_can_open_and_update_their_draft_medicine_item(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -1464,6 +1632,11 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->assertDontSee('Save Draft')
             ->assertDontSee('Complete Consultation')
             ->assertDontSee('Final Consultation Outcome')
+            ->set('activeTab', 'orders')
+            ->assertDontSee('Add Medication Order')
+            ->assertDontSee('Update Medicine')
+            ->assertDontSee('Add Procedure')
+            ->assertDontSee('Update Procedure')
             ->assertDontSee('Required before completion:')
             ->assertDontSee('Select a final consultation outcome.');
 

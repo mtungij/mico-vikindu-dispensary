@@ -30,6 +30,11 @@ class PrescriptionService
 
         return DB::transaction(function () use ($encounter, $data, $actor) {
             $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
+            Gate::forUser($actor)->authorize('create', Prescription::class);
+            abort_unless($encounter->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+            if ($encounter->isReadOnly()) {
+                throw ValidationException::withMessages(['encounter' => 'Consultation hii tayari imekamilika na haiwezi kuongezewa dawa.']);
+            }
             $prescription = Prescription::query()
                 ->where('clinical_encounter_id', $encounter->id)
                 ->where('status', PrescriptionStatus::Draft->value)
@@ -69,8 +74,10 @@ class PrescriptionService
 
     public function addItem(Prescription $prescription, array $data, $actor): void
     {
-        validator($data, ['medication_name' => ['required'], 'dose' => ['required'], 'frequency' => ['required'], 'duration_value' => ['required', 'integer', 'min:1'], 'duration_unit' => ['required']])->validate();
-        $prescription->items()->create([...$this->withCalculatedQuantity($data), 'status' => 'prescribed', 'created_by' => $actor->id]);
+        $this->authorizeDraftMutation($prescription, $actor);
+        $data = $this->withCalculatedQuantity($data);
+        validator($data, $this->itemRules(), $this->itemMessages())->validate();
+        $prescription->items()->create([...$data, 'status' => 'prescribed', 'created_by' => $actor->id]);
     }
 
     public function updateItem(PrescriptionItem $item, array $data, $actor): PrescriptionItem
@@ -78,9 +85,10 @@ class PrescriptionService
         return DB::transaction(function () use ($item, $data, $actor): PrescriptionItem {
             $item = PrescriptionItem::query()->with('prescription')->lockForUpdate()->findOrFail($item->id);
             $this->authorizeDraftMutation($item->prescription, $actor);
-            validator($data, ['medication_name' => ['required'], 'dose' => ['required'], 'frequency' => ['required'], 'duration_value' => ['required', 'integer', 'min:1'], 'duration_unit' => ['required']])->validate();
+            $data = $this->withCalculatedQuantity($data);
+            validator($data, $this->itemRules(), $this->itemMessages())->validate();
             $old = $item->only(array_keys($data));
-            $item->update([...$this->withCalculatedQuantity($data), 'updated_by' => $actor->id]);
+            $item->update([...$data, 'updated_by' => $actor->id]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_item_updated', 'subject_type' => $item::class, 'subject_id' => $item->id, 'old_values' => $old, 'new_values' => $item->fresh()->only(array_keys($data))]);
 
             return $item->refresh();
@@ -161,6 +169,10 @@ class PrescriptionService
 
     private function withCalculatedQuantity(array $data): array
     {
+        if (array_key_exists('quantity', $data)) {
+            return $data;
+        }
+
         $frequency = strtoupper(trim((string) ($data['frequency'] ?? '')));
         $perDay = ['OD' => 1, 'DAILY' => 1, 'BD' => 2, 'BID' => 2, 'TDS' => 3, 'TID' => 3, 'QID' => 4][$frequency] ?? null;
         if ($perDay && preg_match('/^\s*(\d+(?:\.\d+)?)/', (string) ($data['dose'] ?? ''), $match)) {
@@ -171,6 +183,27 @@ class PrescriptionService
         }
 
         return $data;
+    }
+
+    private function itemRules(): array
+    {
+        return [
+            'medication_name' => ['required'],
+            'dose' => ['required'],
+            'frequency' => ['required'],
+            'duration_value' => ['required', 'integer', 'min:1'],
+            'duration_unit' => ['required'],
+            'quantity' => ['required', 'numeric', 'min:1'],
+        ];
+    }
+
+    private function itemMessages(): array
+    {
+        return [
+            'quantity.required' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+            'quantity.numeric' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+            'quantity.min' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+        ];
     }
 
     public function finalizePrescription(Prescription $prescription, $actor): Prescription

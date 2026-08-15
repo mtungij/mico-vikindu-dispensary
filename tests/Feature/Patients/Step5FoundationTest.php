@@ -19,6 +19,7 @@ use App\Models\LaboratoryTest;
 use App\Models\LaboratoryTestCategory;
 use App\Models\Patient;
 use App\Models\PaymentMethod;
+use App\Models\Role;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
@@ -52,6 +53,7 @@ use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Mockery;
 use RuntimeException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Tests\TestCase;
 
 class Step5FoundationTest extends TestCase
@@ -315,6 +317,92 @@ class Step5FoundationTest extends TestCase
         $this->assertDatabaseMissing('patient_queues', ['visit_id' => $result['visit']->id, 'department_id' => Department::query()->where('code', 'OPD')->value('id')]);
         $this->assertDatabaseHas('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $service->id, 'item_type' => 'laboratory_test']);
         $this->assertFalse($result['invoice']->items()->where('item_type', 'registration')->exists());
+    }
+
+    public function test_receptionist_can_save_two_test_direct_laboratory_registration_to_billing_without_opd_encounter(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $receptionist = $this->receptionist();
+        $laboratory = Department::query()->where('code', 'LAB')->firstOrFail();
+        $billing = Department::query()->where('code', 'BIL')->firstOrFail();
+        $opd = Department::query()->where('code', 'OPD')->firstOrFail();
+        $laboratory->update(['queue_enabled' => true, 'requires_consultation' => false, 'requires_triage' => false]);
+        [$firstService] = $this->directLaboratoryTest($admin, $laboratory, 7500);
+        [$secondService] = $this->directLaboratoryTest($admin, $laboratory, 3500);
+
+        Livewire::actingAs($receptionist)->test(PatientsIndex::class)
+            ->call('create')
+            ->set('personal.first_name', 'Reception')
+            ->set('personal.last_name', 'Direct Lab')
+            ->set('personal.gender', 'female')
+            ->set('personal.age_years', 29)
+            ->set('payer.payer_type', 'cash')
+            ->set('visit.visit_type', 'new_patient')
+            ->set('visit.destination_department_id', $laboratory->id)
+            ->set('visit.priority', 'normal')
+            ->set('visit.require_payment_before_service', true)
+            ->set('selectedLaboratoryTestIds', [$firstService->id, $secondService->id])
+            ->set('step', 6)
+            ->call('save')
+            ->assertHasNoErrors();
+
+        $patient = Patient::query()->sole();
+        $visit = Visit::query()->where('patient_id', $patient->id)->sole();
+        $order = LaboratoryOrder::query()->where('visit_id', $visit->id)->sole();
+        $invoice = $visit->invoice()->sole();
+
+        $this->assertSame('reception_direct', $order->source);
+        $this->assertSame(2, $order->items()->count());
+        $this->assertSame(2, $invoice->items()->where('item_type', 'laboratory_test')->count());
+        $this->assertSame('11000.00', $invoice->total_amount);
+        $this->assertSame('awaiting_payment', $visit->visit_status->value);
+        $this->assertSame($billing->id, $visit->current_department_id);
+        $this->assertDatabaseCount('clinical_encounters', 0);
+        $this->assertDatabaseMissing('patient_queues', ['visit_id' => $visit->id, 'department_id' => $opd->id]);
+        $this->assertDatabaseMissing('patient_queues', ['visit_id' => $visit->id, 'department_id' => $laboratory->id]);
+    }
+
+    public function test_direct_laboratory_registration_requires_create_direct_permission(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $receptionist = $this->receptionist(['laboratory-tests.view']);
+        $laboratory = Department::query()->where('code', 'LAB')->firstOrFail();
+        [$service] = $this->directLaboratoryTest($admin, $laboratory, 7500);
+
+        $this->assertDirectLaboratoryRegistrationForbidden(
+            $receptionist,
+            $laboratory,
+            $service,
+            'Huna ruhusa ya kuunda direct laboratory order.',
+        );
+    }
+
+    public function test_direct_laboratory_registration_requires_laboratory_test_view_permission(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $receptionist = $this->receptionist(['laboratory-orders.create-direct']);
+        $laboratory = Department::query()->where('code', 'LAB')->firstOrFail();
+        [$service] = $this->directLaboratoryTest($admin, $laboratory, 7500);
+
+        $this->assertDirectLaboratoryRegistrationForbidden(
+            $receptionist,
+            $laboratory,
+            $service,
+            'Huna ruhusa ya kuangalia vipimo vya maabara kwa usajili wa Direct Laboratory.',
+        );
+    }
+
+    public function test_receptionist_direct_laboratory_access_does_not_grant_clinical_lab_actions(): void
+    {
+        $this->bootstrappedFacility();
+        $receptionist = $this->receptionist();
+
+        $this->assertTrue($receptionist->can('laboratory-tests.view'));
+        $this->assertTrue($receptionist->can('laboratory-orders.create-direct'));
+        $this->assertFalse($receptionist->can('laboratory.collect-sample'));
+        $this->assertFalse($receptionist->can('laboratory-results.enter'));
+        $this->assertFalse($receptionist->can('laboratory-results.verify'));
+        $this->assertFalse($receptionist->can('laboratory-results.release'));
     }
 
     public function test_emergency_visit_does_not_automatically_receive_new_patient_registration_fee(): void
@@ -1050,13 +1138,10 @@ class Step5FoundationTest extends TestCase
             'is_active' => true,
             'created_by' => $admin->id,
         ]);
-        $testCategory = LaboratoryTestCategory::query()->create([
-            'facility_id' => currentFacility()->id,
-            'name' => 'Direct Tests',
-            'code' => 'DIRECT',
-            'is_active' => true,
-            'created_by' => $admin->id,
-        ]);
+        $testCategory = LaboratoryTestCategory::query()->firstOrCreate(
+            ['facility_id' => currentFacility()->id, 'code' => 'DIRECT'],
+            ['name' => 'Direct Tests', 'is_active' => true, 'created_by' => $admin->id],
+        );
         $test = LaboratoryTest::query()->create([
             'facility_id' => currentFacility()->id,
             'service_id' => $service->id,
@@ -1070,5 +1155,60 @@ class Step5FoundationTest extends TestCase
         app(ServicePricingService::class)->createPriceVersion($service, ['payer_type' => 'cash', 'amount' => $amount, 'currency' => 'TZS'], $admin);
 
         return [$service, $test];
+    }
+
+    /** @param array<int, string>|null $directPermissions */
+    private function receptionist(?array $directPermissions = null): User
+    {
+        $user = User::factory()->create();
+        StaffProfile::factory()->create([
+            'user_id' => $user->id,
+            'facility_id' => currentFacility()->id,
+        ]);
+
+        if ($directPermissions === null) {
+            $user->assignRole(Role::query()->where('name', 'receptionist')->firstOrFail());
+        } else {
+            $user->givePermissionTo($directPermissions);
+        }
+
+        return $user;
+    }
+
+    private function assertDirectLaboratoryRegistrationForbidden(
+        User $actor,
+        Department $laboratory,
+        Service $service,
+        string $expectedMessage,
+    ): void {
+        $this->actingAs($actor);
+
+        try {
+            app(ReceptionWorkflowService::class)->registerNewPatientAndVisit([
+                'first_name' => 'Unauthorized',
+                'last_name' => 'Direct Lab',
+                'gender' => 'female',
+                'age_years' => 20,
+                'patient_status' => 'active',
+            ], ['payer_type' => 'cash', 'is_primary' => true], [
+                'visit_type' => 'new_patient',
+                'payer_type' => 'cash',
+                'destination_department_id' => $laboratory->id,
+                'consultation_service_id' => null,
+                'priority' => 'normal',
+                'source' => 'walk_in',
+                'registration_idempotency_key' => (string) Str::uuid(),
+                'require_payment_before_service' => true,
+            ], [$service->id], $actor);
+            $this->fail('Direct Laboratory registration continued without both required permissions.');
+        } catch (HttpExceptionInterface $exception) {
+            $this->assertSame(403, $exception->getStatusCode());
+            $this->assertSame($expectedMessage, $exception->getMessage());
+        }
+
+        $this->assertDatabaseCount('patients', 0);
+        $this->assertDatabaseCount('visits', 0);
+        $this->assertDatabaseCount('invoices', 0);
+        $this->assertDatabaseCount('laboratory_orders', 0);
     }
 }

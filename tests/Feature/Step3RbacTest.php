@@ -131,6 +131,37 @@ class Step3RbacTest extends TestCase
         }
     }
 
+    public function test_receptionist_direct_laboratory_permissions_are_preselected_without_clinical_lab_permissions(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $role = Role::query()->where('name', 'receptionist')->firstOrFail();
+        $allowed = [
+            'laboratory-tests.view',
+            'laboratory-orders.create-direct',
+        ];
+        $prohibited = [
+            'laboratory.collect-sample',
+            'laboratory-results.enter',
+            'laboratory-results.verify',
+            'laboratory-results.release',
+        ];
+
+        foreach ($allowed as $permission) {
+            $this->assertTrue($role->hasPermissionTo($permission));
+            $this->assertSame(1, $role->permissions()->where('permissions.name', $permission)->count());
+        }
+        foreach ($prohibited as $permission) {
+            $this->assertFalse($role->hasPermissionTo($permission));
+        }
+
+        Livewire::actingAs($admin)
+            ->test(ManagePermissions::class, ['role' => $role])
+            ->assertSet('selectedPermissions', function (array $permissions) use ($allowed, $prohibited): bool {
+                return collect($allowed)->every(fn (string $permission): bool => in_array($permission, $permissions, true))
+                    && collect($prohibited)->every(fn (string $permission): bool => ! in_array($permission, $permissions, true));
+            });
+    }
+
     public function test_prescription_update_permission_is_preselected_for_default_clinician_roles_only(): void
     {
         $admin = $this->bootstrappedFacility();

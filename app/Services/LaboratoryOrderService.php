@@ -118,8 +118,14 @@ class LaboratoryOrderService
     public function createDirectOrder(Visit $visit, Invoice $invoice, array $serviceIds, $actor): LaboratoryOrder
     {
         abort_unless(
-            $actor->can('laboratory-orders.create-direct') && $actor->can('laboratory-tests.view'),
+            $actor->can('laboratory-tests.view'),
             403,
+            'Huna ruhusa ya kuangalia vipimo vya maabara kwa usajili wa Direct Laboratory.',
+        );
+        abort_unless(
+            $actor->can('laboratory-orders.create-direct'),
+            403,
+            'Huna ruhusa ya kuunda direct laboratory order.',
         );
 
         return DB::transaction(function () use ($visit, $invoice, $serviceIds, $actor): LaboratoryOrder {

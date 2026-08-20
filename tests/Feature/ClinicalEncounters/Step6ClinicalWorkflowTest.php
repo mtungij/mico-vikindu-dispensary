@@ -48,6 +48,7 @@ use App\Models\Visit;
 use App\Services\BillingChargeService;
 use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
+use App\Services\MedicineCatalogService;
 use App\Services\PaymentConfirmationService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
@@ -72,6 +73,52 @@ use Tests\TestCase;
 class Step6ClinicalWorkflowTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_doctor_can_prescribe_newly_auto_configured_medicine_and_completion_uses_cash_service_price(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $unit = MedicineUnit::query()->firstOrCreate(
+            ['facility_id' => currentFacility()->id, 'name' => 'Tablet'],
+            ['symbol' => 'tab', 'is_active' => true, 'created_by' => $admin->id],
+        );
+        ServiceCategory::query()->firstOrCreate(
+            ['facility_id' => currentFacility()->id, 'code' => 'PHA'],
+            ['name' => 'Pharmacy', 'category_type' => 'pharmacy', 'is_active' => true, 'created_by' => $admin->id],
+        );
+        $medicine = app(MedicineCatalogService::class)->createMedicine([
+            'name' => 'Auto-configured Amoxicillin 500mg',
+            'code' => 'AUTO-AMOX500',
+            'purchase_unit_id' => $unit->id,
+            'dispensing_unit_id' => $unit->id,
+            'pack_size' => 1,
+            'purchase_to_dispensing_factor' => 1,
+            'reorder_level' => 0,
+            'is_active' => true,
+            'cash_price' => 275,
+        ], $admin);
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose', '1 tablet')
+            ->set('prescriptionItemForm.frequency', 'OD')
+            ->set('prescriptionItemForm.duration_value', '3')
+            ->set('prescriptionItemForm.quantity', '3')
+            ->call('addPrescription')
+            ->assertHasNoErrors();
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->prepareEncounterForCompletion($encounter, $doctor);
+
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $doctor);
+
+        $item = $encounter->prescriptions()->sole()->items()->sole();
+        $this->assertNotNull($item->invoice_item_id);
+        $this->assertSame($medicine->service_id, $item->invoiceItem->service_id);
+        $this->assertSame(275.0, (float) $item->invoiceItem->unit_price);
+        $this->assertSame(825.0, (float) $item->invoiceItem->total_amount);
+    }
 
     public function test_medicine_without_billing_service_is_rejected_before_draft_persistence(): void
     {

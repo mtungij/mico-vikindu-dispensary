@@ -47,6 +47,10 @@ class MedicineForm extends Form
 
     public ?string $default_dispensing_price = null;
 
+    public ?string $cash_price = null;
+
+    public bool $use_custom_billing_service = false;
+
     public bool $prescription_required = true;
 
     public bool $controlled_drug = false;
@@ -63,7 +67,7 @@ class MedicineForm extends Form
 
     public function rules(): array
     {
-        return ['name' => ['required'], 'code' => ['required'], 'service_id' => ['nullable', Rule::exists('services', 'id')->where('facility_id', currentFacility()?->id)->where('service_type', 'medicine')], 'purchase_unit_id' => ['required', 'integer'], 'dispensing_unit_id' => ['required', 'integer'], 'pack_size' => ['required', 'numeric', 'min:0.001'], 'purchase_to_dispensing_factor' => ['required', 'numeric', 'min:0.001']];
+        return ['name' => ['required'], 'code' => ['required'], 'service_id' => ['nullable', Rule::exists('services', 'id')->where('facility_id', currentFacility()?->id)->where('service_type', 'medicine')], 'cash_price' => ['nullable', 'numeric', 'min:0'], 'purchase_unit_id' => ['required', 'integer'], 'dispensing_unit_id' => ['required', 'integer'], 'pack_size' => ['required', 'numeric', 'min:0.001'], 'purchase_to_dispensing_factor' => ['required', 'numeric', 'min:0.001']];
     }
 
     public function validationAttributes(): array
@@ -80,6 +84,11 @@ class MedicineForm extends Form
     {
         $this->id = $model->id;
         $this->fill($model->only(array_keys($this->normalize())));
+    }
+
+    public function billingData(): array
+    {
+        return ['cash_price' => filled($this->cash_price) ? $this->cash_price : null];
     }
 
     public function resetForm(): void

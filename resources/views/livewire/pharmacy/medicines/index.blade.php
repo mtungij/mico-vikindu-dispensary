@@ -1,6 +1,9 @@
 <div class="space-y-6">
     <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <x-text-input wire:model.live.debounce.300ms="search" placeholder="Tafuta dawa..." />
+        <div class="flex flex-col gap-2 sm:flex-row">
+            <x-text-input wire:model.live.debounce.300ms="search" placeholder="Tafuta dawa..." />
+            <x-select-input wire:model.live="billingStatus"><option value="">All billing statuses</option><option value="ready">Billing Ready</option><option value="missing_service">Missing Service</option><option value="missing_price">Missing Price</option><option value="needs_review">Needs Review</option></x-select-input>
+        </div>
         <x-primary-button wire:click="create"><x-lucide-plus class="h-4 w-4" /> Dawa</x-primary-button>
     </div>
 
@@ -38,13 +41,24 @@
             <div><x-input-label value="Name" /><x-text-input wire:model="form.name" class="w-full" /><x-input-error :messages="$errors->get('form.name')" class="mt-1" /></div>
             <div><x-input-label value="Code" /><x-text-input wire:model="form.code" class="w-full" /><x-input-error :messages="$errors->get('form.code')" class="mt-1" /></div>
             <div><x-input-label value="Strength" /><x-text-input wire:model="form.strength" class="w-full" /></div>
-            <div>
-                <x-input-label value="Billing service" />
-                <x-select-input wire:model="form.service_id" class="w-full"><option value="">Not configured</option>@foreach($services as $service)<option value="{{ $service->id }}">{{ $service->name }} ({{ $service->is_active ? 'Active' : 'Inactive' }})</option>@endforeach</x-select-input>
-                <x-input-error :messages="array_merge($errors->get('form.service_id'), $errors->get('service_id'))" class="mt-1" />
-                <p class="mt-1 text-xs text-slate-500">After linking a service, use Prices in the medicine list to configure cash and payer-specific prices.</p>
+            @if(auth()->user()->can('pharmacy.manage-prices') || auth()->user()->can('services.manage-prices'))
+                <div class="rounded-md border border-slate-200 p-3 dark:border-slate-700">
+                    <x-input-label value="Cash price (TSh)" />
+                    <x-text-input type="number" min="0" step="0.01" wire:model="form.cash_price" class="w-full" placeholder="500.00" />
+                    <x-input-error :messages="array_merge($errors->get('form.cash_price'), $errors->get('cash_price'))" class="mt-1" />
+                    <p class="mt-1 text-xs text-slate-500">This is the authoritative cash billing price. Changes create a new effective price version.</p>
+                </div>
+            @endif
+            <div class="rounded-md border border-slate-200 p-3 dark:border-slate-700">
+                <label class="flex items-center gap-2 text-sm font-medium"><x-checkbox wire:model.live="form.use_custom_billing_service" /> Advanced: use custom Billing Service</label>
+                @if($form->use_custom_billing_service)
+                    <x-select-input wire:model="form.service_id" class="mt-2 w-full"><option value="">System managed (recommended)</option>@foreach($services as $service)<option value="{{ $service->id }}">{{ $service->name }} ({{ $service->is_active ? 'Active' : 'Inactive' }})</option>@endforeach</x-select-input>
+                    <x-input-error :messages="array_merge($errors->get('form.service_id'), $errors->get('service_id'))" class="mt-1" />
+                @else
+                    <p class="mt-2 text-xs text-slate-500">A medicine Billing Service is created or reused automatically. Existing mappings are preserved.</p>
+                @endif
             </div>
-            <div><x-input-label value="Default dispensing price (reference only)" /><x-text-input wire:model="form.default_dispensing_price" class="w-full" /><p class="mt-1 text-xs text-slate-500">Billing uses the linked service price, not this reference value.</p></div>
+            <div><x-input-label value="Inventory reference price" /><x-text-input wire:model="form.default_dispensing_price" class="w-full" /><p class="mt-1 text-xs text-slate-500">Reference/fallback value only. It is never converted into a patient charge automatically.</p></div>
             <div><x-input-label value="Purchase unit" /><x-select-input wire:model="form.purchase_unit_id" class="w-full"><option value="">Purchase unit</option>@foreach($units as $unit)<option value="{{ $unit->id }}">{{ $unit->name }}</option>@endforeach</x-select-input></div>
             <div><x-input-label value="Dispensing unit" /><x-select-input wire:model="form.dispensing_unit_id" class="w-full"><option value="">Dispensing unit</option>@foreach($units as $unit)<option value="{{ $unit->id }}">{{ $unit->name }}</option>@endforeach</x-select-input></div>
             <div><x-input-label value="Generic" /><x-select-input wire:model="form.generic_medicine_id" class="w-full"><option value="">Generic</option>@foreach($generics as $generic)<option value="{{ $generic->id }}">{{ $generic->name }}</option>@endforeach</x-select-input></div>

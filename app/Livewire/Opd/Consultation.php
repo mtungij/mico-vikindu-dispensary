@@ -23,6 +23,7 @@ use App\Models\PrescriptionItem;
 use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
+use App\Services\MedicineBillingReadinessService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
 use App\Support\Notifier;
@@ -249,8 +250,13 @@ class Consultation extends Component
     {
         Gate::authorize('prescriptions.create');
         $this->prescriptionItemForm->validate();
-        $this->hydrateMedicineSnapshot();
-        $service->addPrescription($this->encounter, ['items' => [$this->prescriptionItemForm->normalize()]], auth()->user());
+        try {
+            $service->addPrescription($this->encounter, ['items' => [$this->prescriptionItemForm->normalize()]], auth()->user());
+        } catch (ValidationException $exception) {
+            $this->showMedicineValidationFailure($exception);
+
+            return;
+        }
         $this->prescriptionItemForm->resetForm();
         Notifier::success('Prescription imeundwa.');
     }
@@ -268,8 +274,13 @@ class Consultation extends Component
     {
         $this->prescriptionItemForm->validate();
         $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query->where('clinical_encounter_id', $this->encounter->id)->where('facility_id', currentFacility()?->id))->findOrFail($this->editingPrescriptionItemId);
-        $this->hydrateMedicineSnapshot();
-        $service->updateItem($item, $this->prescriptionItemForm->normalize(), auth()->user());
+        try {
+            $service->updateItem($item, $this->prescriptionItemForm->normalize(), auth()->user());
+        } catch (ValidationException $exception) {
+            $this->showMedicineValidationFailure($exception);
+
+            return;
+        }
         $this->cancelPrescriptionEdit();
         Notifier::success('Dawa imesasishwa.');
     }
@@ -288,19 +299,6 @@ class Consultation extends Component
     {
         $this->editingPrescriptionItemId = null;
         $this->prescriptionItemForm->resetForm();
-    }
-
-    private function hydrateMedicineSnapshot(): void
-    {
-        if (! $this->prescriptionItemForm->medicine_id) {
-            return;
-        }
-        $medicine = Medicine::query()->where('facility_id', $this->encounter->facility_id)->where('is_active', true)->findOrFail($this->prescriptionItemForm->medicine_id);
-        $this->prescriptionItemForm->medication_name = $medicine->name;
-        $this->prescriptionItemForm->generic_name = $medicine->generic?->name;
-        $this->prescriptionItemForm->strength = $medicine->strength;
-        $this->prescriptionItemForm->dosage_form = $medicine->dosageForm?->name;
-        $this->prescriptionItemForm->route = $medicine->route?->name;
     }
 
     public function addProcedure(ClinicalEncounterService $service): void
@@ -481,6 +479,18 @@ class Consultation extends Component
         Notifier::error('Please correct the highlighted consultation errors and try again.');
     }
 
+    private function showMedicineValidationFailure(ValidationException $exception): void
+    {
+        foreach ($exception->errors() as $field => $messages) {
+            $field = $field === 'medicine_id' ? 'prescriptionItemForm.medicine_id' : $field;
+            foreach ($messages as $message) {
+                $this->addError($field, $message);
+            }
+        }
+
+        Notifier::error('Medicine order was not saved. Correct the highlighted issue and try again.');
+    }
+
     private function showAuthorizationFailure(string $message): void
     {
         $this->addError('authorization', $message);
@@ -530,11 +540,21 @@ class Consultation extends Component
             );
         }
 
+        $medicines = Medicine::query()->forCurrentFacility()
+            ->with(['generic', 'dosageForm', 'route', 'service'])
+            ->when(strlen($this->medicineSearch) >= 2, fn ($query) => $query->where(fn ($q) => $q->where('name', 'like', '%'.$this->medicineSearch.'%')->orWhere('brand_name', 'like', '%'.$this->medicineSearch.'%')->orWhereHas('generic', fn ($g) => $g->where('name', 'like', '%'.$this->medicineSearch.'%'))))
+            ->orderByDesc('is_active')
+            ->orderBy('name')
+            ->limit(50)
+            ->get();
+        $readiness = app(MedicineBillingReadinessService::class);
+        $medicines->each(fn (Medicine $medicine) => $medicine->setAttribute('billing_readiness', $readiness->inspect($medicine, $this->visit)));
+
         return view('livewire.opd.consultation', [
             'labTests' => LaboratoryTest::query()->forCurrentFacility()->with(['service', 'category', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get(),
             'labServices' => Service::query()->forCurrentFacility()->where('service_type', 'laboratory_test')->where('is_active', true)->get(),
             'procedureServices' => Service::query()->forCurrentFacility()->where('service_type', 'procedure')->where('is_active', true)->get(),
-            'medicines' => Medicine::query()->forCurrentFacility()->with(['generic', 'dosageForm', 'route'])->where('is_active', true)->when(strlen($this->medicineSearch) >= 2, fn ($query) => $query->where(fn ($q) => $q->where('name', 'like', '%'.$this->medicineSearch.'%')->orWhere('brand_name', 'like', '%'.$this->medicineSearch.'%')->orWhereHas('generic', fn ($g) => $g->where('name', 'like', '%'.$this->medicineSearch.'%'))))->orderBy('name')->limit(50)->get(),
+            'medicines' => $medicines,
             'admissionConfigured' => Department::query()->forCurrentFacility()->where('code', 'BED')->where('is_active', true)->where('can_receive_patients', true)->where('queue_enabled', true)->exists(),
             'canViewLaboratoryResults' => $canViewLaboratoryResults,
         ])->layout('components.layouts.app', ['title' => 'OPD Consultation', 'description' => $this->visit->patient->fullName().' - '.$this->visit->visit_number]);

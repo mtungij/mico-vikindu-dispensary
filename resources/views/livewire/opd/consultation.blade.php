@@ -220,9 +220,13 @@
                         <div class="grid gap-3 md:grid-cols-2">
                             @if($medicines->isNotEmpty())
                                 <x-text-input wire:model.live.debounce.300ms="medicineSearch" placeholder="Search medicine..." />
-                                <x-select-input wire:model="prescriptionItemForm.medicine_id"><option value="">Select medicine</option>@foreach($medicines as $medicine)<option value="{{ $medicine->id }}">{{ $medicine->name }} {{ $medicine->strength ? '· '.$medicine->strength : '' }}</option>@endforeach</x-select-input>
+                                <div>
+                                    <x-select-input wire:model="prescriptionItemForm.medicine_id" class="w-full"><option value="">Select medicine</option>@foreach($medicines as $medicine)<option value="{{ $medicine->id }}" @disabled(! $medicine->billing_readiness['ready'])>{{ $medicine->name }} {{ $medicine->strength ? '· '.$medicine->strength : '' }} — {{ $medicine->billing_readiness['label'] }}</option>@endforeach</x-select-input>
+                                    <x-input-error :messages="$errors->get('prescriptionItemForm.medicine_id')" class="mt-1" />
+                                    <p class="mt-1 text-xs text-slate-500">Unavailable medicines remain visible so Billing/Administrator can correct their configuration.</p>
+                                </div>
                             @else
-                                <x-text-input wire:model="prescriptionItemForm.medication_name" placeholder="Medicine" />
+                                <div class="md:col-span-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">No medicine is configured for this facility. Contact Pharmacy/Administrator to configure a medicine, billing service, and price.<x-input-error :messages="$errors->get('prescriptionItemForm.medicine_id')" class="mt-1" /></div>
                             @endif
                             <x-text-input wire:model="prescriptionItemForm.dose" placeholder="Dose" />
                             <x-text-input wire:model="prescriptionItemForm.frequency" placeholder="Frequency" />

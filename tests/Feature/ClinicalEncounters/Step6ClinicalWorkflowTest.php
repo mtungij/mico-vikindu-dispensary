@@ -73,6 +73,145 @@ class Step6ClinicalWorkflowTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_medicine_without_billing_service_is_rejected_before_draft_persistence(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $medicine->update(['service_id' => null]);
+
+        Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee('Billing service not configured')
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose', '1 tablet')
+            ->set('prescriptionItemForm.frequency', 'OD')
+            ->set('prescriptionItemForm.duration_value', '3')
+            ->call('addPrescription')
+            ->assertHasErrors(['prescriptionItemForm.medicine_id'])
+            ->assertSet('prescriptionItemForm.dose', '1 tablet')
+            ->assertSet('prescriptionItemForm.medicine_id', $medicine->id);
+
+        $this->assertDatabaseCount('prescriptions', 0);
+        $this->assertDatabaseCount('prescription_items', 0);
+        $this->assertDatabaseCount('invoice_items', 0);
+    }
+
+    public function test_medicine_with_no_active_or_inactive_price_is_rejected_before_add(): void
+    {
+        $admin = $this->bootstrappedFacility();
+
+        foreach ([
+            'missing' => [],
+            'inactive' => ['is_active' => false],
+            'future' => ['is_active' => true, 'effective_from' => today()->addDay()],
+            'expired' => ['is_active' => true, 'effective_to' => today()->subDay()],
+        ] as $case => $priceOverrides) {
+            $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+            $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+            $medicine = $this->medicine($admin);
+            $service = $medicine->service;
+            $service->update(['requires_payment' => true]);
+            if ($priceOverrides !== []) {
+                ServicePrice::query()->create(['facility_id' => currentFacility()->id, 'service_id' => $service->id, 'payer_type' => 'cash', 'amount' => 100, 'currency' => 'TZS', 'created_by' => $admin->id, ...$priceOverrides]);
+            }
+
+            try {
+                app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                    'medicine_id' => $medicine->id, 'dose' => '1 tablet', 'frequency' => 'OD',
+                    'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 3,
+                ]]], $admin);
+                $this->fail("{$case} price was accepted.");
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('medicine_id', $exception->errors());
+                $expected = match ($case) {
+                    'missing' => 'no active cash billing price',
+                    'inactive' => 'billing price is inactive',
+                    'future' => 'billing price is not yet effective',
+                    'expired' => 'billing price has expired',
+                };
+                $this->assertStringContainsString($expected, $exception->errors()['medicine_id'][0]);
+            }
+        }
+
+        $this->assertDatabaseCount('prescriptions', 0);
+        $this->assertDatabaseCount('prescription_items', 0);
+    }
+
+    public function test_wrong_facility_price_is_rejected_before_add(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $medicine->service->update(['requires_payment' => true]);
+        $otherFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
+        ServicePrice::query()->create(['facility_id' => $otherFacility->id, 'service_id' => $medicine->service_id, 'payer_type' => 'cash', 'amount' => 100, 'currency' => 'TZS', 'is_active' => true, 'created_by' => $admin->id]);
+
+        $this->expectException(ValidationException::class);
+        $this->expectExceptionMessage('price is configured for another facility');
+        app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'dose' => '1 tablet', 'frequency' => 'OD',
+            'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 3,
+        ]]], $admin);
+    }
+
+    public function test_editing_to_unbillable_medicine_keeps_original_item_id_and_values(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $valid = $this->medicine($admin);
+        $invalid = $this->medicine($admin);
+        $invalid->update(['service_id' => null, 'name' => 'Unconfigured medicine']);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $valid->id, 'dose' => '1 tablet', 'frequency' => 'OD',
+            'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 3,
+        ]]], $admin);
+        $item = $prescription->items()->sole();
+
+        Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('editPrescriptionItem', $item->id)
+            ->set('prescriptionItemForm.medicine_id', $invalid->id)
+            ->call('updatePrescriptionItem')
+            ->assertHasErrors(['prescriptionItemForm.medicine_id'])
+            ->assertSet('editingPrescriptionItemId', $item->id);
+
+        $this->assertSame($valid->id, $item->refresh()->medicine_id);
+        $this->assertSame(1, $prescription->items()->count());
+        $this->assertDatabaseCount('invoice_items', 0);
+    }
+
+    public function test_price_disabled_after_add_causes_atomic_completion_failure(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
+        $service = $this->service('Race condition medicine', 'MED-RACE', 'medicine', $admin);
+        $medicine->update(['service_id' => $service->id]);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'dose' => '1 tablet', 'frequency' => 'OD',
+            'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 3,
+        ]]], $admin);
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        $service->prices()->where('payer_type', 'cash')->update(['is_active' => false]);
+
+        try {
+            app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+            $this->fail('Completion accepted a medicine whose price was disabled after draft entry.');
+        } catch (ValidationException $exception) {
+            $this->assertStringContainsString('billing price is inactive', $exception->errors()['prescription'][0]);
+        }
+
+        $this->assertSame('in_progress', $encounter->refresh()->status->value);
+        $this->assertSame('draft', $prescription->refresh()->status->value);
+        $this->assertNull($prescription->items()->sole()->invoice_item_id);
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->count());
+    }
+
     public function test_medicine_quantity_defaults_to_one_and_invalid_values_never_persist_from_livewire(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -127,8 +266,9 @@ class Step6ClinicalWorkflowTest extends TestCase
         $admin = $this->bootstrappedFacility();
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
         $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
-            'medication_name' => 'Legacy medicine', 'dose' => '1 tablet', 'frequency' => 'OD',
+            'medicine_id' => $medicine->id, 'medication_name' => 'Legacy medicine', 'dose' => '1 tablet', 'frequency' => 'OD',
             'duration_value' => 2, 'duration_unit' => 'days', 'quantity' => 2,
         ]]], $admin);
         $item = $prescription->items()->firstOrFail();
@@ -249,8 +389,9 @@ class Step6ClinicalWorkflowTest extends TestCase
             $clinician = $this->staffUser($roleName);
             $visit = $this->opdVisit($admin, VisitStatus::InProgress);
             $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $clinician);
+            $medicine = $this->medicine($admin);
             $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
-                'medication_name' => 'Draft medicine '.$index, 'dose' => '1 tablet', 'frequency' => 'BD', 'duration_value' => 3, 'duration_unit' => 'days',
+                'medicine_id' => $medicine->id, 'medication_name' => 'Draft medicine '.$index, 'dose' => '1 tablet', 'frequency' => 'BD', 'duration_value' => 3, 'duration_unit' => 'days',
             ]]], $clinician);
             $item = $prescription->items()->firstOrFail();
 
@@ -273,8 +414,9 @@ class Step6ClinicalWorkflowTest extends TestCase
         $doctor = $this->staffUser('doctor');
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $medicine = $this->medicine($admin);
         $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
-            'medication_name' => 'Protected draft', 'dose' => '1 tablet', 'frequency' => 'OD', 'duration_value' => 2, 'duration_unit' => 'days',
+            'medicine_id' => $medicine->id, 'medication_name' => 'Protected draft', 'dose' => '1 tablet', 'frequency' => 'OD', 'duration_value' => 2, 'duration_unit' => 'days',
         ]]], $doctor);
 
         foreach (['receptionist', 'cashier', 'pharmacist'] as $roleName) {
@@ -288,14 +430,15 @@ class Step6ClinicalWorkflowTest extends TestCase
         $admin = $this->bootstrappedFacility();
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
         $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
-            'medication_name' => 'Paracetamol', 'dose' => '1 tablet', 'frequency' => 'TDS',
+            'medicine_id' => $medicine->id, 'medication_name' => 'Paracetamol', 'dose' => '1 tablet', 'frequency' => 'TDS',
             'duration_value' => 5, 'duration_unit' => 'days',
         ]]], $admin);
         $item = $prescription->items()->firstOrFail();
 
         app(PrescriptionService::class)->updateItem($item, [
-            'medication_name' => 'Paracetamol', 'dose' => '2 tablets', 'frequency' => 'BD',
+            'medicine_id' => $medicine->id, 'medication_name' => 'Paracetamol', 'dose' => '2 tablets', 'frequency' => 'BD',
             'duration_value' => 3, 'duration_unit' => 'days', 'instructions' => 'After food',
         ], $admin);
 
@@ -316,7 +459,10 @@ class Step6ClinicalWorkflowTest extends TestCase
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
 
         foreach (['Paracetamol', 'Amoxicillin', 'Cetirizine'] as $medicineName) {
+            $medicine = $this->medicine($admin);
+            $medicine->update(['name' => $medicineName]);
             app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                'medicine_id' => $medicine->id,
                 'medication_name' => $medicineName,
                 'dose' => '1 tablet',
                 'frequency' => 'OD',
@@ -353,6 +499,8 @@ class Step6ClinicalWorkflowTest extends TestCase
         $prescription = $encounter->prescriptions()->sole();
         $itemIds = $prescription->items()->pluck('id');
         $this->assertCount(3, $itemIds);
+        $this->assertDatabaseCount('invoice_items', 0);
+        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->count());
         $this->prepareEncounterForCompletion($encounter, $admin);
 
         Livewire::actingAs($admin)
@@ -365,6 +513,9 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->assertSame('completed', $completed->status->value);
         $this->assertSame('prescribed', $prescription->refresh()->status->value);
         $this->assertSame(3, PrescriptionItem::query()->whereKey($itemIds)->whereNotNull('invoice_item_id')->count());
+        $this->assertSame(3, InvoiceItem::query()->where('reference_type', PrescriptionItem::class)->whereIn('reference_id', $itemIds)->count());
+
+        app(ClinicalEncounterService::class)->completeEncounter($completed->refresh(), $admin);
         $this->assertSame(3, InvoiceItem::query()->where('reference_type', PrescriptionItem::class)->whereIn('reference_id', $itemIds)->count());
     }
 
@@ -446,14 +597,15 @@ class Step6ClinicalWorkflowTest extends TestCase
         $admin = $this->bootstrappedFacility();
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $medicine = $this->medicine($admin);
         $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
-            'medication_name' => 'Amoxicillin', 'dose' => '1 capsule', 'frequency' => 'TDS', 'duration_value' => 5, 'duration_unit' => 'days',
+            'medicine_id' => $medicine->id, 'medication_name' => 'Amoxicillin', 'dose' => '1 capsule', 'frequency' => 'TDS', 'duration_value' => 5, 'duration_unit' => 'days',
         ]]], $admin);
         $prescription->update(['status' => 'partially_dispensed']);
 
         $this->expectException(ValidationException::class);
         app(PrescriptionService::class)->updateItem($prescription->items()->firstOrFail(), [
-            'medication_name' => 'Amoxicillin', 'dose' => '2 capsules', 'frequency' => 'TDS', 'duration_value' => 5, 'duration_unit' => 'days',
+            'medicine_id' => $medicine->id, 'medication_name' => 'Amoxicillin', 'dose' => '2 capsules', 'frequency' => 'TDS', 'duration_value' => 5, 'duration_unit' => 'days',
         ], $admin);
     }
 
@@ -643,10 +795,11 @@ class Step6ClinicalWorkflowTest extends TestCase
         $admin = $this->bootstrappedFacility();
         $doctor = $this->staffUser('clinical-officer');
         $visit = $this->opdVisit($admin);
+        $medicine = $this->medicine($admin);
 
         $component = Livewire::actingAs($doctor)
             ->test(OpdConsultation::class, ['visit' => $visit])
-            ->set('prescriptionItemForm.medication_name', 'Paracetamol')
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
             ->set('prescriptionItemForm.dose', '500 mg')
             ->set('prescriptionItemForm.frequency', 'TDS')
             ->set('prescriptionItemForm.duration_value', '3')
@@ -2020,8 +2173,10 @@ class Step6ClinicalWorkflowTest extends TestCase
         $labService = $this->service('Malaria Test', 'LAB-STATUS', 'laboratory_test', $admin);
         $labOrder = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$labService->id]], $admin);
         $labOrder->items()->update(['result_status' => 'verified']);
+        $medicine = $this->medicine($admin);
         app(ClinicalEncounterService::class)->addPrescription($encounter, [
             'items' => [[
+                'medicine_id' => $medicine->id,
                 'medication_name' => 'Paracetamol',
                 'strength' => '500 mg',
                 'dose' => '500mg',
@@ -2129,9 +2284,12 @@ class Step6ClinicalWorkflowTest extends TestCase
         $labOrder = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$labService->id]], $admin);
         $labOrder->items()->update(['status' => 'completed', 'result_status' => 'released']);
         $labOrder->update(['status' => 'completed', 'payment_status' => 'paid', 'completed_at' => now()]);
+        PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'LAB'))->update(['queue_status' => 'completed', 'service_completed_at' => now()]);
         $visit->invoice()->update(['balance_amount' => 0, 'payment_status' => 'paid', 'invoice_status' => 'paid']);
+        $medicine = $this->medicine($admin);
         $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter, [
             'items' => [[
+                'medicine_id' => $medicine->id,
                 'medication_name' => 'Completed medicine',
                 'dose' => '1',
                 'frequency' => 'OD',
@@ -2527,7 +2685,8 @@ class Step6ClinicalWorkflowTest extends TestCase
         $clinical = app(ClinicalEncounterService::class);
 
         $lab = $clinical->addLabOrder($encounter->refresh(), ['service_ids' => [$labService->id], 'clinical_notes' => 'Rule out malaria'], $admin);
-        $rx = $clinical->addPrescription($encounter->refresh(), ['items' => [['medication_name' => 'Paracetamol', 'dose' => '500mg', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days']]], $admin);
+        $medicine = $this->medicine($admin);
+        $rx = $clinical->addPrescription($encounter->refresh(), ['items' => [['medicine_id' => $medicine->id, 'medication_name' => 'Paracetamol', 'dose' => '500mg', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days']]], $admin);
         $proc = $clinical->addProcedureOrder($encounter->refresh(), ['service_id' => $procedure->id, 'procedure_name_snapshot' => 'Dressing'], $admin);
         $appt = $clinical->createFollowUp($encounter->refresh(), ['scheduled_start' => now()->addDay()->format('Y-m-d H:i:s'), 'department_id' => $encounter->department_id], $admin);
         $ref = $clinical->createReferral($encounter->refresh(), ['destination_facility_name' => 'Regional Hospital', 'reason' => 'Specialist review', 'urgency' => 'urgent'], $admin);

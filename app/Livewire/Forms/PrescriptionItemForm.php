@@ -36,7 +36,7 @@ class PrescriptionItemForm extends Form
 
     public function rules(): array
     {
-        return ['medicine_id' => ['nullable', 'integer'], 'medication_name' => ['required_without:medicine_id', 'nullable', 'string', 'max:255'], 'dose' => ['required'], 'frequency' => ['required'], 'duration_value' => ['required', 'integer', 'min:1'], 'duration_unit' => ['required'], 'quantity' => ['required', 'numeric', 'min:1']];
+        return ['medicine_id' => ['required', 'integer'], 'medication_name' => ['nullable', 'string', 'max:255'], 'dose' => ['required'], 'frequency' => ['required'], 'duration_value' => ['required', 'integer', 'min:1'], 'duration_unit' => ['required'], 'quantity' => ['required', 'numeric', 'min:1']];
     }
 
     public function messages(): array

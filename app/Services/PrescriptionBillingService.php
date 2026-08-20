@@ -22,9 +22,9 @@ class PrescriptionBillingService
         private readonly BillingChargeService $charges,
         private readonly InvoiceStatusService $statuses,
         private readonly WorkflowService $workflow,
-        private readonly ServicePricingService $pricing,
         private readonly InsuranceCoverageService $coverage,
         private readonly VisitClosureService $visitClosure,
+        private readonly MedicineBillingReadinessService $billingReadiness,
     ) {}
 
     public function bill(Prescription $prescription, $actor): Prescription
@@ -49,26 +49,16 @@ class PrescriptionBillingService
                 if ((float) $item->quantity <= 0) {
                     throw ValidationException::withMessages(['prescription' => 'Every prescribed medicine must have a quantity greater than zero.']);
                 }
-                if (! $item->medicine || ! $item->medicine->is_active) {
+                if (! $item->medicine) {
                     throw ValidationException::withMessages(['prescription' => "{$item->medication_name} is not linked to an active medicine."]);
                 }
-                if (! $item->medicine->service || ! $item->medicine->service->is_active) {
-                    throw ValidationException::withMessages([
-                        'prescription' => "Medicine {$item->medication_name} has no active billing service or price.",
-                    ]);
-                }
-
-                $price = $this->pricing->getCurrentPrice(
-                    $item->medicine->service,
-                    $invoice->payer_type,
-                    $invoice->insurance_provider_id ?? $invoice->patientPayerProfile?->insurance_provider_id,
-                    $invoice->corporate_account_id ?? $invoice->patientPayerProfile?->corporate_account_id,
+                $readiness = $this->billingReadiness->assertReady(
+                    $item->medicine,
+                    $prescription->visit,
+                    $invoice,
+                    'prescription',
                 );
-                if (! $price && $item->medicine->service->requires_payment) {
-                    throw ValidationException::withMessages([
-                        'prescription' => "Medicine {$item->medication_name} has no active billing service or price.",
-                    ]);
-                }
+                $price = $readiness['price'];
 
                 [$payerSplit, $coverageAttributes] = $this->medicinePayerSplit(
                     $prescription,

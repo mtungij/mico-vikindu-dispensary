@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\PrescriptionStatus;
 use App\Models\ActivityLog;
 use App\Models\ClinicalEncounter;
+use App\Models\Medicine;
 use App\Models\Prescription;
 use App\Models\PrescriptionItem;
 use Illuminate\Support\Facades\DB;
@@ -17,6 +18,7 @@ class PrescriptionService
         private readonly SequenceNumberService $numbers,
         private readonly VisitClosureService $visitClosure,
         private readonly PrescriptionBillingService $billing,
+        private readonly MedicineBillingReadinessService $billingReadiness,
     ) {}
 
     public function generatePrescriptionNumber(int $facilityId): string
@@ -75,6 +77,7 @@ class PrescriptionService
     public function addItem(Prescription $prescription, array $data, $actor): void
     {
         $this->authorizeDraftMutation($prescription, $actor);
+        $data = $this->prepareMedicineData($prescription, $data);
         $data = $this->withCalculatedQuantity($data);
         validator($data, $this->itemRules(), $this->itemMessages())->validate();
         $prescription->items()->create([...$data, 'status' => 'prescribed', 'created_by' => $actor->id]);
@@ -85,6 +88,7 @@ class PrescriptionService
         return DB::transaction(function () use ($item, $data, $actor): PrescriptionItem {
             $item = PrescriptionItem::query()->with('prescription')->lockForUpdate()->findOrFail($item->id);
             $this->authorizeDraftMutation($item->prescription, $actor);
+            $data = $this->prepareMedicineData($item->prescription, $data);
             $data = $this->withCalculatedQuantity($data);
             validator($data, $this->itemRules(), $this->itemMessages())->validate();
             $old = $item->only(array_keys($data));
@@ -185,9 +189,41 @@ class PrescriptionService
         return $data;
     }
 
+    private function prepareMedicineData(Prescription $prescription, array $data): array
+    {
+        if (empty($data['medicine_id'])) {
+            return $data;
+        }
+
+        $prescription->loadMissing('visit.invoice.patientPayerProfile', 'visit.payerProfile');
+        $medicine = Medicine::withTrashed()
+            ->with(['service', 'generic', 'dosageForm', 'route'])
+            ->where('facility_id', $prescription->facility_id)
+            ->find($data['medicine_id']);
+        if (! $medicine) {
+            throw ValidationException::withMessages([
+                'medicine_id' => 'Selected medicine is not available at this facility. Contact Pharmacy/Administrator.',
+            ]);
+        }
+
+        $this->billingReadiness->assertReady($medicine, $prescription->visit);
+
+        return [
+            ...$data,
+            'medicine_id' => $medicine->id,
+            'service_id' => $medicine->service_id,
+            'medication_name' => $medicine->name,
+            'generic_name' => $medicine->generic?->name,
+            'strength' => $medicine->strength,
+            'dosage_form' => $medicine->dosageForm?->name,
+            'route' => $data['route'] ?? $medicine->route?->name,
+        ];
+    }
+
     private function itemRules(): array
     {
         return [
+            'medicine_id' => ['required', 'integer'],
             'medication_name' => ['required'],
             'dose' => ['required'],
             'frequency' => ['required'],

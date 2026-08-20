@@ -5,11 +5,20 @@ namespace App\Services;
 use App\Enums\PayerType;
 use App\Models\Service;
 use App\Models\ServicePrice;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Validation\ValidationException;
 
 class ServicePricingService
 {
     public function getCurrentPrice(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): ?ServicePrice
+    {
+        return $this->currentPriceQuery($service, $payerType, $insuranceProviderId, $corporateAccountId)
+            ->latest('effective_from')
+            ->latest()
+            ->first();
+    }
+
+    public function currentPriceQuery(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): Builder
     {
         return ServicePrice::query()
             ->where('facility_id', $service->facility_id)
@@ -19,10 +28,7 @@ class ServicePricingService
             ->when($payerType === PayerType::Corporate, fn ($q) => $q->where('corporate_account_id', $corporateAccountId))
             ->where('is_active', true)
             ->where(fn ($q) => $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', today()))
-            ->where(fn ($q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', today()))
-            ->latest('effective_from')
-            ->latest()
-            ->first();
+            ->where(fn ($q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', today()));
     }
 
     public function resolvePriceForPatient(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): string
@@ -69,6 +75,13 @@ class ServicePricingService
             ->update(['is_active' => false, 'effective_to' => today()]);
     }
 
-    public function getPriceHistory(Service $service) { return $service->prices()->latest()->get(); }
-    public function formatMoney(string|float|int $amount, string $currency = 'TZS'): string { return $currency.' '.number_format((float) $amount, 2); }
+    public function getPriceHistory(Service $service)
+    {
+        return $service->prices()->latest()->get();
+    }
+
+    public function formatMoney(string|float|int $amount, string $currency = 'TZS'): string
+    {
+        return $currency.' '.number_format((float) $amount, 2);
+    }
 }

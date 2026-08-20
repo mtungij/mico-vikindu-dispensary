@@ -57,26 +57,29 @@ class MedicineBillingSetupService
     /** @return array{classification: string, risk: string, proposed_action: string, proposed_cash_price: ?float, confidence: string} */
     public function classifyForBulk(Medicine $medicine, bool $referencePriceApproved = false): array
     {
-        $medicine->loadMissing('service');
+        $mappedService = $medicine->service_id
+            ? Service::withTrashed()->find($medicine->service_id)
+            : null;
         $referencePrice = is_numeric($medicine->default_dispensing_price) ? (float) $medicine->default_dispensing_price : null;
         $approvedPrice = $referencePriceApproved && $referencePrice !== null && $referencePrice > 0 ? $referencePrice : null;
         if (! $medicine->is_active || $medicine->trashed()) {
             return $this->classification('ambiguous_configuration', 'manual_review', 'Inactive/historical medicine; no automatic changes.', null);
         }
 
-        if ($medicine->service) {
+        if ($medicine->service_id && (! $mappedService || ! $this->isSystemManaged($medicine, $mappedService))) {
+            return $this->classification(
+                'historical_custom_mapping',
+                'manual_review',
+                'Existing historical/custom Billing Service mapping is preserved; do not restore or replace it automatically.',
+                null,
+            );
+        }
+
+        if ($mappedService) {
+            $medicine->setRelation('service', $mappedService);
             $result = $this->readiness->inspectForPayer($medicine, $medicine->facility_id, PayerType::Cash);
             if ($result['ready']) {
                 return $this->classification('already_ready', 'none', 'No action.', (float) ($result['price']?->amount ?? 0), 'authoritative_service_price');
-            }
-
-            if (! $this->isSystemManaged($medicine)) {
-                return $this->classification(
-                    $result['code'] === 'conflicting_prices' ? 'conflicting_prices' : 'ambiguous_configuration',
-                    'manual_review',
-                    'Existing custom Billing Service mapping is preserved and requires manual price review.',
-                    null,
-                );
             }
 
             return match ($result['code']) {
@@ -92,15 +95,14 @@ class MedicineBillingSetupService
         if ($referencePrice !== null && $referencePrice <= 0) {
             return $this->classification('invalid_reference_price', 'manual_review', 'Reference price is zero/negative; configure cash price manually.', null);
         }
-        $candidates = $this->serviceCandidates($medicine);
-        if ($candidates->count() > 1) {
-            return $this->classification('ambiguous_configuration', 'manual_review', 'Multiple possible billing services exist; select one manually.', null);
+
+        if ($this->hasDeterministicMedicineCollision($medicine)) {
+            return $this->classification('ambiguous_configuration', 'manual_review', 'Another medicine resolves to the same deterministic Billing Service name or code; review all colliding medicines manually.', null);
         }
-        if ($candidate = $candidates->first()) {
-            $linkedElsewhere = Medicine::query()->where('service_id', $candidate->id)->whereKeyNot($medicine->id)->exists();
-            if ($candidate->trashed() || ! $candidate->is_active || $candidate->service_type !== ServiceType::Medicine || $linkedElsewhere) {
-                return $this->classification('ambiguous_configuration', 'manual_review', 'Matching service is inactive, incompatible, or already linked; review manually.', null);
-            }
+
+        $candidates = $this->serviceCandidates($medicine);
+        if ($candidates->isNotEmpty()) {
+            return $this->classification('ambiguous_configuration', 'manual_review', 'An active or historical Billing Service already uses the proposed name or code; review manually.', null);
         }
 
         return $approvedPrice !== null
@@ -219,6 +221,23 @@ class MedicineBillingSetupService
                 ->where('code', $this->managedCode($medicine))
                 ->orWhere('name', str($medicine->name)->limit(120, '')->toString()))
             ->get();
+    }
+
+    private function hasDeterministicMedicineCollision(Medicine $medicine): bool
+    {
+        $proposedName = str(str($medicine->name)->limit(120, '')->toString())->lower()->toString();
+        $proposedCode = str($this->managedCode($medicine))->lower()->toString();
+
+        return Medicine::withTrashed()
+            ->where('facility_id', $medicine->facility_id)
+            ->whereKeyNot($medicine->id)
+            ->get(['id', 'name', 'code'])
+            ->contains(function (Medicine $other) use ($proposedName, $proposedCode): bool {
+                $otherName = str(str($other->name)->limit(120, '')->toString())->lower()->toString();
+                $otherCode = str($this->managedCode($other))->lower()->toString();
+
+                return $otherName === $proposedName || $otherCode === $proposedCode;
+            });
     }
 
     private function marker(Medicine $medicine): string

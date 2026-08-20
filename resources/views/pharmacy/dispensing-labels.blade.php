@@ -71,16 +71,6 @@
             </x-card>
         </div>
 
-        <div class="space-y-4 xl:sticky xl:top-24 xl:self-start">
-            <div>
-                <p class="text-sm font-semibold text-slate-950 dark:text-white">Label Preview</p>
-                <p class="text-xs text-slate-500 dark:text-slate-400">Each medicine prints as a separate pharmacy label.</p>
-            </div>
-            <div class="space-y-4">
-                @foreach ($dispensing->items as $item)
-                    @include('pharmacy.partials.dispensing-label', ['dispensing' => $dispensing, 'item' => $item, 'preview' => true])
-                @endforeach
-            </div>
-        </div>
+        
     </div>
 </x-layouts.app>

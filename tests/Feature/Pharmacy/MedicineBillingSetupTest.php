@@ -168,6 +168,51 @@ class MedicineBillingSetupTest extends TestCase
         $this->assertNull($foreign->refresh()->service_id);
     }
 
+    public function test_bulk_classifier_blocks_medicine_and_service_collisions(): void
+    {
+        $this->bootstrappedFacility();
+        $unit = MedicineUnit::query()->forCurrentFacility()->firstOrFail();
+        $category = ServiceCategory::query()->where('code', 'PHA')->firstOrFail();
+        $setup = app(MedicineBillingSetupService::class);
+
+        $duplicateA = $this->legacyMedicine($unit, 'Duplicate Medicine', 'DUP-A', 100);
+        $duplicateB = $this->legacyMedicine($unit, 'duplicate medicine', 'DUP-B', 100);
+        $codeCollisionA = $this->legacyMedicine($unit, 'Code Collision A', 'SAME CODE', 100);
+        $codeCollisionB = $this->legacyMedicine($unit, 'Code Collision B', 'SAME-CODE', 100);
+        $activeServiceCollision = $this->legacyMedicine($unit, 'Active Service Collision', 'ACTIVE-SVC', 100);
+        $deletedServiceCollision = $this->legacyMedicine($unit, 'Deleted Service Collision', 'DELETED-SVC', 100);
+
+        Service::query()->create(['facility_id' => currentFacility()->id, 'service_category_id' => $category->id, 'name' => $activeServiceCollision->name, 'code' => 'UNRELATED-ACTIVE', 'service_type' => 'medicine', 'requires_payment' => true, 'is_active' => true]);
+        $deletedService = Service::query()->create(['facility_id' => currentFacility()->id, 'service_category_id' => $category->id, 'name' => 'Unrelated historical name', 'code' => $setup->managedCode($deletedServiceCollision), 'service_type' => 'medicine', 'requires_payment' => true, 'is_active' => false]);
+        $deletedService->delete();
+
+        foreach ([$duplicateA, $duplicateB, $codeCollisionA, $codeCollisionB, $activeServiceCollision, $deletedServiceCollision] as $medicine) {
+            $classification = $setup->classifyForBulk($medicine, true);
+
+            $this->assertSame('ambiguous_configuration', $classification['classification']);
+            $this->assertSame('manual_review', $classification['risk']);
+            $this->assertNull($classification['proposed_cash_price']);
+        }
+    }
+
+    public function test_bulk_classifier_preserves_soft_deleted_historical_custom_mapping(): void
+    {
+        $this->bootstrappedFacility();
+        $unit = MedicineUnit::query()->forCurrentFacility()->firstOrFail();
+        $category = ServiceCategory::query()->where('code', 'PHA')->firstOrFail();
+        $medicine = $this->legacyMedicine($unit, 'Paracetamol', 'PARA', 100);
+        $service = Service::query()->create(['facility_id' => currentFacility()->id, 'service_category_id' => $category->id, 'name' => 'Historical Paracetamol', 'code' => 'HIST-PARA', 'service_type' => 'medicine', 'requires_payment' => true, 'is_active' => true]);
+        $medicine->update(['service_id' => $service->id]);
+        $service->delete();
+
+        $classification = app(MedicineBillingSetupService::class)->classifyForBulk($medicine->refresh(), true);
+
+        $this->assertSame('historical_custom_mapping', $classification['classification']);
+        $this->assertSame('manual_review', $classification['risk']);
+        $this->assertNull($classification['proposed_cash_price']);
+        $this->assertSame($service->id, $medicine->refresh()->service_id);
+    }
+
     private function bootstrappedFacility(): User
     {
         $admin = User::factory()->superAdmin()->create(['email' => fake()->unique()->safeEmail()]);

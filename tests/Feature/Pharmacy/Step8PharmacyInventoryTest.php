@@ -22,6 +22,7 @@ use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
 use App\Models\StockLocation;
+use App\Models\StockMovement;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Visit;
@@ -39,6 +40,7 @@ use Database\Seeders\PermissionSeeder;
 use Database\Seeders\ServiceCategorySeeder;
 use Database\Seeders\StockLocationSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -150,6 +152,7 @@ class Step8PharmacyInventoryTest extends TestCase
         [$medicine, $supplier, $location] = $this->catalog();
         $this->receiveBatch($admin, $medicine, $supplier, $location, 'LABEL-FULL', today()->addYear()->toDateString(), 20);
         $prescription = $this->prescription($admin, $medicine, 7);
+        $prescription->patient->update(['first_name' => 'Emmanuel', 'middle_name' => null, 'last_name' => 'Michael', 'patient_number' => 'PAT-2026-000049', 'passport_photo_path' => null]);
         $prescription->items()->firstOrFail()->update([
             'dose' => '1 tablet',
             'frequency' => 'Once daily',
@@ -165,18 +168,62 @@ class Step8PharmacyInventoryTest extends TestCase
             'quantity' => 7,
         ]], $location, $admin);
 
+        $readOnlyFingerprint = json_encode([
+            'stock_quantity' => (string) MedicineBatch::query()->sum('available_quantity'),
+            'stock_movements' => StockMovement::query()->count(),
+            'payments' => DB::table('payments')->count(),
+            'invoice' => $prescription->visit->invoice->only(['subtotal', 'total_amount', 'paid_amount', 'balance_amount', 'updated_at']),
+            'prescription_item' => $prescription->items()->sole()->only(['quantity', 'dispensed_quantity', 'remaining_quantity', 'updated_at']),
+            'dispensing' => $dispensing->only(['status', 'payment_status', 'dispensed_at', 'updated_at']),
+        ]);
         $response = $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing));
 
         $response->assertOk()
+            ->assertSeeText('Dispensing Medicine Labels')
+            ->assertSeeText('Management System')
+            ->assertSeeText('Tafuta kwenye mfumo')
+            ->assertSeeText('Patient Information')
+            ->assertSeeText('Emmanuel Michael')
+            ->assertSeeText('PAT-2026-000049')
+            ->assertSee('data-testid="patient-initials"', false)
+            ->assertSeeText('Dispensing Information')
+            ->assertSeeText($location->name)
+            ->assertSeeText('Medicine List')
+            ->assertSeeText('Label Preview')
+            ->assertSeeText('Print Medicine Label')
+            ->assertSeeText('Print All Labels')
             ->assertSeeText('Qty: 7')
-            ->assertSeeText('Dose: 1 tablet')
-            ->assertSeeText('Frequency: Once daily')
-            ->assertSeeText('Duration: 7 days')
-            ->assertSeeText('Route: Oral')
-            ->assertSeeText('Instructions: Take after food')
+            ->assertSeeText('Take:')
+            ->assertSeeText('1 tablet')
+            ->assertSeeText('Frequency:')
+            ->assertSeeText('Once daily')
+            ->assertSeeText('Duration:')
+            ->assertSeeText('7 days')
+            ->assertSeeText('Route:')
+            ->assertSeeText('Oral')
+            ->assertSeeText('Instructions:')
+            ->assertSeeText('Take after food');
+
+        $item = $dispensing->items()->sole();
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.item.print', [$dispensing, $item]))
+            ->assertOk()
+            ->assertSeeText('Print Medicine Label')
+            ->assertSeeText('Quantity:')
+            ->assertSeeText('7')
+            ->assertSeeText('Emmanuel Michael')
             ->assertSee('page-break-inside: avoid', false)
-            ->assertSee('.no-print { display: none; }', false);
-        $this->assertSame(7.0, (float) $dispensing->items()->sole()->dispensed_quantity);
+            ->assertSee('.no-print { display: none !important; }', false)
+            ->assertDontSeeText('Management System')
+            ->assertDontSeeText('Patient Information');
+        $this->assertSame(7.0, (float) $item->dispensed_quantity);
+        $this->assertSame($readOnlyFingerprint, json_encode([
+            'stock_quantity' => (string) MedicineBatch::query()->sum('available_quantity'),
+            'stock_movements' => StockMovement::query()->count(),
+            'payments' => DB::table('payments')->count(),
+            'invoice' => $prescription->visit->invoice->fresh()->only(['subtotal', 'total_amount', 'paid_amount', 'balance_amount', 'updated_at']),
+            'prescription_item' => $prescription->items()->sole()->fresh()->only(['quantity', 'dispensed_quantity', 'remaining_quantity', 'updated_at']),
+            'dispensing' => $dispensing->fresh()->only(['status', 'payment_status', 'dispensed_at', 'updated_at']),
+        ]));
     }
 
     public function test_partial_dispensing_labels_each_print_only_that_event_quantity_and_immutable_instructions(): void
@@ -202,17 +249,21 @@ class Step8PharmacyInventoryTest extends TestCase
             'quantity' => 6,
         ]], $location, $admin);
 
-        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $first))
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.item.print', [$first, $first->items()->sole()]))
             ->assertOk()
-            ->assertSeeText('Qty: 4')
-            ->assertDontSeeText('Qty: 10')
-            ->assertSeeText('Instructions: Take after food')
+            ->assertSeeText('Quantity:')
+            ->assertSeeText('4')
+            ->assertDontSee('font-extrabold">10</dd>', false)
+            ->assertSeeText('Instructions:')
+            ->assertSeeText('Take after food')
             ->assertDontSeeText('Changed after first dispensing');
-        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $second))
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.item.print', [$second, $second->items()->sole()]))
             ->assertOk()
-            ->assertSeeText('Qty: 6')
-            ->assertDontSeeText('Qty: 10')
-            ->assertSeeText('Instructions: Changed after first dispensing');
+            ->assertSeeText('Quantity:')
+            ->assertSeeText('6')
+            ->assertDontSee('font-extrabold">10</dd>', false)
+            ->assertSeeText('Instructions:')
+            ->assertSeeText('Changed after first dispensing');
     }
 
     public function test_multiple_item_label_uses_each_actual_substituted_medicine_and_omits_empty_optional_fields(): void
@@ -233,8 +284,8 @@ class Step8PharmacyInventoryTest extends TestCase
             ['prescription_item_id' => $secondItem->id, 'medicine_id' => $secondMedicine->id, 'quantity' => 3],
         ], $location, $admin);
 
-        $response = $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing));
-        $response->assertOk()
+        $normal = $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing));
+        $normal->assertOk()
             ->assertSeeText('Actual Substitute Medicine')
             ->assertSeeText('Second Dispensed Medicine')
             ->assertDontSeeText('Test Medicine')
@@ -242,7 +293,20 @@ class Step8PharmacyInventoryTest extends TestCase
             ->assertSeeText('Qty: 3')
             ->assertDontSeeText('Route:')
             ->assertDontSeeText('Instructions:');
-        $this->assertSame(2, substr_count($response->getContent(), 'class="label"'));
+        $this->assertSame(2, substr_count($normal->getContent(), 'Print Medicine Label'));
+
+        $firstDispensingItem = $dispensing->items()->where('medicine_id', $substitute->id)->sole();
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.item.print', [$dispensing, $firstDispensingItem]))
+            ->assertOk()
+            ->assertSeeText('Actual Substitute Medicine')
+            ->assertDontSeeText('Second Dispensed Medicine');
+        $all = $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.print', $dispensing));
+        $all->assertOk()
+            ->assertSeeText('Print All Labels')
+            ->assertSeeText('Actual Substitute Medicine')
+            ->assertSeeText('Second Dispensed Medicine')
+            ->assertDontSeeText('Management System');
+        $this->assertSame(2, substr_count($all->getContent(), 'class="medicine-label'));
     }
 
     public function test_dispensing_labels_remain_hidden_across_facilities(): void
@@ -260,7 +324,10 @@ class Step8PharmacyInventoryTest extends TestCase
         $otherFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
         $dispensing->update(['facility_id' => $otherFacility->id]);
 
+        $item = $dispensing->items()->sole();
         $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing))->assertNotFound();
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.print', $dispensing))->assertNotFound();
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels.item.print', [$dispensing, $item]))->assertNotFound();
     }
 
     public function test_prescription_cancellation_cancels_pharmacy_queue_and_closes_visit(): void

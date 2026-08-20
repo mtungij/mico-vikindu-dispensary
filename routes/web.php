@@ -395,7 +395,9 @@ Route::middleware(['auth', 'active.user'])->group(function (): void {
         Route::get('pharmacy/dashboard', PharmacyDashboard::class)->middleware('permission:pharmacy.view-dashboard')->name('pharmacy.dashboard');
         Route::get('pharmacy/prescriptions/{prescription}', PharmacyPrescriptionShow::class)->middleware('permission:pharmacy.view-prescription')->name('pharmacy.prescriptions.show');
         Route::get('pharmacy/prescriptions/{prescription}/dispense', PharmacyDispensePrescription::class)->middleware('permission:pharmacy.dispense')->name('pharmacy.prescriptions.dispense');
-        Route::get('pharmacy/dispensings/{dispensing}/labels', DispensingLabelController::class)->middleware('permission:pharmacy.print-labels')->name('pharmacy.dispensings.labels');
+        Route::get('pharmacy/dispensings/{dispensing}/labels', [DispensingLabelController::class, 'show'])->middleware('permission:pharmacy.print-labels')->name('pharmacy.dispensings.labels');
+        Route::get('pharmacy/dispensings/{dispensing}/labels/print', [DispensingLabelController::class, 'printAll'])->middleware('permission:pharmacy.print-labels')->name('pharmacy.dispensings.labels.print');
+        Route::get('pharmacy/dispensings/{dispensing}/labels/{dispensingItem}/print', [DispensingLabelController::class, 'printItem'])->middleware('permission:pharmacy.print-labels')->name('pharmacy.dispensings.labels.item.print');
         Route::get('pharmacy/medicines', PharmacyMedicinesIndex::class)->middleware('permission:pharmacy.view-medicines')->name('pharmacy.medicines.index');
         Route::get('pharmacy/medicines/{medicine}/stock-card', PharmacyMedicineStockCard::class)->middleware('permission:pharmacy.view-stock-card')->name('pharmacy.medicines.stock-card');
         Route::get('pharmacy/opening-stock', PharmacyOpeningStock::class)->middleware('permission:pharmacy.opening-stock')->name('pharmacy.opening-stock');

@@ -117,6 +117,7 @@ class MedicineBillingSetupTest extends TestCase
 
         $this->artisan('pharmacy:setup-medicine-billing', ['--ids' => [$safe->id, $manual->id, $invalid->id, $ambiguous->id]])
             ->expectsOutputToContain('Dry run complete')
+            ->expectsOutputToContain('safe_missing_service')
             ->expectsOutputToContain('invalid_reference_price')
             ->expectsOutputToContain('ambiguous_configuration')
             ->assertSuccessful();

@@ -106,8 +106,8 @@ class MedicineBillingSetupService
         }
 
         return $approvedPrice !== null
-            ? $this->classification('missing_service', 'safe_with_explicit_reference_approval', 'Create/reuse deterministic medicine service, link it, and create cash price.', $approvedPrice, 'operator_approved_reference')
-            : $this->classification('missing_service', 'manual_review', 'Create/reuse deterministic service after a cash price is entered or explicitly approved.', null);
+            ? $this->classification('safe_missing_service', 'safe_with_explicit_reference_approval', 'Create deterministic medicine service, link it, and create cash price.', $approvedPrice, 'operator_approved_reference')
+            : $this->classification('safe_missing_service', 'manual_review', 'Deterministic service candidate; explicitly approve the positive reference price before applying.', null);
     }
 
     private function resolveService(Medicine $medicine, $actor): array

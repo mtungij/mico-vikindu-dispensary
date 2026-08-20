@@ -144,6 +144,125 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertSame(6.0, (float) $prescription->items()->firstOrFail()->invoiceItem->quantity);
     }
 
+    public function test_dispensing_label_prints_actual_quantity_and_complete_medication_directions(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'LABEL-FULL', today()->addYear()->toDateString(), 20);
+        $prescription = $this->prescription($admin, $medicine, 7);
+        $prescription->items()->firstOrFail()->update([
+            'dose' => '1 tablet',
+            'frequency' => 'Once daily',
+            'duration_value' => 7,
+            'duration_unit' => 'days',
+            'route' => 'Oral',
+            'instructions' => 'Take after food',
+        ]);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+        $dispensing = app(PharmacyDispensingService::class)->dispense($prescription, [[
+            'prescription_item_id' => $prescription->items()->first()->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 7,
+        ]], $location, $admin);
+
+        $response = $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing));
+
+        $response->assertOk()
+            ->assertSeeText('Qty: 7')
+            ->assertSeeText('Dose: 1 tablet')
+            ->assertSeeText('Frequency: Once daily')
+            ->assertSeeText('Duration: 7 days')
+            ->assertSeeText('Route: Oral')
+            ->assertSeeText('Instructions: Take after food')
+            ->assertSee('page-break-inside: avoid', false)
+            ->assertSee('.no-print { display: none; }', false);
+        $this->assertSame(7.0, (float) $dispensing->items()->sole()->dispensed_quantity);
+    }
+
+    public function test_partial_dispensing_labels_each_print_only_that_event_quantity_and_immutable_instructions(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'LABEL-PART', today()->addYear()->toDateString(), 20);
+        $prescription = $this->prescription($admin, $medicine, 10);
+        $item = $prescription->items()->firstOrFail();
+        $item->update(['instructions' => 'Take after food']);
+        $this->pharmacyQueue($prescription, $admin);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+
+        $first = app(PharmacyDispensingService::class)->dispense($prescription, [[
+            'prescription_item_id' => $item->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 4,
+        ]], $location, $admin);
+        $item->refresh()->update(['instructions' => 'Changed after first dispensing']);
+        $second = app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+            'prescription_item_id' => $item->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 6,
+        ]], $location, $admin);
+
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $first))
+            ->assertOk()
+            ->assertSeeText('Qty: 4')
+            ->assertDontSeeText('Qty: 10')
+            ->assertSeeText('Instructions: Take after food')
+            ->assertDontSeeText('Changed after first dispensing');
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $second))
+            ->assertOk()
+            ->assertSeeText('Qty: 6')
+            ->assertDontSeeText('Qty: 10')
+            ->assertSeeText('Instructions: Changed after first dispensing');
+    }
+
+    public function test_multiple_item_label_uses_each_actual_substituted_medicine_and_omits_empty_optional_fields(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$prescribedMedicine, $supplier, $location] = $this->catalog();
+        $substitute = $this->additionalMedicine('Actual Substitute Medicine', 'SUB-A');
+        $secondMedicine = $this->additionalMedicine('Second Dispensed Medicine', 'MED-B');
+        $this->receiveBatch($admin, $substitute, $supplier, $location, 'LABEL-SUB', today()->addYear()->toDateString(), 10);
+        $this->receiveBatch($admin, $secondMedicine, $supplier, $location, 'LABEL-MULTI', today()->addYear()->toDateString(), 10);
+        $prescription = $this->prescription($admin, $prescribedMedicine, 2);
+        $firstItem = $prescription->items()->firstOrFail();
+        $secondItem = $this->addPrescriptionItem($prescription, $secondMedicine, 3, $admin);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+
+        $dispensing = app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [
+            ['prescription_item_id' => $firstItem->id, 'medicine_id' => $substitute->id, 'quantity' => 2, 'substitution_reason' => 'Equivalent supplied'],
+            ['prescription_item_id' => $secondItem->id, 'medicine_id' => $secondMedicine->id, 'quantity' => 3],
+        ], $location, $admin);
+
+        $response = $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing));
+        $response->assertOk()
+            ->assertSeeText('Actual Substitute Medicine')
+            ->assertSeeText('Second Dispensed Medicine')
+            ->assertDontSeeText('Test Medicine')
+            ->assertSeeText('Qty: 2')
+            ->assertSeeText('Qty: 3')
+            ->assertDontSeeText('Route:')
+            ->assertDontSeeText('Instructions:');
+        $this->assertSame(2, substr_count($response->getContent(), 'class="label"'));
+    }
+
+    public function test_dispensing_labels_remain_hidden_across_facilities(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'LABEL-FAC', today()->addYear()->toDateString(), 5);
+        $prescription = $this->prescription($admin, $medicine, 1);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+        $dispensing = app(PharmacyDispensingService::class)->dispense($prescription, [[
+            'prescription_item_id' => $prescription->items()->first()->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 1,
+        ]], $location, $admin);
+        $otherFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
+        $dispensing->update(['facility_id' => $otherFacility->id]);
+
+        $this->actingAs($admin)->get(route('pharmacy.dispensings.labels', $dispensing))->assertNotFound();
+    }
+
     public function test_prescription_cancellation_cancels_pharmacy_queue_and_closes_visit(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -234,6 +353,26 @@ class Step8PharmacyInventoryTest extends TestCase
         $location = StockLocation::query()->where('facility_id', $facility->id)->where('is_receiving_location', true)->where('is_dispensing_location', true)->firstOrFail();
 
         return [$medicine, $supplier, $location];
+    }
+
+    private function additionalMedicine(string $name, string $code): Medicine
+    {
+        $facility = currentFacility();
+        $category = ServiceCategory::query()->where('facility_id', $facility->id)->where('code', 'PHA')->firstOrFail();
+        $service = Service::query()->create(['facility_id' => $facility->id, 'service_category_id' => $category->id, 'name' => $name, 'code' => $code, 'service_type' => ServiceType::Medicine, 'requires_payment' => true, 'is_active' => true]);
+        ServicePrice::query()->create(['facility_id' => $facility->id, 'service_id' => $service->id, 'payer_type' => 'cash', 'amount' => 100, 'currency' => 'TZS', 'is_active' => true]);
+        $unit = MedicineUnit::query()->where('facility_id', $facility->id)->firstOrFail();
+
+        return Medicine::query()->create(['facility_id' => $facility->id, 'service_id' => $service->id, 'name' => $name, 'code' => $code, 'purchase_unit_id' => $unit->id, 'dispensing_unit_id' => $unit->id, 'pack_size' => 1, 'purchase_to_dispensing_factor' => 1, 'reorder_level' => 0, 'is_active' => true]);
+    }
+
+    private function addPrescriptionItem(Prescription $prescription, Medicine $medicine, int $quantity, User $admin): PrescriptionItem
+    {
+        $item = PrescriptionItem::query()->create(['prescription_id' => $prescription->id, 'medicine_id' => $medicine->id, 'service_id' => $medicine->service_id, 'medication_name' => $medicine->name, 'dose' => '1 tablet', 'frequency' => 'Once daily', 'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => $quantity, 'remaining_quantity' => $quantity, 'status' => 'prescribed', 'created_by' => $admin->id]);
+        $invoiceItem = $prescription->visit->invoice->items()->create(['facility_id' => $prescription->facility_id, 'patient_id' => $prescription->patient_id, 'visit_id' => $prescription->visit_id, 'service_id' => $medicine->service_id, 'item_type' => 'medicine', 'reference_type' => PrescriptionItem::class, 'reference_id' => $item->id, 'description' => $medicine->name, 'description_snapshot' => $medicine->name, 'quantity' => $quantity, 'unit_price' => 100, 'gross_amount' => $quantity * 100, 'total_amount' => $quantity * 100, 'payer_amount' => 0, 'patient_amount' => 0, 'insurance_amount' => $quantity * 100, 'paid_amount' => 0, 'net_amount' => $quantity * 100, 'status' => 'covered', 'created_by' => $admin->id]);
+        $item->update(['invoice_item_id' => $invoiceItem->id, 'unit_price_snapshot' => 100, 'patient_amount' => 0, 'insurance_amount' => $quantity * 100, 'payer_amount' => $quantity * 100]);
+
+        return $item->refresh();
     }
 
     private function receiveBatch(User $admin, Medicine $medicine, Supplier $supplier, StockLocation $location, string $batchNumber, string $expiry, int $quantity): MedicineBatch

@@ -8,8 +8,10 @@ use App\Models\ClinicalEncounter;
 use App\Models\Medicine;
 use App\Models\Prescription;
 use App\Models\PrescriptionItem;
+use App\Support\MedicationDirections;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class PrescriptionService
@@ -79,7 +81,8 @@ class PrescriptionService
         $this->authorizeDraftMutation($prescription, $actor);
         $data = $this->prepareMedicineData($prescription, $data);
         $data = $this->withCalculatedQuantity($data);
-        validator($data, $this->itemRules(), $this->itemMessages())->validate();
+        validator($data, $this->itemRules($data), $this->itemMessages())->validate();
+        $data = $this->normalizedItemData($data);
         $prescription->items()->create([...$data, 'status' => 'prescribed', 'created_by' => $actor->id]);
     }
 
@@ -90,7 +93,8 @@ class PrescriptionService
             $this->authorizeDraftMutation($item->prescription, $actor);
             $data = $this->prepareMedicineData($item->prescription, $data);
             $data = $this->withCalculatedQuantity($data);
-            validator($data, $this->itemRules(), $this->itemMessages())->validate();
+            validator($data, $this->itemRules($data), $this->itemMessages())->validate();
+            $data = $this->normalizedItemData($data);
             $old = $item->only(array_keys($data));
             $item->update([...$data, 'updated_by' => $actor->id]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'prescription_item_updated', 'subject_type' => $item::class, 'subject_id' => $item->id, 'old_values' => $old, 'new_values' => $item->fresh()->only(array_keys($data))]);
@@ -173,17 +177,18 @@ class PrescriptionService
 
     private function withCalculatedQuantity(array $data): array
     {
-        if (array_key_exists('quantity', $data)) {
+        if (filled($data['quantity'] ?? null)) {
             return $data;
         }
 
-        $frequency = strtoupper(trim((string) ($data['frequency'] ?? '')));
-        $perDay = ['OD' => 1, 'DAILY' => 1, 'BD' => 2, 'BID' => 2, 'TDS' => 3, 'TID' => 3, 'QID' => 4][$frequency] ?? null;
-        if ($perDay && preg_match('/^\s*(\d+(?:\.\d+)?)/', (string) ($data['dose'] ?? ''), $match)) {
-            $days = (int) ($data['duration_value'] ?? 0) * match ($data['duration_unit'] ?? 'days') {
-                'weeks' => 7, 'months' => 30, default => 1,
-            };
-            $data['quantity'] = (float) $match[1] * $perDay * $days;
+        $quantity = MedicationDirections::calculateQuantity(
+            $data['dose'] ?? null,
+            $data['frequency'] ?? null,
+            $data['duration_value'] ?? null,
+            $data['duration_unit'] ?? null,
+        );
+        if ($quantity !== null) {
+            $data['quantity'] = $quantity;
         }
 
         return $data;
@@ -220,17 +225,41 @@ class PrescriptionService
         ];
     }
 
-    private function itemRules(): array
+    private function itemRules(array $data): array
     {
         return [
             'medicine_id' => ['required', 'integer'],
             'medication_name' => ['required'],
-            'dose' => ['required'],
-            'frequency' => ['required'],
+            'dose' => ['required', 'string', 'max:100', function ($attribute, $value, $fail): void {
+                if (! preg_match('/[\pL]/u', trim((string) $value)) || preg_match('/^\s*\d+(?:\.\d+)?\s*$/', (string) $value)) {
+                    $fail('Weka dose yenye kiasi na unit, mfano 1 capsule au 5 mL.');
+                }
+            }],
+            'frequency' => ['required', 'string', 'max:100', function ($attribute, $value, $fail) use ($data): void {
+                $customIsMeaningful = ($data['frequency_is_custom'] ?? false) && mb_strlen(trim((string) $value)) >= 3 && preg_match('/[\pL]/u', trim((string) $value));
+                if (! MedicationDirections::normalizeFrequency($value) && ! $customIsMeaningful) {
+                    $fail('Chagua frequency sahihi ya dawa.');
+                }
+            }],
             'duration_value' => ['required', 'integer', 'min:1'],
-            'duration_unit' => ['required'],
+            'duration_unit' => ['required', Rule::in(MedicationDirections::DURATION_UNITS)],
+            'route' => ['required', 'string', 'max:100', function ($attribute, $value, $fail) use ($data): void {
+                $customIsMeaningful = ($data['route_is_custom'] ?? false) && mb_strlen(trim((string) $value)) >= 3 && preg_match('/[\pL]/u', trim((string) $value));
+                if (! MedicationDirections::normalizeRoute($value) && ! $customIsMeaningful) {
+                    $fail('Chagua route sahihi ya dawa.');
+                }
+            }],
             'quantity' => ['required', 'numeric', 'min:1'],
         ];
+    }
+
+    private function normalizedItemData(array $data): array
+    {
+        $data['frequency'] = MedicationDirections::normalizeFrequency($data['frequency'] ?? null) ?? trim((string) ($data['frequency'] ?? ''));
+        $data['route'] = MedicationDirections::normalizeRoute($data['route'] ?? null) ?? trim((string) ($data['route'] ?? ''));
+        unset($data['frequency_is_custom'], $data['route_is_custom']);
+
+        return $data;
     }
 
     private function itemMessages(): array
@@ -239,6 +268,10 @@ class PrescriptionService
             'quantity.required' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
             'quantity.numeric' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
             'quantity.min' => 'Weka kiasi cha dawa. Kiasi lazima kiwe angalau 1.',
+            'frequency.required' => 'Chagua frequency sahihi ya dawa.',
+            'duration_value.required' => 'Weka muda wa matumizi ya dawa.',
+            'duration_unit.in' => 'Chagua duration unit sahihi.',
+            'route.required' => 'Chagua route ya dawa.',
         ];
     }
 

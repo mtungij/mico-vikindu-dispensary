@@ -59,7 +59,7 @@
                                 <div class="mt-2 flex flex-wrap items-center gap-2 text-sm">
                                     <span class="font-medium text-slate-700 dark:text-slate-200">Qty: {{ $quantityLabel }}</span>
                                     <x-badge :tone="in_array($item->status, ['dispensed', 'completed']) ? 'success' : 'warning'">{{ str($item->status)->replace('_', ' ')->title() }}</x-badge>
-                                    @if (filled($item->prescriptionItem?->dose))<span class="text-slate-500 dark:text-slate-400">{{ $item->prescriptionItem->dose }} · {{ $item->prescriptionItem->frequency }}</span>@endif
+                                    @if (filled($item->prescriptionItem?->dose))<span class="text-slate-500 dark:text-slate-400">{{ $item->prescriptionItem->dose }} · {{ \App\Support\MedicationDirections::displayFrequency($item->prescriptionItem->frequency) }}</span>@endif
                                 </div>
                             </div>
                             <a href="{{ route('pharmacy.dispensings.labels.item.print', [$dispensing, $item]) }}" target="_blank" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-md border border-primary/30 px-3 py-2 text-sm font-semibold text-primary transition hover:bg-primary/5 dark:hover:bg-primary/10">
@@ -71,6 +71,16 @@
             </x-card>
         </div>
 
-        
+        <div class="space-y-4 xl:sticky xl:top-24 xl:self-start">
+            <div>
+                <p class="text-sm font-semibold text-slate-950 dark:text-white">Label Preview</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400">Each medicine prints as a separate pharmacy label.</p>
+            </div>
+            <div class="space-y-4">
+                @foreach ($dispensing->items as $item)
+                    @include('pharmacy.partials.dispensing-label', ['dispensing' => $dispensing, 'item' => $item, 'preview' => true])
+                @endforeach
+            </div>
+        </div>
     </div>
 </x-layouts.app>

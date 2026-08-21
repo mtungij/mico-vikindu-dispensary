@@ -33,7 +33,7 @@ class DispensingLabelController extends Controller
         abort_unless($dispensingItem->dispensing_id === $dispensing->id, 404);
 
         $dispensing = $this->loadLabelData($dispensing);
-        $dispensingItem->loadMissing(['medicine', 'prescriptionItem']);
+        $dispensingItem->loadMissing(['medicine.dispensingUnit', 'prescriptionItem']);
 
         return view('pharmacy.dispensing-label-print', ['dispensing' => $dispensing, 'items' => collect([$dispensingItem])]);
     }
@@ -46,6 +46,6 @@ class DispensingLabelController extends Controller
 
     private function loadLabelData(Dispensing $dispensing): Dispensing
     {
-        return $dispensing->load(['patient', 'location', 'dispenser.staffProfile', 'items.medicine', 'items.prescriptionItem']);
+        return $dispensing->load(['patient', 'location', 'dispenser.staffProfile', 'items.medicine.dispensingUnit', 'items.prescriptionItem']);
     }
 }

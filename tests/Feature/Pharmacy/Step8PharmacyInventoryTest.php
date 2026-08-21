@@ -253,6 +253,7 @@ class Step8PharmacyInventoryTest extends TestCase
             ->assertOk()
             ->assertSeeText('Quantity:')
             ->assertSeeText('4')
+            ->assertSeeText('Three times daily')
             ->assertDontSee('font-extrabold">10</dd>', false)
             ->assertSeeText('Instructions:')
             ->assertSeeText('Take after food')

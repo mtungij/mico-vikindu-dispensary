@@ -12,6 +12,7 @@ use App\Models\PrescriptionItem;
 use App\Services\PrescriptionBillingService;
 use App\Services\ServicePricingService;
 use App\Services\VisitClosureService;
+use App\Support\MedicationDirections;
 use Illuminate\Console\Command;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -418,27 +419,7 @@ class ReconcilePrescriptionBilling extends Command
 
     private function quantityProposal(PrescriptionItem $item): ?float
     {
-        $dose = trim((string) $item->dose);
-        $frequency = strtoupper(trim((string) $item->frequency));
-        $duration = (int) $item->duration_value;
-        if ($duration < 1 || str_contains($frequency, 'PRN')) {
-            return null;
-        }
-        if (! preg_match('/^(\d+(?:\.\d+)?)\s*(tab(?:let)?s?|cap(?:sule)?s?)$/i', $dose, $match)) {
-            return null;
-        }
-        $perDay = ['OD' => 1, 'DAILY' => 1, 'BD' => 2, 'BID' => 2, 'TDS' => 3, 'TID' => 3, 'QID' => 4][$frequency] ?? null;
-        if (! $perDay) {
-            return null;
-        }
-        $days = $duration * match (strtolower((string) $item->duration_unit)) {
-            'day', 'days' => 1,
-            'week', 'weeks' => 7,
-            'month', 'months' => 30,
-            default => 0,
-        };
-
-        return $days > 0 ? (float) $match[1] * $perDay * $days : null;
+        return MedicationDirections::calculateQuantity($item->dose, $item->frequency, $item->duration_value, $item->duration_unit);
     }
 
     private function itemDispensingItems(Prescription $prescription, PrescriptionItem $item): Collection

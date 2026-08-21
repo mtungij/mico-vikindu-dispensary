@@ -26,6 +26,7 @@ use App\Services\ClinicalEncounterService;
 use App\Services\MedicineBillingReadinessService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
+use App\Support\MedicationDirections;
 use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
@@ -249,6 +250,7 @@ class Consultation extends Component
     public function addPrescription(ClinicalEncounterService $service): void
     {
         Gate::authorize('prescriptions.create');
+        $this->synchronizeMedicationForm();
         $this->prescriptionItemForm->validate();
         try {
             $service->addPrescription($this->encounter, ['items' => [$this->prescriptionItemForm->normalize()]], auth()->user());
@@ -272,6 +274,7 @@ class Consultation extends Component
 
     public function updatePrescriptionItem(PrescriptionService $service): void
     {
+        $this->synchronizeMedicationForm();
         $this->prescriptionItemForm->validate();
         $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query->where('clinical_encounter_id', $this->encounter->id)->where('facility_id', currentFacility()?->id))->findOrFail($this->editingPrescriptionItemId);
         try {
@@ -299,6 +302,139 @@ class Consultation extends Component
     {
         $this->editingPrescriptionItemId = null;
         $this->prescriptionItemForm->resetForm();
+    }
+
+    public function updatedPrescriptionItemFormMedicineId(?int $medicineId): void
+    {
+        $medicine = $medicineId
+            ? Medicine::query()->forCurrentFacility()->with(['dosageForm', 'dispensingUnit', 'route'])->find($medicineId)
+            : null;
+        $this->prescriptionItemForm->dosage_form = $medicine?->dosageForm?->name;
+        $route = MedicationDirections::normalizeRoute($medicine?->route?->name);
+        if ($this->editingPrescriptionItemId === null) {
+            $this->prescriptionItemForm->dose = '';
+            $this->prescriptionItemForm->dose_choice = '';
+            $this->prescriptionItemForm->custom_dose = '';
+            $this->prescriptionItemForm->route_choice = $route ?? '';
+            $this->prescriptionItemForm->route = $route;
+            $this->prescriptionItemForm->custom_route = '';
+            $this->resetCalculatedQuantity();
+        } elseif (blank($this->prescriptionItemForm->route) && $route) {
+            $this->prescriptionItemForm->route_choice = $route;
+            $this->prescriptionItemForm->route = $route;
+        }
+    }
+
+    public function updatedPrescriptionItemFormDoseChoice(string $choice): void
+    {
+        $this->prescriptionItemForm->dose = $choice === 'custom' ? trim($this->prescriptionItemForm->custom_dose) : $choice;
+        $this->recalculateMedicationQuantity();
+    }
+
+    public function updatedPrescriptionItemFormCustomDose(string $dose): void
+    {
+        if ($this->prescriptionItemForm->dose_choice === 'custom') {
+            $this->prescriptionItemForm->dose = trim($dose);
+            $this->recalculateMedicationQuantity();
+        }
+    }
+
+    public function updatedPrescriptionItemFormFrequencyChoice(string $choice): void
+    {
+        $this->prescriptionItemForm->frequency = $choice === 'custom' ? trim($this->prescriptionItemForm->custom_frequency) : $choice;
+        $this->recalculateMedicationQuantity();
+    }
+
+    public function updatedPrescriptionItemFormCustomFrequency(string $frequency): void
+    {
+        if ($this->prescriptionItemForm->frequency_choice === 'custom') {
+            $this->prescriptionItemForm->frequency = trim($frequency);
+            $this->recalculateMedicationQuantity();
+        }
+    }
+
+    public function updatedPrescriptionItemFormRouteChoice(string $choice): void
+    {
+        $this->prescriptionItemForm->route = $choice === 'custom' ? trim($this->prescriptionItemForm->custom_route) : $choice;
+    }
+
+    public function updatedPrescriptionItemFormCustomRoute(string $route): void
+    {
+        if ($this->prescriptionItemForm->route_choice === 'custom') {
+            $this->prescriptionItemForm->route = trim($route);
+        }
+    }
+
+    public function updatedPrescriptionItemFormDose(): void
+    {
+        $this->recalculateMedicationQuantity();
+    }
+
+    public function updatedPrescriptionItemFormFrequency(): void
+    {
+        $this->recalculateMedicationQuantity();
+    }
+
+    public function updatedPrescriptionItemFormDurationValue(): void
+    {
+        $this->recalculateMedicationQuantity();
+    }
+
+    public function updatedPrescriptionItemFormDurationUnit(): void
+    {
+        $this->recalculateMedicationQuantity();
+    }
+
+    public function updatedPrescriptionItemFormQuantity($quantity): void
+    {
+        $calculated = MedicationDirections::calculateQuantity(
+            $this->prescriptionItemForm->dose,
+            $this->prescriptionItemForm->frequency,
+            $this->prescriptionItemForm->duration_value,
+            $this->prescriptionItemForm->duration_unit,
+        );
+        $this->prescriptionItemForm->quantity_manually_adjusted = filled($quantity)
+            && ($calculated === null || abs((float) $quantity - $calculated) > 0.005);
+    }
+
+    private function synchronizeMedicationForm(): void
+    {
+        if (! $this->prescriptionItemForm->quantity_manually_adjusted) {
+            $this->recalculateMedicationQuantity();
+        }
+    }
+
+    private function recalculateMedicationQuantity(): void
+    {
+        $quantity = MedicationDirections::calculateQuantity(
+            $this->prescriptionItemForm->dose,
+            $this->prescriptionItemForm->frequency,
+            $this->prescriptionItemForm->duration_value,
+            $this->prescriptionItemForm->duration_unit,
+        );
+        $this->prescriptionItemForm->quantity_manually_adjusted = false;
+        if ($quantity === null) {
+            $this->prescriptionItemForm->quantity = null;
+            $this->prescriptionItemForm->calculation_summary = null;
+
+            return;
+        }
+        $this->prescriptionItemForm->quantity = rtrim(rtrim(number_format($quantity, 2, '.', ''), '0'), '.');
+        $this->prescriptionItemForm->calculation_summary = sprintf(
+            '%s × %s × %s %s = %s',
+            $this->prescriptionItemForm->dose,
+            MedicationDirections::displayFrequency($this->prescriptionItemForm->frequency),
+            $this->prescriptionItemForm->duration_value,
+            str($this->prescriptionItemForm->duration_unit)->replace('_', ' ')->toString(),
+            $this->prescriptionItemForm->quantity,
+        );
+    }
+
+    private function resetCalculatedQuantity(): void
+    {
+        $this->prescriptionItemForm->quantity = null;
+        $this->prescriptionItemForm->quantity_manually_adjusted = false;
+        $this->prescriptionItemForm->calculation_summary = null;
     }
 
     public function addProcedure(ClinicalEncounterService $service): void
@@ -520,7 +656,7 @@ class Consultation extends Component
             'diagnoses',
             'laboratoryOrders' => fn ($query) => $query->where('facility_id', currentFacility()?->id),
             'laboratoryOrders.items',
-            'prescriptions.items.medicine',
+            'prescriptions.items.medicine.dispensingUnit',
             'procedureOrders.invoiceItem',
             'appointments',
             'referrals',
@@ -541,7 +677,7 @@ class Consultation extends Component
         }
 
         $medicines = Medicine::query()->forCurrentFacility()
-            ->with(['generic', 'dosageForm', 'route', 'service'])
+            ->with(['generic', 'dosageForm', 'dispensingUnit', 'route', 'service'])
             ->when(strlen($this->medicineSearch) >= 2, fn ($query) => $query->where(fn ($q) => $q->where('name', 'like', '%'.$this->medicineSearch.'%')->orWhere('brand_name', 'like', '%'.$this->medicineSearch.'%')->orWhereHas('generic', fn ($g) => $g->where('name', 'like', '%'.$this->medicineSearch.'%'))))
             ->orderByDesc('is_active')
             ->orderBy('name')
@@ -549,12 +685,16 @@ class Consultation extends Component
             ->get();
         $readiness = app(MedicineBillingReadinessService::class);
         $medicines->each(fn (Medicine $medicine) => $medicine->setAttribute('billing_readiness', $readiness->inspect($medicine, $this->visit)));
+        $selectedMedicine = $this->prescriptionItemForm->medicine_id
+            ? Medicine::query()->forCurrentFacility()->with(['dosageForm', 'dispensingUnit'])->find($this->prescriptionItemForm->medicine_id)
+            : null;
 
         return view('livewire.opd.consultation', [
             'labTests' => LaboratoryTest::query()->forCurrentFacility()->with(['service', 'category', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get(),
             'labServices' => Service::query()->forCurrentFacility()->where('service_type', 'laboratory_test')->where('is_active', true)->get(),
             'procedureServices' => Service::query()->forCurrentFacility()->where('service_type', 'procedure')->where('is_active', true)->get(),
             'medicines' => $medicines,
+            'doseOptions' => MedicationDirections::doseOptions($selectedMedicine),
             'admissionConfigured' => Department::query()->forCurrentFacility()->where('code', 'BED')->where('is_active', true)->where('can_receive_patients', true)->where('queue_enabled', true)->exists(),
             'canViewLaboratoryResults' => $canViewLaboratoryResults,
         ])->layout('components.layouts.app', ['title' => 'OPD Consultation', 'description' => $this->visit->patient->fullName().' - '.$this->visit->visit_number]);

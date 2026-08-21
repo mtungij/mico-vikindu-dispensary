@@ -7,6 +7,7 @@
     $quantityLabel = floor($quantity) === $quantity
         ? number_format($quantity, 0, '.', '')
         : rtrim(rtrim(number_format($quantity, 3, '.', ''), '0'), '.');
+    $quantityUnit = \App\Support\MedicationDirections::quantityUnit($item->medicine, $quantity);
 @endphp
 <article class="medicine-label overflow-hidden rounded-xl border border-slate-300 bg-white text-slate-950 shadow-sm dark:border-slate-600 {{ ($preview ?? false) ? 'dark:bg-slate-100' : '' }}">
     <div class="border-b-4 border-primary bg-slate-50 px-5 py-4 text-center">
@@ -23,10 +24,10 @@
         <div class="border-y border-slate-200 py-3 text-center"><h3 class="text-base font-extrabold uppercase leading-tight">{{ $item->medicine?->name }}</h3></div>
         <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">
             @if (filled($prescriptionItem?->dose))<dt class="font-semibold">Take:</dt><dd>{{ $prescriptionItem->dose }}</dd>@endif
-            @if (filled($prescriptionItem?->frequency))<dt class="font-semibold">Frequency:</dt><dd>{{ $prescriptionItem->frequency }}</dd>@endif
-            @if (filled($prescriptionItem?->duration_value) && filled($durationUnit))<dt class="font-semibold">Duration:</dt><dd>{{ $prescriptionItem->duration_value }} {{ $durationUnit }}</dd>@endif
-            @if (filled($prescriptionItem?->route))<dt class="font-semibold">Route:</dt><dd>{{ $prescriptionItem->route }}</dd>@endif
-            <dt class="font-semibold">Quantity:</dt><dd class="text-base font-extrabold">{{ $quantityLabel }}</dd>
+            @if (filled($prescriptionItem?->frequency))<dt class="font-semibold">Frequency:</dt><dd>{{ \App\Support\MedicationDirections::displayFrequency($prescriptionItem->frequency) }}</dd>@endif
+            @if (filled($prescriptionItem?->duration_value) && filled($durationUnit))<dt class="font-semibold">Duration:</dt><dd>{{ in_array($prescriptionItem->duration_unit, ['until_finished', 'single_dose'], true) ? str($prescriptionItem->duration_unit)->replace('_', ' ')->title() : $prescriptionItem->duration_value.' '.$durationUnit }}</dd>@endif
+            @if (filled($prescriptionItem?->route))<dt class="font-semibold">Route:</dt><dd>{{ \App\Support\MedicationDirections::displayRoute($prescriptionItem->route) }}</dd>@endif
+            <dt class="font-semibold">Quantity:</dt><dd class="text-base font-extrabold">{{ $quantityLabel }}{{ $quantityUnit ? ' '.$quantityUnit : '' }}</dd>
             @if (filled($item->instructions_snapshot))<dt class="font-semibold">Instructions:</dt><dd>{{ $item->instructions_snapshot }}</dd>@endif
         </dl>
         <div class="rounded-md bg-amber-50 px-3 py-2 text-center text-[11px] font-medium text-amber-950">

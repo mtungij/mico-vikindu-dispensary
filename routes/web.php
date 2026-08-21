@@ -353,7 +353,8 @@ Route::middleware(['auth', 'active.user'])->group(function (): void {
         Route::get('cashier/sessions/{cashierSession}/print', CashierSessionPrintController::class)->middleware('permission:cashier.sessions.view')->name('cashier.sessions.print');
         Route::get('patients', PatientsIndex::class)->middleware('permission:patients.view')->name('patients.index');
         Route::get('patients/{patient}', PatientShow::class)->middleware('permission:patients.view')->name('patients.show');
-        Route::get('patients/{patient}/card', PatientCardController::class)->middleware('permission:patients.print-card')->name('patients.card');
+        Route::get('patients/{patient}/card', [PatientCardController::class, 'show'])->middleware('permission:patients.print-card')->name('patients.card');
+        Route::get('patients/{patient}/card/print', [PatientCardController::class, 'print'])->middleware('permission:patients.print-card')->name('patients.card.print');
         Route::get('patients/{patient}/documents/{document}/view', [PatientDocumentController::class, 'view'])->name('patients.documents.view');
         Route::get('patients/{patient}/documents/{document}/download', [PatientDocumentController::class, 'download'])->name('patients.documents.download');
         Route::get('reception', ReceptionIndex::class)->middleware('permission:reception.access')->name('reception.index');

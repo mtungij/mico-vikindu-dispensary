@@ -228,14 +228,49 @@
                             @else
                                 <div class="md:col-span-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/20 dark:text-amber-200">No medicine is configured for this facility. Contact Pharmacy/Administrator to configure a medicine, billing service, and price.<x-input-error :messages="$errors->get('prescriptionItemForm.medicine_id')" class="mt-1" /></div>
                             @endif
-                            <x-text-input wire:model="prescriptionItemForm.dose" placeholder="Dose" />
-                            <x-text-input wire:model="prescriptionItemForm.frequency" placeholder="Frequency" />
-                            <x-text-input type="number" min="1" wire:model="prescriptionItemForm.duration_value" placeholder="Duration" />
-                            <x-select-input wire:model="prescriptionItemForm.duration_unit"><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option></x-select-input>
-                            <x-text-input wire:model="prescriptionItemForm.route" placeholder="Route" />
                             <div>
-                                <x-text-input type="number" min="1" step="0.01" wire:model="prescriptionItemForm.quantity" placeholder="Quantity" class="w-full" />
+                                <label class="mb-1 block text-sm font-medium">Dose</label>
+                                <x-select-input wire:model.live="prescriptionItemForm.dose_choice" class="w-full">
+                                    <option value="">Select dose</option>
+                                    @foreach($doseOptions as $value => $label)<option value="{{ $value }}">{{ $label }}</option>@endforeach
+                                    @if($prescriptionItemForm->dose && ! array_key_exists($prescriptionItemForm->dose, $doseOptions))<option value="{{ $prescriptionItemForm->dose }}">{{ $prescriptionItemForm->dose }}</option>@endif
+                                    <option value="custom">Custom</option>
+                                </x-select-input>
+                                @if($prescriptionItemForm->dose_choice === 'custom')<x-text-input wire:model.live.debounce.300ms="prescriptionItemForm.custom_dose" placeholder="e.g. 500 mg or 1 vial" class="mt-2 w-full" />@endif
+                                <x-input-error :messages="$errors->get('prescriptionItemForm.dose')" class="mt-1" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-sm font-medium">Frequency</label>
+                                <x-select-input wire:model.live="prescriptionItemForm.frequency_choice" class="w-full">
+                                    <option value="">Select frequency</option>
+                                    @foreach(\App\Support\MedicationDirections::FREQUENCIES as $frequency)<option value="{{ $frequency }}">{{ $frequency }}</option>@endforeach
+                                    <option value="custom">Custom</option>
+                                </x-select-input>
+                                @if($prescriptionItemForm->frequency_choice === 'custom')<x-text-input wire:model.live.debounce.300ms="prescriptionItemForm.custom_frequency" placeholder="Describe the exact schedule" class="mt-2 w-full" />@endif
+                                <x-input-error :messages="$errors->get('prescriptionItemForm.frequency')" class="mt-1" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-sm font-medium">Duration</label>
+                                @unless(in_array($prescriptionItemForm->duration_unit, ['until_finished', 'single_dose'], true))<x-text-input type="number" min="1" wire:model.live="prescriptionItemForm.duration_value" placeholder="Duration" class="w-full" />@endunless
+                                <x-input-error :messages="$errors->get('prescriptionItemForm.duration_value')" class="mt-1" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-sm font-medium">Duration Unit</label>
+                                <x-select-input wire:model.live="prescriptionItemForm.duration_unit" class="w-full"><option value="hours">Hours</option><option value="days">Days</option><option value="weeks">Weeks</option><option value="months">Months</option><option value="until_finished">Until finished</option><option value="single_dose">Single dose</option></x-select-input>
+                                <x-input-error :messages="$errors->get('prescriptionItemForm.duration_unit')" class="mt-1" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-sm font-medium">Route</label>
+                                <x-select-input wire:model.live="prescriptionItemForm.route_choice" class="w-full"><option value="">Select route</option>@foreach(\App\Support\MedicationDirections::ROUTES as $route)<option value="{{ $route }}">{{ $route }}</option>@endforeach<option value="custom">Other</option></x-select-input>
+                                @if($prescriptionItemForm->route_choice === 'custom')<x-text-input wire:model.live.debounce.300ms="prescriptionItemForm.custom_route" placeholder="Specify other route" class="mt-2 w-full" />@endif
+                                <x-input-error :messages="$errors->get('prescriptionItemForm.route')" class="mt-1" />
+                            </div>
+                            <div>
+                                <label class="mb-1 block text-sm font-medium">Quantity</label>
+                                <x-text-input type="number" min="1" step="0.01" wire:model.live.debounce.300ms="prescriptionItemForm.quantity" placeholder="Quantity" class="w-full" />
                                 <x-input-error :messages="$errors->get('prescriptionItemForm.quantity')" class="mt-1" />
+                                @if($prescriptionItemForm->calculation_summary)<p class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">Calculated: {{ $prescriptionItemForm->calculation_summary }}</p>@elseif(in_array($prescriptionItemForm->frequency, ['As needed / PRN'], true) || $prescriptionItemForm->frequency_choice === 'custom')<p class="mt-1 text-xs text-amber-700 dark:text-amber-300">Quantity cannot be inferred for PRN/custom schedules. Enter and review it explicitly.</p>@endif
+                                @if($prescriptionItemForm->quantity_manually_adjusted)<p class="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">Manually adjusted quantity</p>@endif
                             </div>
                             <x-text-input wire:model="prescriptionItemForm.instructions" placeholder="Instructions" />
                             <x-text-input wire:model="prescriptionItemForm.indication" placeholder="Indication" />
@@ -480,8 +515,9 @@
                                 @php($hasValidQuantity = is_numeric($item->quantity) && (float) $item->quantity >= 1)
                                 <div class="mt-2 rounded-md border p-3 {{ $hasValidQuantity ? 'border-slate-200 dark:border-slate-700' : 'border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20' }}">
                                     <p class="font-medium">{{ $item->medication_name }}{{ $item->strength ? ' '.$item->strength : '' }}</p>
-                                    <p class="mt-1 text-xs text-slate-500">Dose: {{ $item->dose }} · Frequency: {{ $item->frequency }} · Duration: {{ $item->duration_value }} {{ $item->duration_unit }}</p>
-                                    <p class="text-xs text-slate-500">Quantity: {{ $hasValidQuantity ? $item->quantity : 'Missing' }}{{ $item->route ? ' · '.$item->route : '' }}</p>
+                                    <dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs text-slate-500"><dt class="font-medium">Dose:</dt><dd>{{ $item->dose }}</dd><dt class="font-medium">Frequency:</dt><dd>{{ \App\Support\MedicationDirections::displayFrequency($item->frequency) }}</dd><dt class="font-medium">Duration:</dt><dd>{{ in_array($item->duration_unit, ['until_finished', 'single_dose'], true) ? str($item->duration_unit)->replace('_', ' ')->title() : $item->duration_value.' '.str($item->duration_unit)->replace('_', ' ') }}</dd><dt class="font-medium">Route:</dt><dd>{{ \App\Support\MedicationDirections::displayRoute($item->route) }}</dd><dt class="font-medium">Quantity:</dt><dd>{{ $hasValidQuantity ? $item->quantity.' '.(\App\Support\MedicationDirections::quantityUnit($item->medicine, (float) $item->quantity) ?? '') : 'Missing' }}</dd></dl>
+                                    @if(filled($item->instructions))<p class="mt-2 text-xs"><span class="font-medium">Instructions:</span> {{ $item->instructions }}</p>@endif
+                                    @if(filled($item->indication))<p class="mt-1 text-xs"><span class="font-medium">Indication:</span> {{ $item->indication }}</p>@endif
                                     @unless($hasValidQuantity)<p class="mt-1 text-xs font-semibold text-amber-700 dark:text-amber-300">⚠ Quantity must be corrected before completing consultation.</p>@endunless
                                     @can('update', $prescription)@if(! $isReadOnly && $prescription->isEditableDraft())<div class="mt-2 flex flex-wrap gap-3"><button type="button" wire:click="editPrescriptionItem({{ $item->id }})" class="text-xs font-semibold text-primary">Edit</button><button type="button" wire:click="removePrescriptionItem({{ $item->id }})" wire:confirm="Una uhakika unataka kuondoa dawa hii?" class="text-xs font-semibold text-red-600">Remove</button></div>@endif@endcan
                                 </div>

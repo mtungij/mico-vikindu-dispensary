@@ -26,6 +26,7 @@ use App\Models\LaboratoryResultValue;
 use App\Models\LaboratoryTest;
 use App\Models\LaboratoryTestCategory;
 use App\Models\Medicine;
+use App\Models\MedicineRoute;
 use App\Models\MedicineUnit;
 use App\Models\ObservationAdmission;
 use App\Models\Patient;
@@ -105,6 +106,7 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->set('prescriptionItemForm.dose', '1 tablet')
             ->set('prescriptionItemForm.frequency', 'OD')
             ->set('prescriptionItemForm.duration_value', '3')
+            ->set('prescriptionItemForm.route', 'Oral')
             ->set('prescriptionItemForm.quantity', '3')
             ->call('addPrescription')
             ->assertHasNoErrors();
@@ -259,17 +261,17 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->count());
     }
 
-    public function test_medicine_quantity_defaults_to_one_and_invalid_values_never_persist_from_livewire(): void
+    public function test_medicine_quantity_starts_unset_and_invalid_values_never_persist_from_livewire(): void
     {
         $admin = $this->bootstrappedFacility();
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
         $medicine = $this->medicine($admin);
         $component = Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
-            ->assertSet('prescriptionItemForm.quantity', '1')
+            ->assertSet('prescriptionItemForm.quantity', null)
             ->set('prescriptionItemForm.medicine_id', $medicine->id)
             ->set('prescriptionItemForm.dose', '4 tablets')
-            ->set('prescriptionItemForm.frequency', '4')
+            ->set('prescriptionItemForm.frequency', 'PRN')
             ->set('prescriptionItemForm.duration_value', '4')
             ->set('prescriptionItemForm.duration_unit', 'days');
 
@@ -285,7 +287,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         $component->set('prescriptionItemForm.quantity', '5')
             ->call('addPrescription')
             ->assertHasNoErrors()
-            ->assertSet('prescriptionItemForm.quantity', '1');
+            ->assertSet('prescriptionItemForm.quantity', null);
 
         $this->assertDatabaseCount('prescriptions', 1);
         $this->assertDatabaseCount('prescription_items', 1);
@@ -850,6 +852,8 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->set('prescriptionItemForm.dose', '500 mg')
             ->set('prescriptionItemForm.frequency', 'TDS')
             ->set('prescriptionItemForm.duration_value', '3')
+            ->set('prescriptionItemForm.route', 'Oral')
+            ->set('prescriptionItemForm.quantity', '9')
             ->assertSet('prescriptionItemForm.duration_value', '3')
             ->set('complaintForm.duration_value', '2')
             ->assertSet('complaintForm.duration_value', '2');
@@ -863,6 +867,134 @@ class Step6ClinicalWorkflowTest extends TestCase
             'visit_id' => $visit->id,
             'prescribed_by' => $doctor->id,
         ]);
+    }
+
+    public function test_structured_medication_order_calculates_and_draft_edit_preserves_item_id(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin);
+        $medicine = $this->medicine($admin);
+
+        $component = Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose_choice', '1 tablet')
+            ->set('prescriptionItemForm.frequency_choice', 'Three times daily')
+            ->set('prescriptionItemForm.duration_value', '7')
+            ->set('prescriptionItemForm.route_choice', 'Oral')
+            ->assertSet('prescriptionItemForm.quantity', '21')
+            ->assertSee('Calculated:')
+            ->call('addPrescription')
+            ->assertHasNoErrors()
+            ->assertSee('Three times daily')
+            ->assertSee('Route:')
+            ->assertSee('Oral');
+
+        $item = PrescriptionItem::query()->sole();
+        $itemId = $item->id;
+        $this->assertSame('21.00', $item->quantity);
+        $this->assertDatabaseCount('invoice_items', 0);
+
+        $component->call('editPrescriptionItem', $itemId)
+            ->assertSet('editingPrescriptionItemId', $itemId)
+            ->set('prescriptionItemForm.dose_choice', '2 tablets')
+            ->set('prescriptionItemForm.frequency_choice', 'Twice daily')
+            ->set('prescriptionItemForm.duration_value', '5')
+            ->assertSet('prescriptionItemForm.quantity', '20')
+            ->set('prescriptionItemForm.quantity', '18')
+            ->assertSet('prescriptionItemForm.quantity_manually_adjusted', true)
+            ->call('updatePrescriptionItem')
+            ->assertHasNoErrors();
+
+        $this->assertSame($itemId, $item->refresh()->id);
+        $this->assertSame('18.00', $item->quantity);
+        $this->assertSame('Twice daily', $item->frequency);
+        $this->assertSame('Oral', $item->route);
+        $this->assertDatabaseCount('prescription_items', 1);
+        $this->assertDatabaseCount('invoice_items', 0);
+    }
+
+    public function test_prn_custom_and_invalid_medication_directions_require_explicit_safe_values(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin);
+        $medicine = $this->medicine($admin);
+
+        $component = Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose_choice', '1 tablet')
+            ->set('prescriptionItemForm.frequency_choice', 'As needed / PRN')
+            ->set('prescriptionItemForm.duration_value', '7')
+            ->set('prescriptionItemForm.route_choice', 'Oral')
+            ->assertSet('prescriptionItemForm.quantity', null)
+            ->call('addPrescription')
+            ->assertHasErrors(['prescriptionItemForm.quantity']);
+
+        $component->set('prescriptionItemForm.quantity', '5')
+            ->call('addPrescription')
+            ->assertHasNoErrors();
+        $this->assertSame('5.00', PrescriptionItem::query()->sole()->quantity);
+        $this->assertDatabaseCount('invoice_items', 0);
+
+        $secondVisit = $this->opdVisit($admin);
+        Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $secondVisit])
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose', '3')
+            ->set('prescriptionItemForm.frequency', '7')
+            ->set('prescriptionItemForm.duration_value', '3')
+            ->set('prescriptionItemForm.route_choice', 'custom')
+            ->set('prescriptionItemForm.custom_route', 'ka')
+            ->set('prescriptionItemForm.quantity', '0')
+            ->call('addPrescription')
+            ->assertHasErrors([
+                'prescriptionItemForm.dose',
+                'prescriptionItemForm.frequency',
+                'prescriptionItemForm.route',
+                'prescriptionItemForm.quantity',
+            ]);
+        $this->assertSame(1, PrescriptionItem::query()->count());
+    }
+
+    public function test_completed_structured_prescription_bills_saved_quantity_not_directions(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $unit = MedicineUnit::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Capsule', 'symbol' => 'cap', 'is_active' => true, 'created_by' => $admin->id]);
+        ServiceCategory::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Pharmacy', 'code' => 'PHA', 'category_type' => 'pharmacy', 'is_active' => true, 'created_by' => $admin->id]);
+        $medicine = app(MedicineCatalogService::class)->createMedicine([
+            'name' => 'Amoxicillin 250mg capsule',
+            'code' => 'AMOX-250-STRUCTURED',
+            'purchase_unit_id' => $unit->id,
+            'dispensing_unit_id' => $unit->id,
+            'pack_size' => 1,
+            'purchase_to_dispensing_factor' => 1,
+            'reorder_level' => 0,
+            'is_active' => true,
+            'cash_price' => 100,
+        ], $admin);
+        $visit = $this->opdVisit($admin);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+
+        Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('prescriptionItemForm.medicine_id', $medicine->id)
+            ->set('prescriptionItemForm.dose_choice', '1 capsule')
+            ->set('prescriptionItemForm.frequency_choice', 'Three times daily')
+            ->set('prescriptionItemForm.duration_value', '7')
+            ->set('prescriptionItemForm.route_choice', 'Oral')
+            ->set('prescriptionItemForm.instructions', 'Take after food')
+            ->assertSet('prescriptionItemForm.quantity', '21')
+            ->call('addPrescription')
+            ->assertHasNoErrors();
+
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        $item = PrescriptionItem::query()->sole();
+        $invoiceItem = $item->invoiceItem;
+        $this->assertSame('21.00', $item->quantity);
+        $this->assertSame(21.0, (float) $invoiceItem->quantity);
+        $this->assertSame(100.0, (float) $invoiceItem->unit_price);
+        $this->assertSame(2100.0, (float) $invoiceItem->gross_amount);
+        $this->assertSame(2100.0, (float) $invoiceItem->total_amount);
     }
 
     public function test_treating_clinical_officer_can_print_consultation_summary(): void
@@ -2733,7 +2865,7 @@ class Step6ClinicalWorkflowTest extends TestCase
 
         $lab = $clinical->addLabOrder($encounter->refresh(), ['service_ids' => [$labService->id], 'clinical_notes' => 'Rule out malaria'], $admin);
         $medicine = $this->medicine($admin);
-        $rx = $clinical->addPrescription($encounter->refresh(), ['items' => [['medicine_id' => $medicine->id, 'medication_name' => 'Paracetamol', 'dose' => '500mg', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days']]], $admin);
+        $rx = $clinical->addPrescription($encounter->refresh(), ['items' => [['medicine_id' => $medicine->id, 'medication_name' => 'Paracetamol', 'dose' => '500 mg', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days', 'route' => 'Oral', 'quantity' => 9]]], $admin);
         $proc = $clinical->addProcedureOrder($encounter->refresh(), ['service_id' => $procedure->id, 'procedure_name_snapshot' => 'Dressing'], $admin);
         $appt = $clinical->createFollowUp($encounter->refresh(), ['scheduled_start' => now()->addDay()->format('Y-m-d H:i:s'), 'department_id' => $encounter->department_id], $admin);
         $ref = $clinical->createReferral($encounter->refresh(), ['destination_facility_name' => 'Regional Hospital', 'reason' => 'Specialist review', 'urgency' => 'urgent'], $admin);
@@ -3052,6 +3184,10 @@ class Step6ClinicalWorkflowTest extends TestCase
             ['facility_id' => currentFacility()->id, 'name' => 'Tablet'],
             ['symbol' => 'tab', 'is_active' => true, 'created_by' => $admin->id],
         );
+        $route = MedicineRoute::query()->firstOrCreate(
+            ['facility_id' => currentFacility()->id, 'code' => 'PO'],
+            ['name' => 'Oral', 'is_active' => true],
+        );
 
         $category = ServiceCategory::query()->first() ?: ServiceCategory::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Clinical', 'code' => 'CLIN', 'category_type' => 'consultation', 'is_active' => true, 'created_by' => $admin->id]);
         $service = Service::query()->create([
@@ -3070,6 +3206,7 @@ class Step6ClinicalWorkflowTest extends TestCase
             'service_id' => $service->id,
             'purchase_unit_id' => $unit->id,
             'dispensing_unit_id' => $unit->id,
+            'default_route_id' => $route->id,
             'name' => 'Paracetamol',
             'code' => 'PCM-'.fake()->unique()->numerify('######'),
             'strength' => '500mg',

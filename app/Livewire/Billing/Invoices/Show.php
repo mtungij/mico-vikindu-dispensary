@@ -164,9 +164,9 @@ class Show extends Component
             $receiptNumber = $payment->receipt?->receipt_number;
             $medicineReady = Prescription::query()
                 ->where('visit_id', $this->invoice->visit_id)
-                ->where('status', 'prescribed')
+                ->whereIn('status', ['prescribed', 'partially_dispensed'])
                 ->get()
-                ->contains(fn ($prescription) => $prescriptionBilling->isCleared($prescription));
+                ->contains(fn ($prescription) => $prescriptionBilling->hasFinanciallyDispensableItems($prescription));
             $message = $medicineReady
                 ? 'Payment confirmed. Patient is ready for Pharmacy.'
                 : ($this->invoice->payment_status === 'partial'
@@ -214,7 +214,7 @@ class Show extends Component
 
     private function loadInvoice(Invoice $invoice): Invoice
     {
-        return $invoice->load(['patient', 'visit', 'items.service', 'payments.method', 'receipts', 'handoffs.destinationDepartment']);
+        return $invoice->load(['patient', 'visit', 'items.service', 'items.prescriptionItem.medicine.dispensingUnit', 'payments.method', 'receipts', 'handoffs.destinationDepartment']);
     }
 
     private function ensureInvoiceCanReceivePayment(Invoice $invoice): void

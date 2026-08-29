@@ -11,6 +11,15 @@
 <div class="row"><span>Reference</span><strong>{{ $receipt->transaction_reference_snapshot }}</strong></div>
 <div class="row"><span>Received By</span><strong>{{ $receipt->cashier_name_snapshot }}</strong></div>
 <div class="row"><span>Amount</span><strong>{{ number_format($receipt->amount, 2) }}</strong></div>
+@php
+    $paymentsThroughReceipt = $receipt->invoice?->payments()->where('status', 'confirmed')->where('id', '<=', $receipt->payment_id)->sum('amount') ?? 0;
+    $previouslyPaid = max(0, (float) $paymentsThroughReceipt - (float) $receipt->amount);
+    $balanceBefore = (float) ($receipt->payment?->metadata['invoice_balance_before'] ?? max(0, (float) ($receipt->invoice?->patient_amount ?? 0) - $previouslyPaid - (float) ($receipt->invoice?->waiver_amount ?? 0)));
+    $balanceAfter = (float) ($receipt->payment?->metadata['invoice_balance_after'] ?? max(0, $balanceBefore - (float) $receipt->amount));
+@endphp
+<div class="row"><span>Previous balance</span><strong>{{ number_format($balanceBefore, 2) }}</strong></div>
+<div class="row"><span>Paid now</span><strong>{{ number_format($receipt->amount, 2) }}</strong></div>
+<div class="row"><span>Remaining balance</span><strong>{{ number_format($balanceAfter, 2) }}</strong></div>
 </div>
 </body>
 </html>

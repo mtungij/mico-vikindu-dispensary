@@ -7,6 +7,7 @@ use App\Enums\PrescriptionStatus;
 use App\Enums\StockMovementType;
 use App\Models\ActivityLog;
 use App\Models\Dispensing;
+use App\Models\InvoiceItem;
 use App\Models\Medicine;
 use App\Models\Prescription;
 use App\Models\StockLocation;
@@ -22,6 +23,7 @@ class PharmacyDispensingService
         private readonly PharmacyPricingService $pricing,
         private readonly VisitClosureService $visitClosure,
         private readonly PrescriptionBillingService $billing,
+        private readonly MedicineFinancialClearanceService $financialClearance,
     ) {}
 
     public function dispense(Prescription $prescription, array $lines, StockLocation $location, $actor, ?string $overrideReason = null): Dispensing
@@ -48,8 +50,17 @@ class PharmacyDispensingService
             ]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'dispensing_started', 'subject_type' => $dispensing::class, 'subject_id' => $dispensing->id]);
 
+            $dispensedLineCount = 0;
             foreach ($lines as $line) {
                 $item = $prescription->items()->lockForUpdate()->findOrFail($line['prescription_item_id']);
+                if ($item->terminal_status) {
+                    throw ValidationException::withMessages(['quantity' => "{$item->medication_name} is unavailable or declined and cannot be dispensed."]);
+                }
+                $invoiceItem = InvoiceItem::query()
+                    ->where('facility_id', $prescription->facility_id)
+                    ->lockForUpdate()
+                    ->find($item->invoice_item_id);
+                $item->setRelation('invoiceItem', $invoiceItem);
                 $medicine = Medicine::query()->where('facility_id', $prescription->facility_id)->findOrFail($line['medicine_id'] ?? $item->medicine_id);
                 if (! $medicine->is_active) {
                     throw ValidationException::withMessages(['medicine' => "{$medicine->name} is inactive and cannot be dispensed."]);
@@ -57,7 +68,14 @@ class PharmacyDispensingService
                 $quantity = (float) ($line['quantity'] ?? $item->remaining_quantity ?? $item->quantity ?? 0);
                 $remaining = (float) ($item->remaining_quantity ?? $item->quantity ?? 0);
                 if ($quantity <= 0) {
-                    throw ValidationException::withMessages(['quantity' => 'Dispensing quantity must be greater than zero.']);
+                    continue;
+                }
+                $clearance = $this->financialClearance->forItem($item);
+                $financiallyAvailable = (float) $clearance['remaining_paid_quantity'];
+                if ($quantity > $financiallyAvailable + 0.0005) {
+                    throw ValidationException::withMessages([
+                        'quantity' => "Only {$clearance['remaining_paid_quantity']} units are financially cleared for dispensing.",
+                    ]);
                 }
                 if ($quantity > $remaining) {
                     throw ValidationException::withMessages(['quantity' => 'Quantity imezidi kiasi kilichobaki.']);
@@ -118,6 +136,24 @@ class PharmacyDispensingService
                     'status' => $newRemaining > 0 ? 'partially_dispensed' : 'dispensed',
                 ]);
                 ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'medicine_dispensed', 'subject_type' => $dispensingItem::class, 'subject_id' => $dispensingItem->id]);
+                ActivityLog::query()->create([
+                    'user_id' => $actor->id,
+                    'event' => 'medicine_financial_clearance_consumed',
+                    'subject_type' => $dispensingItem::class,
+                    'subject_id' => $dispensingItem->id,
+                    'new_values' => [
+                        'prescription_item_id' => $item->id,
+                        'invoice_item_id' => $invoiceItem?->id,
+                        'paid_quantity' => $clearance['paid_quantity'],
+                        'dispensed_quantity' => number_format($quantity, 3, '.', ''),
+                        'remaining_financial_quantity' => number_format(max(0, $financiallyAvailable - $quantity), 3, '.', ''),
+                    ],
+                ]);
+                $dispensedLineCount++;
+            }
+
+            if ($dispensedLineCount === 0) {
+                throw ValidationException::withMessages(['quantity' => 'Enter a financially cleared quantity greater than zero.']);
             }
 
             $remainingItems = $prescription->items()
@@ -148,16 +184,6 @@ class PharmacyDispensingService
                 $this->visitClosure->startDepartmentQueues($prescription->visit, 'PHA', $actor);
             }
             $this->visitClosure->evaluate($prescription->visit->refresh(), $actor);
-
-            if ($overrideReason && ! $this->billing->isCleared($prescription)) {
-                ActivityLog::query()->create([
-                    'user_id' => $actor->id,
-                    'event' => 'pharmacy_payment_overridden',
-                    'subject_type' => $prescription::class,
-                    'subject_id' => $prescription->id,
-                    'new_values' => ['visit_id' => $prescription->visit_id, 'reason' => $overrideReason],
-                ]);
-            }
 
             return $dispensing->refresh();
         });
@@ -222,12 +248,8 @@ class PharmacyDispensingService
         if (! $prescription->encounter || ! $prescription->encounter->completed_at) {
             throw ValidationException::withMessages(['prescription' => 'Consultation must be completed before medicines can be dispensed.']);
         }
-        $cleared = $this->billing->isCleared($prescription);
-        if (! $cleared && ! $actor->can('pharmacy.override-payment')) {
-            throw ValidationException::withMessages(['payment' => 'Malipo hayajakamilika.']);
-        }
-        if (! $cleared && $actor->can('pharmacy.override-payment') && blank($overrideReason)) {
-            throw ValidationException::withMessages(['override_reason' => 'Sababu ya payment override inahitajika.']);
+        if (! $this->billing->hasFinanciallyDispensableItems($prescription)) {
+            throw ValidationException::withMessages(['payment' => 'No paid medicine quantity is currently available for dispensing.']);
         }
     }
 }

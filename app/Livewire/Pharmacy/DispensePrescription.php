@@ -5,6 +5,7 @@ namespace App\Livewire\Pharmacy;
 use App\Livewire\Forms\DispensingForm;
 use App\Models\Prescription;
 use App\Models\StockLocation;
+use App\Services\MedicineFinancialClearanceService;
 use App\Services\PharmacyDispensingService;
 use App\Services\PrescriptionService;
 use App\Support\Notifier;
@@ -26,7 +27,7 @@ class DispensePrescription extends Component
         abort_unless($prescription->facility_id === currentFacility()?->id, 404);
         $this->prescription = $prescription;
         $this->form->stock_location_id = StockLocation::query()->forCurrentFacility()->where('is_dispensing_location', true)->first()?->id;
-        $this->form->lines = $prescription->items()->get()->map(fn ($item) => ['prescription_item_id' => $item->id, 'medicine_id' => $item->medicine_id, 'quantity' => $item->remaining_quantity ?? $item->quantity])->all();
+        $this->refreshLines();
     }
 
     public function dispense(PharmacyDispensingService $service): void
@@ -44,18 +45,50 @@ class DispensePrescription extends Component
         $this->redirectRoute('pharmacy.dispensings.labels', $dispensing);
     }
 
+    public function updatedFormStockLocationId(): void
+    {
+        $this->refreshLines();
+    }
+
     public function declineItem(int $itemId, PrescriptionService $service): void
     {
         $reason = trim((string) ($this->terminalReasons[$itemId] ?? ''));
         $item = $this->prescription->items()->findOrFail($itemId);
         $service->terminallyDeclineItem($item, 'unavailable', $reason, auth()->user());
         $this->prescription = $this->prescription->refresh();
-        $this->form->lines = $this->prescription->items()->whereNull('terminal_status')->get()->map(fn ($item) => ['prescription_item_id' => $item->id, 'medicine_id' => $item->medicine_id, 'quantity' => $item->remaining_quantity ?? $item->quantity])->all();
+        $this->refreshLines();
         Notifier::success('Unavailable medicine recorded and billing reconciled.');
     }
 
-    public function render(): View
+    public function render(MedicineFinancialClearanceService $clearance): View
     {
-        return view('livewire.pharmacy.dispense-prescription', ['prescription' => $this->prescription->load(['patient', 'items.medicine']), 'locations' => StockLocation::query()->forCurrentFacility()->where('is_dispensing_location', true)->get()])->layout('components.layouts.app', ['title' => 'Toa Dawa', 'description' => $this->prescription->prescription_number]);
+        $prescription = $this->prescription->load(['patient', 'items.invoiceItem', 'items.medicine.dispensingUnit']);
+        $financialRows = $prescription->items->mapWithKeys(fn ($item) => [$item->id => $clearance->forItem($item)])->all();
+
+        return view('livewire.pharmacy.dispense-prescription', [
+            'prescription' => $prescription,
+            'financialRows' => $financialRows,
+            'locations' => StockLocation::query()->forCurrentFacility()->where('is_dispensing_location', true)->get(),
+        ])->layout('components.layouts.app', ['title' => 'Toa Dawa', 'description' => $this->prescription->prescription_number]);
+    }
+
+    private function refreshLines(): void
+    {
+        $clearance = app(MedicineFinancialClearanceService::class);
+        $locationId = $this->form->stock_location_id;
+        $this->form->lines = $this->prescription->items()
+            ->whereNull('terminal_status')
+            ->with(['invoiceItem', 'medicine.dispensingUnit'])
+            ->get()
+            ->map(function ($item) use ($clearance, $locationId): array {
+                $financiallyAvailable = (float) $clearance->forItem($item)['remaining_paid_quantity'];
+                $stock = (float) ($item->medicine?->currentStock($locationId) ?? 0);
+
+                return [
+                    'prescription_item_id' => $item->id,
+                    'medicine_id' => $item->medicine_id,
+                    'quantity' => min($financiallyAvailable, $stock),
+                ];
+            })->all();
     }
 }

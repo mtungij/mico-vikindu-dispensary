@@ -61,6 +61,7 @@ class PaymentConfirmationService
             }
 
             $session = $this->sessions->getActiveSession($actor, currentFacility());
+            $balanceBefore = round((float) $invoice->balance_amount, 2);
 
             $payment = Payment::query()->create([
                 'facility_id' => $invoice->facility_id,
@@ -84,6 +85,11 @@ class PaymentConfirmationService
                 'confirmed_by' => $actor->id,
                 'confirmed_at' => now(),
                 'notes' => $data['notes'] ?? null,
+                'metadata' => [
+                    ...(array) ($data['metadata'] ?? []),
+                    'invoice_balance_before' => number_format($balanceBefore, 2, '.', ''),
+                    'invoice_balance_after' => number_format(max(0, $balanceBefore - $amount), 2, '.', ''),
+                ],
             ]);
 
             $this->allocateToItems($payment, $invoice, $amount, $actor);
@@ -101,6 +107,13 @@ class PaymentConfirmationService
                 'payment_date' => $payment->payment_date?->toISOString(),
                 'facility_id' => $invoice->facility_id,
                 'cashier_session_id' => $payment->cashier_session_id,
+                'invoice_item_allocations' => $payment->allocations()
+                    ->whereNotNull('invoice_item_id')
+                    ->get(['invoice_item_id', 'allocated_amount'])
+                    ->map(fn ($allocation) => [
+                        'invoice_item_id' => $allocation->invoice_item_id,
+                        'allocated_amount' => (string) $allocation->allocated_amount,
+                    ])->all(),
             ]);
 
             $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);

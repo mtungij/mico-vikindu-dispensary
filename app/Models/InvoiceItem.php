@@ -68,4 +68,9 @@ class InvoiceItem extends Model
     {
         return $this->hasOne(LaboratoryOrderItem::class);
     }
+
+    public function prescriptionItem(): HasOne
+    {
+        return $this->hasOne(PrescriptionItem::class);
+    }
 }

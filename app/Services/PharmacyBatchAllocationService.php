@@ -20,6 +20,7 @@ class PharmacyBatchAllocationService
             ->orderByRaw('expiry_date is null')
             ->orderBy('expiry_date')
             ->orderBy('received_at')
+            ->lockForUpdate()
             ->get();
     }
 
@@ -28,7 +29,9 @@ class PharmacyBatchAllocationService
         $remaining = (float) $quantity;
         $allocations = [];
         foreach ($this->getAvailableBatches($medicine, $location) as $batch) {
-            if ($remaining <= 0) break;
+            if ($remaining <= 0) {
+                break;
+            }
             $take = min($remaining, (float) $batch->available_quantity);
             if ($take > 0) {
                 $allocations[] = ['batch' => $batch, 'quantity' => $take];
@@ -38,6 +41,7 @@ class PharmacyBatchAllocationService
         if ($remaining > 0.0001) {
             throw ValidationException::withMessages(['stock' => "Stock haitoshi kwa {$medicine->name}."]);
         }
+
         return $allocations;
     }
 

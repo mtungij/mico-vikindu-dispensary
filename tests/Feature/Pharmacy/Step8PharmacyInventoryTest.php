@@ -5,6 +5,7 @@ namespace Tests\Feature\Pharmacy;
 use App\Enums\FacilityType;
 use App\Enums\OwnershipType;
 use App\Enums\ServiceType;
+use App\Livewire\Pharmacy\DispensePrescription as DispensePrescriptionComponent;
 use App\Livewire\Pharmacy\Queue as PharmacyQueue;
 use App\Models\ClinicalEncounter;
 use App\Models\Department;
@@ -15,6 +16,7 @@ use App\Models\MedicineBatch;
 use App\Models\MedicineUnit;
 use App\Models\Patient;
 use App\Models\PatientQueue;
+use App\Models\PaymentMethod;
 use App\Models\Permission;
 use App\Models\Prescription;
 use App\Models\PrescriptionItem;
@@ -26,6 +28,8 @@ use App\Models\StockMovement;
 use App\Models\Supplier;
 use App\Models\User;
 use App\Models\Visit;
+use App\Services\MedicineFinancialClearanceService;
+use App\Services\PaymentConfirmationService;
 use App\Services\PharmacyBatchAllocationService;
 use App\Services\PharmacyDispensingService;
 use App\Services\PrescriptionService;
@@ -36,11 +40,13 @@ use Database\Seeders\GenericMedicineSeeder;
 use Database\Seeders\MedicineCategorySeeder;
 use Database\Seeders\MedicineRouteSeeder;
 use Database\Seeders\MedicineUnitSeeder;
+use Database\Seeders\PaymentMethodSeeder;
 use Database\Seeders\PermissionSeeder;
 use Database\Seeders\ServiceCategorySeeder;
 use Database\Seeders\StockLocationSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
 
@@ -144,6 +150,161 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertSame('serving', $queue->refresh()->queue_status->value);
         $this->assertSame('awaiting_pharmacy', $prescription->visit->refresh()->visit_status->value);
         $this->assertSame(6.0, (float) $prescription->items()->firstOrFail()->invoiceItem->quantity);
+    }
+
+    public function test_partial_medicine_payment_caps_dispensing_and_later_payment_releases_remainder(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->seed(PaymentMethodSeeder::class);
+        $this->actingAs($admin);
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'PAID-PART', today()->addYear()->toDateString(), 4);
+        $prescription = $this->prescription($admin, $medicine, 10);
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+        $item = $prescription->items()->sole();
+        $invoiceItem = $item->invoiceItem;
+        $invoiceItem->update([
+            'patient_amount' => 1000,
+            'insurance_amount' => 0,
+            'payer_amount' => 0,
+            'paid_amount' => 0,
+            'status' => 'pending',
+        ]);
+        $item->update(['patient_amount' => 1000, 'insurance_amount' => 0, 'payer_amount' => 0]);
+        $invoice = $prescription->visit->invoice;
+        $invoice->update([
+            'payer_type' => 'cash',
+            'subtotal' => 1000,
+            'gross_total' => 1000,
+            'patient_amount' => 1000,
+            'insurance_amount' => 0,
+            'total_amount' => 1000,
+            'paid_amount' => 0,
+            'balance_amount' => 1000,
+            'invoice_status' => 'pending',
+            'status' => 'open',
+            'payment_status' => 'unpaid',
+        ]);
+        $prescription->update(['status' => 'awaiting_payment']);
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+
+        $firstPayment = app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 600, $admin);
+        $clearance = app(MedicineFinancialClearanceService::class)->forItem($item->refresh());
+
+        $this->assertSame('partial', $invoice->refresh()->payment_status);
+        $this->assertSame('600.00', $invoiceItem->refresh()->paid_amount);
+        $this->assertSame('6.000', $clearance['paid_quantity']);
+        $this->assertSame('6.000', $clearance['remaining_paid_quantity']);
+        $this->assertSame('4.000', $clearance['unpaid_quantity']);
+        $this->assertSame('prescribed', $prescription->refresh()->status->value);
+        $this->assertDatabaseHas('receipts', ['payment_id' => $firstPayment->id, 'amount' => 600]);
+        $this->assertSame('1000.00', $firstPayment->metadata['invoice_balance_before']);
+        $this->assertSame('400.00', $firstPayment->metadata['invoice_balance_after']);
+        Livewire::actingAs($admin)
+            ->test(PharmacyQueue::class)
+            ->assertSee($prescription->prescription_number);
+        Livewire::actingAs($admin)
+            ->test(DispensePrescriptionComponent::class, ['prescription' => $prescription->refresh()])
+            ->set('form.stock_location_id', $location->id)
+            ->assertSee('Paid / Cleared')
+            ->assertSee('Awaiting Payment')
+            ->assertSeeHtml('max="4"');
+        $this->get(route('billing.invoices.show', $invoice->refresh()))
+            ->assertOk()
+            ->assertSeeText('Covered Qty')
+            ->assertSeeText('Partially Paid');
+        $this->get(route('billing.receipts.print', $firstPayment->receipt))
+            ->assertOk()
+            ->assertSeeText('Previous balance')
+            ->assertSeeText('Remaining balance');
+
+        $stockBeforeRejectedAttempt = (float) $medicine->currentStock($location->id);
+        try {
+            app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+                'prescription_item_id' => $item->id,
+                'medicine_id' => $medicine->id,
+                'quantity' => 7,
+            ]], $location, $admin);
+            $this->fail('Dispensing above paid quantity was not blocked.');
+        } catch (ValidationException $exception) {
+            $this->assertStringContainsString('Only 6.000 units', $exception->errors()['quantity'][0]);
+        }
+        $this->assertSame($stockBeforeRejectedAttempt, (float) $medicine->fresh()->currentStock($location->id));
+        $this->assertDatabaseMissing('dispensing_items', ['prescription_item_id' => $item->id, 'dispensed_quantity' => 7]);
+
+        app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+            'prescription_item_id' => $item->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 4,
+        ]], $location, $admin);
+        $this->assertSame('2.000', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['remaining_paid_quantity']);
+
+        try {
+            app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+                'prescription_item_id' => $item->id,
+                'medicine_id' => $medicine->id,
+                'quantity' => 2,
+            ]], $location, $admin);
+            $this->fail('Dispensing without stock was not blocked.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('stock', $exception->errors());
+        }
+        $this->assertSame(4.0, (float) $item->refresh()->dispensed_quantity);
+
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'PAID-REST', today()->addMonths(18)->toDateString(), 6);
+
+        app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+            'prescription_item_id' => $item->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 2,
+        ]], $location, $admin);
+        $this->assertSame('0.000', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['remaining_paid_quantity']);
+        $this->assertSame(4.0, (float) $item->remaining_quantity);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice->refresh(), $cash, 400, $admin);
+        $this->assertSame('4.000', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['remaining_paid_quantity']);
+
+        app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+            'prescription_item_id' => $item->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 4,
+        ]], $location, $admin);
+
+        $this->assertSame('paid', $invoice->refresh()->payment_status);
+        $this->assertSame('dispensed', $prescription->refresh()->status->value);
+        $this->assertSame(10.0, (float) $item->refresh()->dispensed_quantity);
+        $this->assertSame(10.0, (float) StockMovement::query()->where('movement_type', 'dispensing')->sum('quantity'));
+    }
+
+    public function test_financial_coverage_uses_historical_invoice_price_not_current_catalog_price(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine] = $this->catalog();
+        $prescription = $this->prescription($admin, $medicine, 10);
+        $item = $prescription->items()->sole();
+        $item->invoiceItem->update(['patient_amount' => 1000, 'insurance_amount' => 0, 'paid_amount' => 600]);
+        $medicine->service->prices()->update(['amount' => 120]);
+
+        $clearance = app(MedicineFinancialClearanceService::class)->forItem($item->refresh());
+
+        $this->assertSame('100.00', $clearance['billed_unit_price']);
+        $this->assertSame('6.000', $clearance['paid_quantity']);
+
+        $medicine->dispensingUnit->update(['decimal_allowed' => true]);
+        $item->update(['quantity' => 2.5, 'remaining_quantity' => 2.5]);
+        $item->invoiceItem->update([
+            'quantity' => 2.5,
+            'patient_amount' => 1000,
+            'insurance_amount' => 1500,
+            'paid_amount' => 500,
+            'coverage_snapshot' => ['requires_pre_authorization' => false],
+        ]);
+        $this->assertSame('1.250', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['paid_quantity']);
+
+        $item->invoiceItem->update(['coverage_snapshot' => ['requires_pre_authorization' => true]]);
+        $pendingAuthorization = app(MedicineFinancialClearanceService::class)->forItem($item->refresh());
+        $this->assertTrue($pendingAuthorization['authorization_pending']);
+        $this->assertSame('0.000', $pendingAuthorization['paid_quantity']);
     }
 
     public function test_dispensing_label_prints_actual_quantity_and_complete_medication_directions(): void

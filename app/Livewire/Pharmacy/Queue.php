@@ -27,11 +27,11 @@ class Queue extends Component
         $readyIds = $this->tab === 'ready'
             ? Prescription::query()
                 ->forCurrentFacility()
-                ->where('status', 'prescribed')
+                ->whereIn('status', ['prescribed', 'partially_dispensed'])
                 ->whereHas('encounter', fn ($encounter) => $encounter->whereNotNull('completed_at'))
                 ->whereHas('visit', fn ($visit) => $visit->whereNotIn('visit_status', ['referred', 'cancelled', 'discharged']))
                 ->get()
-                ->filter(fn (Prescription $prescription) => $billing->isCleared($prescription))
+                ->filter(fn (Prescription $prescription) => $billing->hasFinanciallyDispensableItems($prescription))
                 ->modelKeys()
             : [];
         $rows = Prescription::query()->forCurrentFacility()->with(['patient', 'visit.invoice', 'encounter.provider'])->withCount('items')

@@ -37,19 +37,26 @@
                         <th class="px-3 py-2">Qty</th>
                         <th class="px-3 py-2">Gross</th>
                         <th class="px-3 py-2">Patient</th>
+                        <th class="px-3 py-2">Paid</th>
+                        <th class="px-3 py-2">Balance</th>
+                        <th class="px-3 py-2">Covered Qty</th>
                         <th class="px-3 py-2">Insurance</th>
                         <th class="px-3 py-2">Status</th>
                     </tr>
                 </thead>
                 <tbody>
                     @foreach($invoice->items as $item)
+                        @php($medicineFinancial = $item->prescriptionItem ? app(\App\Services\MedicineFinancialClearanceService::class)->forItem($item->prescriptionItem) : null)
                         <tr class="border-t border-slate-100 dark:border-slate-800">
-                            <td class="px-3 py-2">{{ $item->description_snapshot ?? $item->description }}</td>
+                            <td class="px-3 py-2">{{ $item->description_snapshot ?? $item->description }}@if($medicineFinancial)<div class="text-xs text-slate-500">Unit price: {{ number_format((float) $medicineFinancial['billed_unit_price'], 2) }}</div>@endif</td>
                             <td class="px-3 py-2">{{ $item->quantity }}</td>
                             <td class="px-3 py-2">{{ number_format($item->gross_amount ?: $item->total_amount, 2) }}</td>
                             <td class="px-3 py-2">{{ number_format($item->patient_amount, 2) }}</td>
+                            <td class="px-3 py-2">{{ number_format($item->paid_amount, 2) }}</td>
+                            <td class="px-3 py-2">{{ number_format(max(0, (float) $item->patient_amount - (float) $item->paid_amount), 2) }}</td>
+                            <td class="px-3 py-2">@if($medicineFinancial){{ rtrim(rtrim($medicineFinancial['paid_quantity'], '0'), '.') }} / {{ rtrim(rtrim($medicineFinancial['prescribed_quantity'], '0'), '.') }}@else—@endif</td>
                             <td class="px-3 py-2">{{ number_format($item->insurance_amount, 2) }}</td>
-                            <td class="px-3 py-2">{{ $item->status }}</td>
+                            <td class="px-3 py-2">{{ $medicineFinancial && (float) $medicineFinancial['paid_quantity'] > 0 && ! $medicineFinancial['financially_cleared'] ? 'Partially Paid' : $item->status }}</td>
                         </tr>
                     @endforeach
                 </tbody>
@@ -85,6 +92,13 @@
                     @error('payment')
                         <p class="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300">{{ $message }}</p>
                     @enderror
+
+                    <div class="grid grid-cols-2 gap-3 rounded-md bg-slate-50 p-3 text-sm dark:bg-slate-900">
+                        <div><span class="block text-xs text-slate-500">Invoice total</span><strong>{{ number_format($invoice->patient_amount, 2) }}</strong></div>
+                        <div><span class="block text-xs text-slate-500">Previously paid</span><strong>{{ number_format($invoice->paid_amount, 2) }}</strong></div>
+                        <div><span class="block text-xs text-slate-500">Payment now</span><strong>{{ number_format((float) $amount, 2) }}</strong></div>
+                        <div><span class="block text-xs text-slate-500">Remaining balance</span><strong>{{ number_format(max(0, (float) $invoice->balance_amount - (float) $amount), 2) }}</strong></div>
+                    </div>
 
                     <label class="block">
                         <span class="text-sm">Method</span>

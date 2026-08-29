@@ -50,6 +50,7 @@ use App\Services\BillingChargeService;
 use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
 use App\Services\MedicineCatalogService;
+use App\Services\MedicineFinancialClearanceService;
 use App\Services\PaymentConfirmationService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
@@ -2130,7 +2131,7 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->count());
     }
 
-    public function test_cash_medicine_is_billed_and_pharmacy_queue_waits_for_full_medicine_payment(): void
+    public function test_cash_medicine_partial_payment_releases_only_covered_quantity_to_pharmacy(): void
     {
         $admin = $this->bootstrappedFacility();
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
@@ -2163,8 +2164,9 @@ class Step6ClinicalWorkflowTest extends TestCase
 
         $method = PaymentMethod::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Cash', 'code' => 'CASH-MED', 'type' => 'cash', 'is_cash' => true, 'is_active' => true]);
         app(PaymentConfirmationService::class)->confirmPayment($visit->invoice->refresh(), $method, 4000, $admin, ['idempotency_key' => (string) Str::uuid()]);
-        $this->assertSame('awaiting_payment', $prescription->refresh()->status->value);
-        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $this->assertSame('prescribed', $prescription->refresh()->status->value);
+        $this->assertSame('4.000', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['paid_quantity']);
+        $this->assertSame(1, PatientQueue::query()->where('visit_id', $visit->id)->whereHas('department', fn ($query) => $query->where('code', 'PHA'))->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
 
         $finalPaymentKey = (string) Str::uuid();
         $finalPayment = app(PaymentConfirmationService::class)->confirmPayment($visit->invoice->refresh(), $method, 5000, $admin, ['idempotency_key' => $finalPaymentKey]);

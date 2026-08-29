@@ -25,6 +25,7 @@ class PrescriptionBillingService
         private readonly InsuranceCoverageService $coverage,
         private readonly VisitClosureService $visitClosure,
         private readonly MedicineBillingReadinessService $billingReadiness,
+        private readonly MedicineFinancialClearanceService $financialClearance,
     ) {}
 
     public function bill(Prescription $prescription, $actor): Prescription
@@ -113,14 +114,17 @@ class PrescriptionBillingService
 
             $prescriptions = Prescription::query()
                 ->where('visit_id', $invoice->visit_id)
-                ->where('status', PrescriptionStatus::AwaitingPayment->value)
+                ->whereIn('status', [
+                    PrescriptionStatus::AwaitingPayment->value,
+                    PrescriptionStatus::PartiallyDispensed->value,
+                ])
                 ->whereHas('items.invoiceItem', fn ($query) => $query->where('invoice_id', $invoice->id))
                 ->lockForUpdate()
                 ->get();
 
             $released = false;
             foreach ($prescriptions as $prescription) {
-                if ($this->isCleared($prescription)) {
+                if ($this->hasFinanciallyDispensableItems($prescription)) {
                     $this->releasePrescription($prescription, $actor);
                     $released = true;
                 }
@@ -132,7 +136,7 @@ class PrescriptionBillingService
         });
     }
 
-    /** @return array{amount_due: float, amount_paid: float, patient_balance: float, insurance_covered_amount: float, authorization_pending: bool, cleared: bool} */
+    /** @return array{amount_due: float, amount_paid: float, patient_balance: float, insurance_covered_amount: float, authorization_pending: bool, cleared: bool, has_dispensable_quantity: bool} */
     public function clearance(Prescription $prescription): array
     {
         $items = $prescription->items()
@@ -157,6 +161,7 @@ class PrescriptionBillingService
             'insurance_covered_amount' => round((float) $items->sum('insurance_amount'), 2),
             'authorization_pending' => $authorizationPending,
             'cleared' => $items->isNotEmpty() && $balance <= 0.005 && ! $authorizationPending,
+            'has_dispensable_quantity' => $this->hasFinanciallyDispensableItems($prescription),
         ];
     }
 
@@ -165,10 +170,28 @@ class PrescriptionBillingService
         return $this->clearance($prescription)['cleared'];
     }
 
+    public function itemClearance(PrescriptionItem $item): array
+    {
+        return $this->financialClearance->forItem($item);
+    }
+
+    public function hasFinanciallyDispensableItems(Prescription $prescription): bool
+    {
+        return $prescription->items()
+            ->whereNull('terminal_status')
+            ->with(['invoiceItem', 'medicine.dispensingUnit'])
+            ->get()
+            ->contains(fn (PrescriptionItem $item): bool => bccomp(
+                $this->financialClearance->forItem($item)['remaining_paid_quantity'],
+                '0.000',
+                3,
+            ) > 0);
+    }
+
     public function releasePrescription(Prescription $prescription, $actor): void
     {
         $prescription = Prescription::query()->lockForUpdate()->findOrFail($prescription->id);
-        if (! $this->isCleared($prescription)) {
+        if (! $this->hasFinanciallyDispensableItems($prescription)) {
             return;
         }
 
@@ -211,6 +234,7 @@ class PrescriptionBillingService
         $this->audit($actor, 'medicine_payment_cleared', $prescription, [
             'invoice_id' => $prescription->visit->invoice?->id,
             'pharmacy_queue_id' => $queue?->id,
+            'partial_financial_clearance' => ! $this->isCleared($prescription),
         ]);
         if ($queue?->wasRecentlyCreated) {
             $this->audit($actor, 'pharmacy_queue_created', $prescription, ['pharmacy_queue_id' => $queue->id]);

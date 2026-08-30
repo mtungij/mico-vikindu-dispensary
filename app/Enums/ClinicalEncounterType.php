@@ -12,4 +12,9 @@ enum ClinicalEncounterType: string
     case FollowUp = 'follow_up';
     case ConsultationOnly = 'consultation_only';
     case Other = 'other';
+
+    public function label(): string
+    {
+        return str($this->value)->replace('_', ' ')->title()->toString();
+    }
 }

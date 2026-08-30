@@ -46,6 +46,6 @@ class DispensingLabelController extends Controller
 
     private function loadLabelData(Dispensing $dispensing): Dispensing
     {
-        return $dispensing->load(['patient', 'location', 'dispenser.staffProfile', 'items.medicine.dispensingUnit', 'items.prescriptionItem']);
+        return $dispensing->load(['patient', 'prescription.encounter', 'location', 'dispenser.staffProfile', 'items.medicine.dispensingUnit', 'items.prescriptionItem']);
     }
 }

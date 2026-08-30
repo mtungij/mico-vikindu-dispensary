@@ -32,7 +32,7 @@ class PrescriptionBillingService
     {
         return DB::transaction(function () use ($prescription, $actor): Prescription {
             $prescription = Prescription::query()
-                ->with(['items.medicine.service', 'visit.invoice', 'encounter'])
+                ->with(['items.medicine.service', 'visit.invoice', 'encounter.dentalEncounter'])
                 ->lockForUpdate()
                 ->findOrFail($prescription->id);
             abort_unless($prescription->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
@@ -73,7 +73,14 @@ class PrescriptionBillingService
                     $actor,
                     $item,
                     (float) $item->quantity,
-                    ['source' => 'prescription', 'prescription_id' => $prescription->id, 'medicine_id' => $item->medicine_id],
+                    [
+                        'source' => 'prescription',
+                        'clinical_source' => $prescription->encounter?->encounter_type?->value ?? $prescription->encounter?->encounter_type,
+                        'clinical_encounter_id' => $prescription->clinical_encounter_id,
+                        'dental_encounter_id' => $prescription->encounter?->dentalEncounter?->id,
+                        'prescription_id' => $prescription->id,
+                        'medicine_id' => $item->medicine_id,
+                    ],
                     $payerSplit,
                     $coverageAttributes,
                 );
@@ -90,6 +97,8 @@ class PrescriptionBillingService
                     'invoice_id' => $invoice->id,
                     'invoice_item_id' => $invoiceItem->id,
                     'prescription_item_id' => $item->id,
+                    'source' => $prescription->encounter?->encounter_type?->value ?? $prescription->encounter?->encounter_type,
+                    'dental_encounter_id' => $prescription->encounter?->dentalEncounter?->id,
                 ]);
             }
 

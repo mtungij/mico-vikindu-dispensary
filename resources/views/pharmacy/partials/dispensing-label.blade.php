@@ -20,6 +20,7 @@
             <p><span class="text-slate-500">Patient No:</span> <strong>{{ $dispensing->patient?->patient_number }}</strong></p>
             <p><span class="text-slate-500">Date:</span> <strong>{{ $dispensing->dispensed_at?->format('d M Y') }}</strong></p>
             <p><span class="text-slate-500">Dispensing No:</span> <strong>{{ $dispensing->dispensing_number }}</strong></p>
+            @if($dispensing->prescription?->encounter)<p><span class="text-slate-500">Source:</span> <strong>{{ $dispensing->prescription->encounter->encounter_type?->label() ?? str($dispensing->prescription->encounter->encounter_type?->value)->title() }}</strong></p>@endif
         </div>
         <div class="border-y border-slate-200 py-3 text-center"><h3 class="text-base font-extrabold uppercase leading-tight">{{ $item->medicine?->name }}</h3></div>
         <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-sm">

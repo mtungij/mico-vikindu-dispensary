@@ -26,7 +26,6 @@ class FacilitySettingsSeeder extends Seeder
     {
         foreach ([
             'new_patient_registration_service_id' => ['NEW-REG', 'NEWREG'],
-            'returning_patient_registration_service_id' => ['RETURN-REG', 'RETREG'],
             'patient_card_replacement_service_id' => ['CARD-REPLACE', 'CARDREP'],
         ] as $key => $codes) {
             $service = Service::query()

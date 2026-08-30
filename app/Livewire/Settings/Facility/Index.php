@@ -4,8 +4,8 @@ namespace App\Livewire\Settings\Facility;
 
 use App\Events\FacilityBrandingUpdated;
 use App\Events\FacilityUpdated;
-use App\Models\Facility;
 use App\Models\ActivityLog;
+use App\Models\Facility;
 use App\Models\Service;
 use App\Services\FacilityContext;
 use App\Services\FacilitySetupService;
@@ -29,27 +29,39 @@ class Index extends Component
     public bool $showBasicModal = false;
 
     public string $name = '';
+
     public ?string $code = null;
+
     public string $phone_primary = '';
+
     public ?string $email = null;
+
     public ?string $registration_number = null;
+
     public ?string $tin_number = null;
+
     public ?string $nhif_accreditation_number = null;
+
     public ?string $receipt_footer = null;
+
     public bool $charge_new_patient_registration = true;
-    public bool $charge_returning_patient_registration = false;
+
     public ?int $new_patient_registration_service_id = null;
-    public ?int $returning_patient_registration_service_id = null;
+
     public ?int $patient_card_replacement_service_id = null;
+
     public bool $require_consultation_service = true;
+
     public bool $auto_add_registration_fee = true;
+
     public bool $auto_add_consultation_fee = true;
-    public bool $charge_returning_patient_consultation = false;
-    public ?int $returning_patient_consultation_service_id = null;
+
     public bool $charge_emergency_consultation = false;
+
     public ?int $emergency_consultation_service_id = null;
 
     public ?TemporaryUploadedFile $logo = null;
+
     public ?TemporaryUploadedFile $official_stamp = null;
 
     public function mount(FacilitySetupService $setup): void
@@ -109,15 +121,11 @@ class Index extends Component
 
         $validated = $this->validate([
             'charge_new_patient_registration' => ['boolean'],
-            'charge_returning_patient_registration' => ['boolean'],
             'new_patient_registration_service_id' => ['nullable', 'required_if:charge_new_patient_registration,true', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)->where('service_type', 'registration')],
-            'returning_patient_registration_service_id' => ['nullable', 'required_if:charge_returning_patient_registration,true', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)->where('service_type', 'registration')],
             'patient_card_replacement_service_id' => ['nullable', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)],
             'require_consultation_service' => ['boolean'],
             'auto_add_registration_fee' => ['boolean'],
             'auto_add_consultation_fee' => ['boolean'],
-            'charge_returning_patient_consultation' => ['boolean'],
-            'returning_patient_consultation_service_id' => ['nullable', 'required_if:charge_returning_patient_consultation,true', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)->where('service_type', 'consultation')->where('is_active', true)],
             'charge_emergency_consultation' => ['boolean'],
             'emergency_consultation_service_id' => ['nullable', 'required_if:charge_emergency_consultation,true', Rule::exists('services', 'id')->where('facility_id', $this->facility->id)->where('service_type', 'consultation')->where('is_active', true)],
         ]);
@@ -180,15 +188,11 @@ class Index extends Component
         $this->receipt_footer = $this->facility->receipt_footer;
         $settings = app(FacilitySetupService::class);
         $this->charge_new_patient_registration = (bool) $settings->getSetting($this->facility, 'charge_new_patient_registration', true);
-        $this->charge_returning_patient_registration = (bool) $settings->getSetting($this->facility, 'charge_returning_patient_registration', false);
         $this->new_patient_registration_service_id = filled($settings->getSetting($this->facility, 'new_patient_registration_service_id')) ? (int) $settings->getSetting($this->facility, 'new_patient_registration_service_id') : null;
-        $this->returning_patient_registration_service_id = filled($settings->getSetting($this->facility, 'returning_patient_registration_service_id')) ? (int) $settings->getSetting($this->facility, 'returning_patient_registration_service_id') : null;
         $this->patient_card_replacement_service_id = filled($settings->getSetting($this->facility, 'patient_card_replacement_service_id')) ? (int) $settings->getSetting($this->facility, 'patient_card_replacement_service_id') : null;
         $this->require_consultation_service = (bool) $settings->getSetting($this->facility, 'require_consultation_service', true);
         $this->auto_add_registration_fee = (bool) $settings->getSetting($this->facility, 'auto_add_registration_fee', true);
         $this->auto_add_consultation_fee = (bool) $settings->getSetting($this->facility, 'auto_add_consultation_fee', true);
-        $this->charge_returning_patient_consultation = (bool) $settings->getSetting($this->facility, 'charge_returning_patient_consultation', false);
-        $this->returning_patient_consultation_service_id = filled($settings->getSetting($this->facility, 'returning_patient_consultation_service_id')) ? (int) $settings->getSetting($this->facility, 'returning_patient_consultation_service_id') : null;
         $this->charge_emergency_consultation = (bool) $settings->getSetting($this->facility, 'charge_emergency_consultation', false);
         $this->emergency_consultation_service_id = filled($settings->getSetting($this->facility, 'emergency_consultation_service_id')) ? (int) $settings->getSetting($this->facility, 'emergency_consultation_service_id') : null;
     }

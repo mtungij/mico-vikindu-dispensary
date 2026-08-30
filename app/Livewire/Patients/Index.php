@@ -157,7 +157,6 @@ class Index extends Component
         $this->selectedPatientId = $patient->id;
         $this->newPatientConsultationServiceId = $this->visit->consultation_service_id;
         $this->visit->visit_type = 'returning_patient';
-        $this->visit->consultation_service_id = null;
         if ($profile = $patient->primaryPayerProfile) {
             foreach (array_keys($this->payer->rules()) as $field) {
                 $value = $profile->{$field};
@@ -180,6 +179,7 @@ class Index extends Component
         $this->resetErrorBag();
         $this->selectedPatientId = null;
         $this->visit->visit_type = 'new_patient';
+        $this->visit->consultation_service_id = $this->newPatientConsultationServiceId;
         $this->activeVisitOverrideReason = '';
         $this->refreshChargePreview();
         $this->step = 1;
@@ -305,9 +305,11 @@ class Index extends Component
         }
         if ($this->visit->visit_type === 'new_patient') {
             $this->visit->consultation_service_id = $this->newPatientConsultationServiceId;
-        } else {
+        } elseif ($this->visit->visit_type === 'emergency') {
             $this->newPatientConsultationServiceId ??= $this->visit->consultation_service_id;
             $this->visit->consultation_service_id = null;
+        } elseif ($this->visit->visit_type === 'returning_patient' && ! $this->visit->consultation_service_id) {
+            $this->visit->consultation_service_id = $this->newPatientConsultationServiceId;
         }
         $this->refreshChargePreview();
     }

@@ -26,23 +26,27 @@ class ReceptionChargeService
 
     public function resolveRegistrationService(Facility $facility, bool $isNewPatient): ?Service
     {
+        // Returning registration is always free. Keep the waiver item-specific by
+        // omitting only the registration line; all selected services bill normally.
+        if (! $isNewPatient) {
+            return null;
+        }
+
         if (! $this->bool($facility, 'auto_add_registration_fee', true)) {
             return null;
         }
 
-        $chargeKey = $isNewPatient ? 'charge_new_patient_registration' : 'charge_returning_patient_registration';
-        if (! $this->bool($facility, $chargeKey, $isNewPatient)) {
+        if (! $this->bool($facility, 'charge_new_patient_registration', true)) {
             return null;
         }
 
-        $settingKey = $isNewPatient ? 'new_patient_registration_service_id' : 'returning_patient_registration_service_id';
-        $configuredId = $this->value($facility, $settingKey);
+        $configuredId = $this->value($facility, 'new_patient_registration_service_id');
         $service = $configuredId ? Service::query()->where('facility_id', $facility->id)->find((int) $configuredId) : null;
 
         $service ??= Service::query()
             ->where('facility_id', $facility->id)
             ->where('service_type', ServiceType::Registration->value)
-            ->whereIn('code', $isNewPatient ? ['NEW-REG', 'NEWREG'] : ['RETURN-REG', 'RETREG'])
+            ->whereIn('code', ['NEW-REG', 'NEWREG'])
             ->where('is_active', true)
             ->first();
 
@@ -57,12 +61,11 @@ class ReceptionChargeService
             return null;
         }
 
-        if (in_array($visitType, ['returning_patient', 'emergency'], true)) {
-            $prefix = $visitType === 'returning_patient' ? 'returning_patient' : 'emergency';
-            if (! $this->bool($facility, 'charge_'.$prefix.'_consultation', false)) {
+        if ($visitType === 'emergency') {
+            if (! $this->bool($facility, 'charge_emergency_consultation', false)) {
                 return null;
             }
-            $configuredId = $this->value($facility, $prefix.'_consultation_service_id');
+            $configuredId = $this->value($facility, 'emergency_consultation_service_id');
             $consultationServiceId = filled($configuredId) ? (int) $configuredId : null;
             if (! $consultationServiceId) {
                 throw ValidationException::withMessages(['consultation_service_id' => 'Huduma maalum ya consultation kwa visit type hii haijasanidiwa.']);
@@ -186,7 +189,7 @@ class ReceptionChargeService
         }
 
         if ($destination->requires_consultation) {
-            if (! $consultationService && $visitType === 'new_patient') {
+            if (! $consultationService && $visitType !== 'emergency') {
                 throw ValidationException::withMessages(['consultation_service_id' => 'Chagua consultation service kwa destination hii.']);
             }
             if ($consultationService) {
@@ -199,8 +202,12 @@ class ReceptionChargeService
 
     private function shouldApplyRegistrationFee(string $visitType, Department $destination): bool
     {
-        if ($visitType === 'emergency') return false;
-        if (in_array(strtoupper((string) $destination->code), ['LAB', 'PHA', 'PHARM', 'PRC', 'PRO'], true)) return false;
+        if ($visitType === 'emergency') {
+            return false;
+        }
+        if (in_array(strtoupper((string) $destination->code), ['LAB', 'PHA', 'PHARM', 'PRC', 'PRO'], true)) {
+            return false;
+        }
 
         return in_array($visitType, ['new_patient', 'returning_patient'], true);
     }
@@ -213,6 +220,22 @@ class ReceptionChargeService
                 'charge_source' => 'patient_registration',
                 'patient_registration_type' => $isNewPatient ? 'new' : 'returning',
             ], $actor, 'registration_charge_auto_added');
+        }
+
+        if (! $isNewPatient && $destination && $this->shouldApplyRegistrationFee('returning_patient', $destination)
+            && ! ActivityLog::query()->where('event', 'returning_patient_registration_waived')->where('subject_type', Invoice::class)->where('subject_id', $invoice->id)->exists()) {
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => 'returning_patient_registration_waived',
+                'subject_type' => Invoice::class,
+                'subject_id' => $invoice->id,
+                'new_values' => [
+                    'reason' => 'returning_patient_registration',
+                    'visit_id' => $invoice->visit_id,
+                ],
+                'ip_address' => request()?->ip(),
+                'user_agent' => request()?->userAgent(),
+            ]);
         }
 
         if ($consultationService) {
@@ -418,7 +441,9 @@ class ReceptionChargeService
 
     private function paymentBeforeService(Facility $facility, string $visitType, bool $requested): bool
     {
-        if ($visitType !== 'emergency') return $requested;
+        if ($visitType !== 'emergency') {
+            return $requested;
+        }
         $bypass = WorkflowSetting::query()->where('facility_id', $facility->id)->where('key', 'allow_emergency_override')->value('value');
 
         return ! filter_var($bypass ?? true, FILTER_VALIDATE_BOOL);

@@ -14,6 +14,7 @@ use App\Models\Department;
 use App\Models\Facility;
 use App\Models\FacilitySetting;
 use App\Models\InsuranceProvider;
+use App\Models\Invoice;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryTest;
 use App\Models\LaboratoryTestCategory;
@@ -420,21 +421,24 @@ class Step5FoundationTest extends TestCase
         $this->assertNotSame('awaiting_payment', $result['visit']->visit_status->value);
     }
 
-    public function test_returning_and_emergency_visits_ignore_stale_general_opd_consultation(): void
+    public function test_returning_visit_bills_normal_opd_consultation_while_emergency_remains_unchanged(): void
     {
         $admin = $this->bootstrappedFacility();
         [$department, $general] = $this->opdConsultation();
         $patient = $this->patient($admin);
+        app(ServicePricingService::class)->createPriceVersion($general, ['payer_type' => 'cash', 'amount' => 5000, 'currency' => 'TZS'], $admin);
 
         $returningPreview = app(ReceptionChargeService::class)->buildChargePreview(currentFacility(), false, $department->id, $general->id, ['payer_type' => 'cash'], [], 'returning_patient');
-        $this->assertNull($returningPreview['consultation']);
-        $this->assertEquals(0.0, $returningPreview['total']);
+        $this->assertSame($general->id, $returningPreview['consultation']['service_id']);
+        $this->assertGreaterThan(0, $returningPreview['total']);
+        $this->assertNull($returningPreview['registration']);
 
         $returning = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], [
             ...$this->visitData($department, $general), 'consultation_service_id' => $general->id,
         ], [], $admin);
-        $this->assertNull($returning['visit']->consultation_service_id);
-        $this->assertFalse($returning['invoice']->items()->where('item_type', 'consultation')->exists());
+        $this->assertSame($general->id, $returning['visit']->consultation_service_id);
+        $this->assertTrue($returning['invoice']->items()->where('service_id', $general->id)->where('item_type', 'consultation')->exists());
+        $this->assertFalse($returning['invoice']->items()->where('item_type', 'registration')->exists());
         $returning['visit']->update(['visit_status' => 'completed']);
 
         WorkflowSetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'allow_emergency_override'], ['value' => '1', 'type' => 'boolean', 'group' => 'workflow']);
@@ -451,7 +455,7 @@ class Step5FoundationTest extends TestCase
         $this->assertNotSame('awaiting_payment', $emergency['visit']->visit_status->value);
     }
 
-    public function test_visit_type_specific_consultation_requires_explicit_configuration_and_matches_preview(): void
+    public function test_legacy_returning_consultation_override_cannot_replace_normal_destination_price_and_emergency_override_is_preserved(): void
     {
         $admin = $this->bootstrappedFacility();
         [$department, $general] = $this->opdConsultation();
@@ -464,16 +468,17 @@ class Step5FoundationTest extends TestCase
         FacilitySetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'returning_patient_consultation_service_id'], ['value' => (string) $specific->id, 'type' => 'string', 'group' => 'reception_billing']);
 
         $preview = app(ReceptionChargeService::class)->buildChargePreview(currentFacility()->refresh(), false, $department->id, $general->id, ['payer_type' => 'cash'], [], 'returning_patient');
-        $this->assertSame($specific->id, $preview['consultation']['service_id']);
+        $this->assertSame($general->id, $preview['consultation']['service_id']);
         $patient = $this->patient($admin);
         $result = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], [
             ...$this->visitData($department, $general), 'consultation_service_id' => $general->id,
         ], [], $admin);
 
-        $this->assertSame($specific->id, $result['visit']->consultation_service_id);
+        $this->assertSame($general->id, $result['visit']->consultation_service_id);
         $this->assertSame((float) $preview['total'], (float) $result['invoice']->refresh()->total_amount);
         $this->assertSame(1, $result['invoice']->items()->where('item_type', 'consultation')->count());
-        $this->assertDatabaseMissing('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $general->id]);
+        $this->assertDatabaseHas('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $general->id]);
+        $this->assertDatabaseMissing('invoice_items', ['invoice_id' => $result['invoice']->id, 'service_id' => $specific->id]);
 
         $emergencySpecific = $general->replicate();
         $emergencySpecific->name = 'Emergency OPD Consultation';
@@ -494,7 +499,7 @@ class Step5FoundationTest extends TestCase
         $this->assertNotSame('awaiting_payment', $emergency['visit']->visit_status->value);
     }
 
-    public function test_changing_new_visit_to_returning_or_emergency_clears_stale_consultation_preview(): void
+    public function test_changing_new_visit_to_returning_preserves_consultation_while_emergency_clears_it(): void
     {
         $admin = $this->bootstrappedFacility();
         [$department, $general] = $this->opdConsultation();
@@ -505,8 +510,8 @@ class Step5FoundationTest extends TestCase
             ->set('visit.consultation_service_id', $general->id)
             ->assertSet('chargePreview.consultation.service_id', $general->id)
             ->set('visit.visit_type', 'returning_patient')
-            ->assertSet('visit.consultation_service_id', null)
-            ->assertSet('chargePreview.consultation', null)
+            ->assertSet('visit.consultation_service_id', $general->id)
+            ->assertSet('chargePreview.consultation.service_id', $general->id)
             ->set('visit.visit_type', 'new_patient')
             ->assertSet('visit.consultation_service_id', $general->id)
             ->assertSet('chargePreview.consultation.service_id', $general->id)
@@ -539,7 +544,7 @@ class Step5FoundationTest extends TestCase
     {
         $admin = $this->bootstrappedFacility();
         $patient = $this->patient($admin);
-        [$department] = $this->opdConsultation();
+        [$department, $consultation] = $this->opdConsultation();
         $patientCount = Patient::query()->count();
 
         Livewire::actingAs($admin)->test(PatientsIndex::class)
@@ -548,6 +553,7 @@ class Step5FoundationTest extends TestCase
             ->assertSet('selectedPatientId', $patient->id)
             ->assertSet('visit.visit_type', 'returning_patient')
             ->set('visit.destination_department_id', $department->id)
+            ->set('visit.consultation_service_id', $consultation->id)
             ->set('visit.require_payment_before_service', false)
             ->set('step', 6)
             ->assertSee($patient->fullName())
@@ -579,6 +585,7 @@ class Step5FoundationTest extends TestCase
             ->call('create')
             ->call('selectExistingPatient', $existing['patient']->id)
             ->set('visit.destination_department_id', $department->id)
+            ->set('visit.consultation_service_id', $consultation->id)
             ->set('step', 6)
             ->assertSee('Mgonjwa huyu tayari ana visit inayoendelea: '.$existing['visit']->visit_number.'.')
             ->assertSee('Open Active Visit')
@@ -599,6 +606,7 @@ class Step5FoundationTest extends TestCase
             ->call('create')
             ->call('selectExistingPatient', $existing['patient']->id)
             ->set('visit.destination_department_id', $department->id)
+            ->set('visit.consultation_service_id', $consultation->id)
             ->set('visit.require_payment_before_service', false)
             ->set('activeVisitOverrideReason', 'Separate specialist visit required')
             ->set('step', 6)
@@ -629,6 +637,7 @@ class Step5FoundationTest extends TestCase
         $this->assertSame(1, Visit::query()->where('patient_id', $patient->id)->count());
         $this->assertSame(1, $first['visit']->invoice()->count());
         $this->assertSame(1, $first['visit']->queues()->count());
+        $this->assertSame(1, $first['invoice']->items()->where('service_id', $consultation->id)->count());
         $this->assertSame(1, ActivityLog::query()->where('event', 'visit_created')->where('subject_type', Visit::class)->where('subject_id', $first['visit']->id)->count());
     }
 
@@ -952,22 +961,64 @@ class Step5FoundationTest extends TestCase
         $this->assertNull($result['queue']);
     }
 
-    public function test_returning_patient_registration_charge_respects_facility_setting(): void
+    public function test_returning_cash_registration_is_always_free_consultation_is_normal_and_partial_payment_stays_in_billing(): void
     {
         $admin = $this->bootstrappedFacility();
         $patient = $this->patient($admin);
+        $patientCount = Patient::query()->count();
         [$department, $consultation] = $this->opdConsultation();
         $returnReg = Service::query()->where('code', 'RETURN-REG')->firstOrFail();
+        app(ServicePricingService::class)->createPriceVersion($consultation, ['payer_type' => 'cash', 'amount' => 5000, 'currency' => 'TZS'], $admin);
         app(ServicePricingService::class)->createPriceVersion($returnReg, ['payer_type' => 'cash', 'amount' => 1000, 'currency' => 'TZS'], $admin);
-
-        $first = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], $this->visitData($department, $consultation), [], $admin);
-        $this->assertDatabaseMissing('invoice_items', ['invoice_id' => $first['invoice']->id, 'service_id' => $returnReg->id]);
-        $first['visit']->update(['visit_status' => 'completed']);
-
+        // A legacy setting must not be able to make returning registration billable.
         FacilitySetting::query()->updateOrCreate(['facility_id' => currentFacility()->id, 'key' => 'charge_returning_patient_registration'], ['value' => '1', 'type' => 'boolean', 'group' => 'reception_billing']);
-        $second = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient->refresh(), ['payer_type' => 'cash', 'is_primary' => true], $this->visitData($department, $consultation), [], $admin);
 
-        $this->assertDatabaseHas('invoice_items', ['invoice_id' => $second['invoice']->id, 'service_id' => $returnReg->id, 'total_amount' => 1000]);
+        $result = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, ['payer_type' => 'cash', 'is_primary' => true], $this->visitData($department, $consultation), [], $admin);
+        $invoice = $result['invoice']->refresh();
+
+        $this->assertSame($patientCount, Patient::query()->count());
+        $this->assertSame($patient->id, $result['visit']->patient_id);
+        $this->assertDatabaseMissing('invoice_items', ['invoice_id' => $invoice->id, 'service_id' => $returnReg->id]);
+        $this->assertFalse($invoice->items()->where('item_type', 'registration')->exists());
+        $this->assertDatabaseHas('invoice_items', [
+            'invoice_id' => $invoice->id,
+            'service_id' => $consultation->id,
+            'item_type' => 'consultation',
+            'unit_price' => 5000,
+            'patient_amount' => 5000,
+        ]);
+        $this->assertSame('5000.00', $invoice->patient_amount);
+        $this->assertSame('5000.00', $invoice->balance_amount);
+        $this->assertSame('awaiting_payment', $result['visit']->visit_status->value);
+        $this->assertDatabaseHas('activity_logs', [
+            'event' => 'returning_patient_registration_waived',
+            'subject_type' => Invoice::class,
+            'subject_id' => $invoice->id,
+        ]);
+
+        $cash = PaymentMethod::query()->create([
+            'facility_id' => currentFacility()->id,
+            'name' => 'Cash Returning Partial',
+            'code' => 'CASH-RETURN-PART',
+            'type' => 'cash',
+            'is_cash' => true,
+            'is_active' => true,
+        ]);
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 3000, $admin, [
+            'idempotency_key' => (string) Str::uuid(),
+        ]);
+
+        $this->assertSame('partial', $invoice->refresh()->payment_status);
+        $this->assertSame('2000.00', $invoice->balance_amount);
+        $this->assertSame('awaiting_payment', $result['visit']->refresh()->visit_status->value);
+
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 2000, $admin, [
+            'idempotency_key' => (string) Str::uuid(),
+        ]);
+        $this->assertSame('paid', $invoice->refresh()->payment_status);
+        $this->assertSame('0.00', $invoice->balance_amount);
+        $this->assertSame('in_progress', $result['visit']->refresh()->visit_status->value);
+        $this->assertSame(1, $result['visit']->queues()->where('department_id', $department->id)->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
     }
 
     public function test_missing_price_blocks_registration_but_zero_price_is_free(): void
@@ -1005,6 +1056,66 @@ class Step5FoundationTest extends TestCase
         $this->assertEquals(15000.00, (float) $item->insurance_amount);
         $this->assertEquals(0.00, (float) $item->patient_amount);
         $this->assertNotSame('awaiting_payment', $result['visit']->visit_status->value);
+    }
+
+    public function test_returning_insurance_patient_has_free_registration_and_provider_priced_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $patient = $this->patient($admin);
+        [$department, $consultation] = $this->opdConsultation();
+        $provider = InsuranceProvider::query()->firstOrFail();
+        app(ServicePricingService::class)->createPriceVersion($consultation, [
+            'payer_type' => 'insurance',
+            'insurance_provider_id' => $provider->id,
+            'amount' => 7500,
+            'currency' => 'TZS',
+        ], $admin);
+
+        $result = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, [
+            'payer_type' => 'insurance',
+            'insurance_provider_id' => $provider->id,
+            'membership_number' => 'RETURN-NHIF-001',
+            'coverage_status' => 'active',
+            'is_primary' => true,
+        ], [
+            ...$this->visitData($department, $consultation),
+            'payer_type' => 'insurance',
+        ], [], $admin);
+
+        $item = $result['invoice']->items()->where('service_id', $consultation->id)->sole();
+        $this->assertFalse($result['invoice']->items()->where('item_type', 'registration')->exists());
+        $this->assertSame(7500.0, (float) $item->unit_price);
+        $this->assertSame(7500.0, (float) $item->insurance_amount);
+        $this->assertSame(0.0, (float) $item->patient_amount);
+        $this->assertNotSame('awaiting_payment', $result['visit']->visit_status->value);
+    }
+
+    public function test_returning_direct_laboratory_visit_does_not_add_opd_consultation_or_registration(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $patient = $this->patient($admin);
+        $laboratory = Department::query()->where('code', 'LAB')->firstOrFail();
+        $laboratory->update(['queue_enabled' => true, 'requires_consultation' => false, 'requires_triage' => false]);
+        [$service] = $this->directLaboratoryTest($admin, $laboratory, 4000);
+
+        $result = app(ReceptionWorkflowService::class)->openReturningPatientVisit($patient, [
+            'payer_type' => 'cash',
+            'is_primary' => true,
+        ], [
+            'visit_type' => 'returning_patient',
+            'payer_type' => 'cash',
+            'destination_department_id' => $laboratory->id,
+            'consultation_service_id' => null,
+            'priority' => 'normal',
+            'source' => 'walk_in',
+            'registration_idempotency_key' => (string) Str::uuid(),
+            'require_payment_before_service' => true,
+        ], [$service->id], $admin);
+
+        $this->assertFalse($result['invoice']->items()->whereIn('item_type', ['registration', 'consultation'])->exists());
+        $this->assertSame(1, $result['invoice']->items()->where('item_type', 'laboratory_test')->count());
+        $this->assertSame('4000.00', $result['invoice']->refresh()->patient_amount);
+        $this->assertSame('awaiting_payment', $result['visit']->visit_status->value);
     }
 
     public function test_duplicate_submission_does_not_duplicate_auto_invoice_items(): void

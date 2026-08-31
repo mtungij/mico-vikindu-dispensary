@@ -16,6 +16,7 @@ use App\Livewire\Forms\ReferralForm;
 use App\Models\ClinicalEncounter;
 use App\Models\ClinicalProcedureOrder;
 use App\Models\Department;
+use App\Models\Diagnosis;
 use App\Models\LaboratoryTest;
 use App\Models\Medicine;
 use App\Models\PatientQueue;
@@ -23,6 +24,7 @@ use App\Models\PrescriptionItem;
 use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
+use App\Services\DiagnosisService;
 use App\Services\MedicineBillingReadinessService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
@@ -67,9 +69,31 @@ class Consultation extends Component
 
     public bool $icd10Selected = false;
 
+    public ?int $editingDiagnosisId = null;
+
+    public ?int $amendingDiagnosisId = null;
+
+    public string $diagnosisAmendmentReason = '';
+
+    public bool $showDiagnosisAmendmentModal = false;
+
     public ?int $editingPrescriptionItemId = null;
 
     public ?int $editingProcedureOrderId = null;
+
+    public ?int $cancellingProcedureOrderId = null;
+
+    public string $procedureCancellationReason = '';
+
+    public bool $showProcedureCancellationModal = false;
+
+    public ?int $amendingProcedureOrderId = null;
+
+    public ?string $performedProcedureAmendmentNotes = null;
+
+    public string $performedProcedureAmendmentReason = '';
+
+    public bool $showPerformedProcedureAmendmentModal = false;
 
     public string $medicineSearch = '';
 
@@ -203,6 +227,64 @@ class Consultation extends Component
         $this->diagnosisForm->resetForm();
         $this->icd10Selected = false;
         Notifier::success('Diagnosis imeongezwa.');
+    }
+
+    public function editDiagnosis(int $diagnosisId, DiagnosisService $service): void
+    {
+        $diagnosis = $this->encounterDiagnosis($diagnosisId);
+        $service->assertEditable($diagnosis, auth()->user());
+        $this->diagnosisForm->fillFromModel($diagnosis);
+        $this->editingDiagnosisId = $diagnosis->id;
+        $this->icd10Selected = filled($diagnosis->icd10_code);
+        $this->activeTab = 'diagnoses';
+    }
+
+    public function updateDiagnosis(DiagnosisService $service): void
+    {
+        $this->diagnosisForm->validate();
+        $service->updateDiagnosis($this->encounterDiagnosis((int) $this->editingDiagnosisId), $this->diagnosisForm->normalize(), auth()->user());
+        $this->cancelDiagnosisEdit();
+        Notifier::success('Diagnosis updated successfully.');
+    }
+
+    public function removeDiagnosis(int $diagnosisId, DiagnosisService $service): void
+    {
+        $service->removeDiagnosis($this->encounterDiagnosis($diagnosisId), auth()->user());
+        if ($this->editingDiagnosisId === $diagnosisId) {
+            $this->cancelDiagnosisEdit();
+        }
+        Notifier::success('Diagnosis removed from this consultation.');
+    }
+
+    public function cancelDiagnosisEdit(): void
+    {
+        $this->editingDiagnosisId = null;
+        $this->diagnosisForm->resetForm();
+        $this->icd10Selected = false;
+    }
+
+    public function beginDiagnosisAmendment(int $diagnosisId): void
+    {
+        abort_unless(auth()->user()->can('clinical-encounters.amend'), 403);
+        $diagnosis = $this->encounterDiagnosis($diagnosisId);
+        Gate::authorize('update', $diagnosis);
+        $this->diagnosisForm->fillFromModel($diagnosis);
+        $this->amendingDiagnosisId = $diagnosis->id;
+        $this->diagnosisAmendmentReason = '';
+        $this->showDiagnosisAmendmentModal = true;
+        $this->icd10Selected = filled($diagnosis->icd10_code);
+    }
+
+    public function amendDiagnosis(DiagnosisService $service): void
+    {
+        $this->diagnosisForm->validate();
+        $service->amendDiagnosis($this->encounterDiagnosis((int) $this->amendingDiagnosisId), $this->diagnosisForm->normalize(), $this->diagnosisAmendmentReason, auth()->user());
+        $this->showDiagnosisAmendmentModal = false;
+        $this->amendingDiagnosisId = null;
+        $this->diagnosisAmendmentReason = '';
+        $this->diagnosisForm->resetForm();
+        $this->icd10Selected = false;
+        Notifier::success('Completed diagnosis amended with an audit record.');
     }
 
     #[On('icd10-selected')]
@@ -473,6 +555,45 @@ class Consultation extends Component
         Notifier::success('Procedure imeondolewa.');
     }
 
+    public function requestProcedureCancellation(int $procedureOrderId): void
+    {
+        $order = $this->encounterProcedureOrder($procedureOrderId);
+        Gate::authorize('cancel', $order);
+        $this->cancellingProcedureOrderId = $order->id;
+        $this->procedureCancellationReason = '';
+        $this->showProcedureCancellationModal = true;
+    }
+
+    public function cancelProcedureOrder(ProcedureOrderService $service): void
+    {
+        $service->cancelOrder($this->encounterProcedureOrder((int) $this->cancellingProcedureOrderId), $this->procedureCancellationReason, auth()->user());
+        $this->showProcedureCancellationModal = false;
+        $this->cancellingProcedureOrderId = null;
+        $this->procedureCancellationReason = '';
+        Notifier::success('Procedure cancelled and its invoice was reconciled.');
+    }
+
+    public function beginPerformedProcedureAmendment(int $procedureOrderId): void
+    {
+        abort_unless(auth()->user()->can('clinical-encounters.amend'), 403);
+        $order = $this->encounterProcedureOrder($procedureOrderId);
+        abort_unless($order->isPerformed(), 422);
+        $this->amendingProcedureOrderId = $order->id;
+        $this->performedProcedureAmendmentNotes = $order->notes;
+        $this->performedProcedureAmendmentReason = '';
+        $this->showPerformedProcedureAmendmentModal = true;
+    }
+
+    public function amendPerformedProcedure(ProcedureOrderService $service): void
+    {
+        $service->amendPerformedOrder($this->encounterProcedureOrder((int) $this->amendingProcedureOrderId), $this->performedProcedureAmendmentNotes, $this->performedProcedureAmendmentReason, auth()->user());
+        $this->showPerformedProcedureAmendmentModal = false;
+        $this->amendingProcedureOrderId = null;
+        $this->performedProcedureAmendmentNotes = null;
+        $this->performedProcedureAmendmentReason = '';
+        Notifier::success('Performed procedure amendment recorded.');
+    }
+
     public function cancelProcedureEdit(): void
     {
         $this->editingProcedureOrderId = null;
@@ -485,6 +606,14 @@ class Consultation extends Component
             ->where('clinical_encounter_id', $this->encounter->id)
             ->where('facility_id', currentFacility()?->id)
             ->findOrFail($procedureOrderId);
+    }
+
+    private function encounterDiagnosis(int $diagnosisId): Diagnosis
+    {
+        return Diagnosis::query()
+            ->where('clinical_encounter_id', $this->encounter->id)
+            ->where('facility_id', currentFacility()?->id)
+            ->findOrFail($diagnosisId);
     }
 
     public function createFollowUp(ClinicalEncounterService $service): void

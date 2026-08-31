@@ -59,4 +59,29 @@ class ClinicalProcedureOrder extends Model
             && ! $this->performed_by
             && ! $this->encounter?->isReadOnly();
     }
+
+    public function isPerformed(): bool
+    {
+        return $this->performed_at !== null
+            || $this->performed_by !== null
+            || in_array($this->status, [ProcedureOrderStatus::InProgress, ProcedureOrderStatus::Completed], true);
+    }
+
+    public function hasReceivedPayment(): bool
+    {
+        if (! $this->invoiceItem) {
+            return false;
+        }
+
+        return (float) $this->invoiceItem->paid_amount > 0.005
+            || $this->invoiceItem->paymentAllocations()->whereNull('reversed_at')->where('allocated_amount', '>', 0)->exists();
+    }
+
+    public function isBilledUnpaid(): bool
+    {
+        return $this->invoice_item_id !== null
+            && ! $this->hasReceivedPayment()
+            && ! $this->isPerformed()
+            && ! in_array($this->status, [ProcedureOrderStatus::Cancelled, ProcedureOrderStatus::Completed], true);
+    }
 }

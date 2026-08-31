@@ -19,6 +19,7 @@ class ProcedureOrderService
 {
     public function __construct(
         private readonly InvoiceService $invoices,
+        private readonly BillingChargeService $charges,
         private readonly VisitClosureService $visitClosure,
         private readonly WorkflowService $workflow,
     ) {}
@@ -68,16 +69,23 @@ class ProcedureOrderService
         $order->loadMissing(['encounter.visit', 'invoiceItem']);
         Gate::forUser($actor)->authorize('update', $order);
         $this->ensureEncounterMutable($order->encounter, $actor);
-        $this->ensureOrderSafelyEditable($order);
+        $this->ensureOrderEditable($order);
     }
 
     public function updateOrder(ClinicalProcedureOrder $order, array $data, $actor): ClinicalProcedureOrder
     {
         return DB::transaction(function () use ($order, $data, $actor): ClinicalProcedureOrder {
+            $this->lockInvoiceForOrder($order->id);
             $order = ClinicalProcedureOrder::query()->with(['encounter.visit', 'invoiceItem'])->lockForUpdate()->findOrFail($order->id);
             $this->assertOrderEditable($order, $actor);
             $service = $this->validatedService($order->encounter, $data);
             $old = $order->only(['service_id', 'procedure_name_snapshot', 'instructions', 'priority', 'scheduled_at', 'notes']);
+            $serviceChanged = (int) $order->service_id !== (int) $service?->id;
+
+            if ($serviceChanged && $order->invoiceItem) {
+                $this->charges->cancelCharge($order->invoiceItem, $actor, 'Procedure order corrected before payment', 'procedure');
+                $order->update(['invoice_item_id' => null]);
+            }
             $order->update([
                 'service_id' => $service?->id,
                 'procedure_name_snapshot' => $service?->name ?? $data['procedure_name_snapshot'],
@@ -87,6 +95,23 @@ class ProcedureOrderService
                 'notes' => $data['notes'] ?? null,
                 'updated_by' => $actor->id,
             ]);
+
+            if ($serviceChanged && $service?->requires_payment) {
+                $invoice = $order->visit->invoice ?: $this->invoices->createVisitInvoice($order->visit, [], $actor);
+                $invoiceItem = $this->invoices->addServiceItem($invoice, $service, $actor);
+                $invoiceItem->update([
+                    'reference_type' => ClinicalProcedureOrder::class,
+                    'reference_id' => $order->id,
+                    'metadata' => [...($invoiceItem->metadata ?? []), 'clinical_procedure_order_id' => $order->id],
+                ]);
+                $order->update([
+                    'invoice_item_id' => $invoiceItem->id,
+                    'status' => $order->visit->payer_type === PayerType::Cash ? ProcedureOrderStatus::AwaitingPayment : ProcedureOrderStatus::Ordered,
+                ]);
+                $this->invoices->calculateTotals($invoice);
+            } elseif ($serviceChanged) {
+                $order->update(['status' => ProcedureOrderStatus::Ordered]);
+            }
             ActivityLog::query()->create([
                 'user_id' => $actor->id,
                 'event' => 'procedure_order_updated',
@@ -143,10 +168,76 @@ class ProcedureOrderService
         if (blank($reason)) {
             throw ValidationException::withMessages(['reason' => 'Sababu inahitajika.']);
         }
-        $order->update(['status' => ProcedureOrderStatus::Cancelled, 'updated_by' => $actor->id, 'notes' => trim(($order->notes ? $order->notes."\n" : '').'Cancelled: '.$reason)]);
-        $this->finishPatientFacingWorkflowIfTerminal($order, $actor);
 
-        return $order->refresh();
+        return DB::transaction(function () use ($order, $reason, $actor): ClinicalProcedureOrder {
+            $this->lockInvoiceForOrder($order->id);
+            $order = ClinicalProcedureOrder::query()->with(['encounter.visit', 'invoiceItem.paymentAllocations'])->lockForUpdate()->findOrFail($order->id);
+            Gate::forUser($actor)->authorize('cancel', $order);
+            abort_unless($order->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+            if ($order->isPerformed()) {
+                throw ValidationException::withMessages(['procedure' => 'This procedure has already been performed and must be corrected through an amendment.']);
+            }
+            if ($order->status === ProcedureOrderStatus::Cancelled) {
+                return $order;
+            }
+
+            $old = $order->only(['status', 'invoice_item_id', 'notes']);
+            $received = $this->receivedAmount($order);
+            if ($order->invoiceItem && ! in_array($order->invoiceItem->status, ['cancelled', 'reversed'], true)) {
+                $this->charges->cancelCharge($order->invoiceItem, $actor, $reason, 'procedure');
+            }
+            $order->update([
+                'status' => ProcedureOrderStatus::Cancelled,
+                'updated_by' => $actor->id,
+                'notes' => trim(($order->notes ? $order->notes."\n" : '').'Cancelled: '.$reason),
+            ]);
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => $received > 0.005 ? 'paid_procedure_cancellation_requested' : 'procedure_order_cancelled',
+                'subject_type' => $order::class,
+                'subject_id' => $order->id,
+                'old_values' => $old,
+                'new_values' => [
+                    'status' => ProcedureOrderStatus::Cancelled->value,
+                    'reason' => $reason,
+                    'received_amount' => $received,
+                    'invoice_item_id' => $order->invoice_item_id,
+                    'visit_id' => $order->visit_id,
+                    'clinical_encounter_id' => $order->clinical_encounter_id,
+                ],
+            ]);
+            $this->finishPatientFacingWorkflowIfTerminal($order->refresh(), $actor);
+
+            return $order->refresh();
+        });
+    }
+
+    public function amendPerformedOrder(ClinicalProcedureOrder $order, ?string $notes, string $reason, $actor): ClinicalProcedureOrder
+    {
+        if (blank($reason)) {
+            throw ValidationException::withMessages(['reason' => 'A reason is required to amend a performed procedure.']);
+        }
+
+        return DB::transaction(function () use ($order, $notes, $reason, $actor): ClinicalProcedureOrder {
+            $order = ClinicalProcedureOrder::query()->with('encounter')->lockForUpdate()->findOrFail($order->id);
+            abort_unless($order->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+            abort_unless($actor->can('clinical-encounters.amend'), 403);
+            if (! $order->isPerformed()) {
+                throw ValidationException::withMessages(['procedure' => 'Only a performed procedure requires this amendment workflow.']);
+            }
+            $old = ['notes' => $order->notes];
+            $order->update(['notes' => $notes, 'updated_by' => $actor->id]);
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => 'performed_procedure_amended',
+                'subject_type' => $order::class,
+                'subject_id' => $order->id,
+                'old_values' => $old,
+                'new_values' => ['notes' => $notes, 'reason' => $reason, 'visit_id' => $order->visit_id, 'clinical_encounter_id' => $order->clinical_encounter_id],
+            ]);
+
+            return $order->refresh();
+        });
     }
 
     public function completeOrder(ClinicalProcedureOrder $order, $actor, ?string $notes = null): ClinicalProcedureOrder
@@ -235,5 +326,42 @@ class ProcedureOrderService
                 'procedure' => 'Procedure hii haiwezi kuhaririwa au kuondolewa kwa sababu tayari imetumwa Billing, imelipiwa, imepangwa, imeanza, au imekamilika.',
             ]);
         }
+    }
+
+    private function ensureOrderEditable(ClinicalProcedureOrder $order): void
+    {
+        if ($order->isSafelyEditable()) {
+            return;
+        }
+        if ($order->isPerformed()) {
+            throw ValidationException::withMessages(['procedure' => 'This procedure has already been performed and must be corrected through an amendment.']);
+        }
+        if ($order->invoiceItem && $this->receivedAmount($order) > 0.005) {
+            throw ValidationException::withMessages(['procedure' => 'This procedure has received payment and cannot be edited directly. Use the controlled cancellation/reversal workflow.']);
+        }
+        if ($order->isBilledUnpaid() && ! $order->scheduled_at) {
+            return;
+        }
+
+        throw ValidationException::withMessages(['procedure' => 'This procedure cannot be edited in its current clinical or financial state.']);
+    }
+
+    private function receivedAmount(ClinicalProcedureOrder $order): float
+    {
+        if (! $order->invoiceItem) {
+            return 0.0;
+        }
+
+        return max(
+            (float) $order->invoiceItem->paid_amount,
+            (float) $order->invoiceItem->paymentAllocations()->whereNull('reversed_at')->sum('allocated_amount'),
+        );
+    }
+
+    private function lockInvoiceForOrder(int $orderId): ?Invoice
+    {
+        $invoiceId = ClinicalProcedureOrder::query()->whereKey($orderId)->with('invoiceItem:id,invoice_id')->firstOrFail()->invoiceItem?->invoice_id;
+
+        return $invoiceId ? Invoice::query()->lockForUpdate()->findOrFail($invoiceId) : null;
     }
 }

@@ -38,6 +38,12 @@ class RolePermissionSeeder extends Seeder
                 return false;
             })->values()->all();
 
+            $permissions = collect($permissions)
+                ->merge($this->explicitClinicalCorrectionPermissions()[$roleName] ?? [])
+                ->unique()
+                ->values()
+                ->all();
+
             $role->syncPermissions($permissions);
         }
 
@@ -71,6 +77,14 @@ class RolePermissionSeeder extends Seeder
         return [
             'laboratory-technician' => ['laboratory.override-payment'],
             'receptionist' => ['patients.override-duplicate-warning', 'reception.override-active-visit'],
+        ];
+    }
+
+    private function explicitClinicalCorrectionPermissions(): array
+    {
+        return [
+            'doctor' => ['diagnoses.update', 'clinical-encounters.amend'],
+            'clinical-officer' => ['diagnoses.update'],
         ];
     }
 }

@@ -85,9 +85,9 @@ class BillingChargeService
             ->exists();
     }
 
-    public function cancelCharge(InvoiceItem $item, $actor, string $reason): void
+    public function cancelCharge(InvoiceItem $item, $actor, string $reason, string $context = 'medicine'): void
     {
-        $this->requestRefundForReduction($item, 0, $actor, $reason);
+        $this->requestRefundForReduction($item, 0, $actor, $reason, $context);
         $item->update(['status' => 'cancelled', 'cancelled_at' => now(), 'cancelled_by' => $actor->id, 'cancellation_reason' => $reason, 'updated_by' => $actor->id]);
         $this->statuses->recalculate($item->invoice);
         $this->audit->record('invoice_item_cancelled', $item, ['reason' => $reason]);
@@ -121,7 +121,7 @@ class BillingChargeService
         return $item->refresh();
     }
 
-    private function requestRefundForReduction(InvoiceItem $item, float $newPatientAmount, $actor, string $reason): void
+    private function requestRefundForReduction(InvoiceItem $item, float $newPatientAmount, $actor, string $reason, string $context = 'medicine'): void
     {
         $refundAmount = max(0, (float) $item->paid_amount - $newPatientAmount);
         if ($refundAmount <= 0.005 || PaymentRefund::query()
@@ -151,8 +151,8 @@ class BillingChargeService
             'status' => 'pending',
             'requested_by' => $actor->id,
             'cashier_session_id' => $payment->cashier_session_id,
-            'notes' => 'Automatic medicine adjustment; invoice_item_id='.$item->id,
+            'notes' => ucfirst($context).' cancellation/adjustment; invoice_item_id='.$item->id,
         ]);
-        $this->audit->record('medicine_refund_requested', $item, ['amount' => $refundAmount, 'reason' => $reason]);
+        $this->audit->record($context.'_refund_requested', $item, ['amount' => $refundAmount, 'reason' => $reason]);
     }
 }

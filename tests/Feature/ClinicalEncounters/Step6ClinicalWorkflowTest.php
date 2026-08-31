@@ -12,8 +12,12 @@ use App\Livewire\Opd\Queue as OpdQueue;
 use App\Livewire\Pharmacy\Queue as PharmacyQueue;
 use App\Livewire\Triage\Assessment as TriageAssessmentComponent;
 use App\Livewire\Triage\Queue as TriageQueue;
+use App\Models\ActivityLog;
 use App\Models\ClinicalEncounter;
+use App\Models\ClinicalNoteAmendment;
+use App\Models\ClinicalProcedureOrder;
 use App\Models\Department;
+use App\Models\Diagnosis;
 use App\Models\Facility;
 use App\Models\Icd10Code;
 use App\Models\InsuranceCoverageRule;
@@ -34,6 +38,7 @@ use App\Models\PatientInsuranceMembership;
 use App\Models\PatientPayerProfile;
 use App\Models\PatientQueue;
 use App\Models\PaymentMethod;
+use App\Models\PaymentRefund;
 use App\Models\Permission;
 use App\Models\Prescription;
 use App\Models\PrescriptionItem;
@@ -348,6 +353,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         $doctor = $this->staffUser('doctor');
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $activeQueuesBefore = PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', ['waiting', 'called', 'serving'])->count();
         $service = $this->service('Wound dressing', 'PROC-EDIT', 'procedure', $admin);
         $service->update(['requires_payment' => false]);
         $order = app(ClinicalEncounterService::class)->addProcedureOrder($encounter, ['service_id' => $service->id], $doctor);
@@ -370,6 +376,97 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->assertHasNoErrors();
         $this->assertSoftDeleted('clinical_procedure_orders', ['id' => $order->id]);
         $this->assertDatabaseHas('activity_logs', ['event' => 'procedure_order_removed', 'subject_id' => $order->id]);
+        $this->assertSame($activeQueuesBefore, PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $this->prepareEncounterForCompletion($encounter, $doctor);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $doctor);
+        $this->assertSame(VisitStatus::Completed, $visit->refresh()->visit_status);
+    }
+
+    public function test_doctor_edits_and_removes_active_diagnoses_without_touching_other_orders(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $diagnoses = app(DiagnosisService::class);
+        $first = $diagnoses->addDiagnosis($encounter, [
+            'diagnosis_name' => 'Malaria', 'icd10_code' => 'B50.9', 'diagnosis_type' => 'provisional',
+            'certainty' => 'probable', 'is_primary' => true,
+        ], $doctor);
+        $second = $diagnoses->addDiagnosis($encounter, [
+            'diagnosis_name' => 'Headache', 'diagnosis_type' => 'provisional',
+            'certainty' => 'suspected', 'is_primary' => false,
+        ], $doctor);
+        $procedureService = $this->service('Unaffected dressing', 'PROC-DIAG-SAFE', 'procedure', $admin);
+        $procedureService->update(['requires_payment' => false]);
+        $procedure = app(ClinicalEncounterService::class)->addProcedureOrder($encounter, ['service_id' => $procedureService->id], $doctor);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('editDiagnosis', $second->id)
+            ->assertSet('editingDiagnosisId', $second->id)
+            ->set('diagnosisForm.diagnosis_name', 'Typhoid fever')
+            ->set('diagnosisForm.icd10_code', 'A01.0')
+            ->set('diagnosisForm.diagnosis_type', 'final')
+            ->set('diagnosisForm.certainty', 'confirmed')
+            ->set('diagnosisForm.is_primary', true)
+            ->call('updateDiagnosis')
+            ->assertHasNoErrors()
+            ->assertSet('editingDiagnosisId', null);
+
+        $this->assertSame($second->id, $second->refresh()->id);
+        $this->assertSame('Typhoid fever', $second->diagnosis_name);
+        $this->assertTrue($second->is_primary);
+        $this->assertFalse($first->refresh()->is_primary);
+        $this->assertSame(2, Diagnosis::query()->where('clinical_encounter_id', $encounter->id)->count());
+        $this->assertDatabaseHas('activity_logs', ['event' => 'diagnosis_updated', 'subject_id' => $second->id]);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->call('removeDiagnosis', $first->id)
+            ->assertHasNoErrors();
+
+        $this->assertSoftDeleted('diagnoses', ['id' => $first->id]);
+        $this->assertNotSoftDeleted('clinical_procedure_orders', ['id' => $procedure->id]);
+        $this->assertSame(1, Diagnosis::query()->where('clinical_encounter_id', $encounter->id)->count());
+        $this->assertDatabaseHas('activity_logs', ['event' => 'diagnosis_removed', 'subject_id' => $first->id]);
+    }
+
+    public function test_completed_diagnosis_requires_audited_amendment_and_preserves_the_same_record(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $diagnosis = app(DiagnosisService::class)->addDiagnosis($encounter, [
+            'diagnosis_name' => 'Malaria', 'icd10_code' => 'B50.9', 'diagnosis_type' => 'final',
+            'certainty' => 'confirmed', 'is_primary' => true,
+        ], $admin);
+        app(ClinicalEncounterService::class)->saveDraft($encounter, [
+            'clinical_summary' => 'Stable', 'treatment_plan' => 'Supportive care', 'outcome' => 'discharged_home',
+        ], $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+
+        try {
+            app(DiagnosisService::class)->updateDiagnosis($diagnosis, [
+                'diagnosis_name' => 'Typhoid fever', 'diagnosis_type' => 'final', 'certainty' => 'confirmed', 'is_primary' => true,
+            ], $admin);
+            $this->fail('A completed diagnosis was silently overwritten.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('diagnosis', $exception->errors());
+        }
+
+        $amended = app(DiagnosisService::class)->amendDiagnosis($diagnosis, [
+            'diagnosis_name' => 'Typhoid fever', 'icd10_code' => 'A01.0', 'diagnosis_type' => 'final',
+            'certainty' => 'confirmed', 'is_primary' => true,
+        ], 'Culture result corrected the diagnosis', $admin);
+
+        $this->assertSame($diagnosis->id, $amended->id);
+        $this->assertSame('Typhoid fever', $amended->diagnosis_name);
+        $amendment = ClinicalNoteAmendment::query()->where('field_name', 'diagnosis:'.$diagnosis->id)->sole();
+        $this->assertStringContainsString('Malaria', (string) $amendment->old_value);
+        $this->assertStringContainsString('Typhoid fever', (string) $amendment->new_value);
+        $this->assertSame('Culture result corrected the diagnosis', $amendment->reason);
+        $this->assertSame($admin->id, $amendment->amended_by);
+        $this->assertNotNull($amendment->amended_at);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'diagnosis_amended', 'subject_id' => $diagnosis->id]);
     }
 
     public function test_completed_consultation_rejects_medicine_and_procedure_mutation_at_services(): void
@@ -405,30 +502,187 @@ class Step6ClinicalWorkflowTest extends TestCase
         }
     }
 
-    public function test_billed_procedure_cannot_be_edited_or_removed_before_completion(): void
+    public function test_billed_unpaid_procedure_can_be_edited_without_duplicate_active_charge_but_not_removed(): void
     {
         $admin = $this->bootstrappedFacility();
         $visit = $this->opdVisit($admin, VisitStatus::InProgress);
         $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
-        $service = $this->service('Paid procedure', 'PROC-BILLED-LOCK', 'procedure', $admin);
-        $service->update(['requires_payment' => true]);
-        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id], $admin);
+        $firstService = $this->service('Minor surgery', 'PROC-BILLED-OLD', 'procedure', $admin);
+        $replacementService = $this->service('Wound dressing', 'PROC-BILLED-NEW', 'procedure', $admin);
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $firstService->id], $admin);
+        $orderId = $order->id;
+        $oldInvoiceItemId = $order->invoice_item_id;
         $this->assertNotNull($order->invoice_item_id);
 
+        $updated = app(ProcedureOrderService::class)->updateOrder($order, [
+            'service_id' => $replacementService->id, 'priority' => 'urgent', 'instructions' => 'Corrected before payment',
+        ], $admin);
+        $replacementInvoiceItemId = $updated->invoice_item_id;
+        $updated = app(ProcedureOrderService::class)->updateOrder($updated, [
+            'service_id' => $replacementService->id, 'priority' => 'urgent', 'instructions' => 'Idempotent retry',
+        ], $admin);
+        $this->assertSame($orderId, $updated->id);
+        $this->assertSame($replacementService->id, $updated->service_id);
+        $this->assertNotSame($oldInvoiceItemId, $updated->invoice_item_id);
+        $this->assertSame($replacementInvoiceItemId, $updated->invoice_item_id);
+        $this->assertDatabaseHas('invoice_items', ['id' => $oldInvoiceItemId, 'status' => 'cancelled']);
+        $this->assertDatabaseHas('invoice_items', ['id' => $updated->invoice_item_id, 'status' => 'pending']);
+        $this->assertSame(1, InvoiceItem::query()->where('reference_type', ClinicalProcedureOrder::class)->where('reference_id', $orderId)->whereNotIn('status', ['cancelled', 'reversed'])->count());
+        $this->assertSame(1000.0, (float) $visit->invoice->refresh()->total_amount);
+        $this->assertSame(1000.0, (float) $visit->invoice->balance_amount);
+
+        try {
+            app(ProcedureOrderService::class)->removeOrder($updated, $admin);
+            $this->fail('A billed procedure was hard removed.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('procedure', $exception->errors());
+        }
+
+        $this->assertNotSoftDeleted('clinical_procedure_orders', ['id' => $orderId]);
+    }
+
+    public function test_billed_unpaid_procedure_cancellation_reconciles_invoice_and_visit_closure(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $service = $this->service('Minor surgery', 'PROC-CANCEL-UNPAID', 'procedure', $admin);
+        $service->update(['department_id' => Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail()->id]);
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id], $admin);
+        $invoiceItemId = $order->invoice_item_id;
+        $this->prepareEncounterForCompletion($encounter, $admin);
+        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $admin);
+        $this->assertNotSame(VisitStatus::Completed, $visit->refresh()->visit_status);
+
+        $cancelled = app(ProcedureOrderService::class)->cancelOrder($order, 'Ordered for the wrong patient presentation', $admin);
+
+        $this->assertSame('cancelled', $cancelled->status->value);
+        $this->assertDatabaseHas('invoice_items', ['id' => $invoiceItemId, 'status' => 'cancelled']);
+        $this->assertSame(0.0, (float) $visit->invoice->refresh()->total_amount);
+        $this->assertSame(0.0, (float) $visit->invoice->balance_amount);
+        $this->assertSame(0, $visit->invoice->payments()->count());
+        $this->assertSame(0, PaymentRefund::query()->count());
+        $this->assertSame(0, PatientQueue::query()->where('visit_id', $visit->id)->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $this->assertSame(VisitStatus::Completed, $visit->refresh()->visit_status);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'procedure_order_cancelled', 'subject_id' => $order->id]);
+    }
+
+    public function test_partial_and_full_payment_block_hard_mutation_and_use_one_refund_request(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $method = PaymentMethod::query()->create([
+            'facility_id' => currentFacility()->id, 'name' => 'Procedure Cash', 'code' => 'CASH-PROC',
+            'type' => 'cash', 'is_cash' => true, 'is_active' => true,
+        ]);
+
+        foreach ([500, 1000] as $index => $amount) {
+            $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+            $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+            $service = $this->service('Paid procedure '.$index, 'PROC-PAID-'.$index, 'procedure', $admin);
+            $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id], $admin);
+            $invoiceItemId = $order->invoice_item_id;
+            app(PaymentConfirmationService::class)->confirmPayment(
+                $visit->invoice->refresh(), $method, $amount, $admin, ['idempotency_key' => (string) Str::uuid()],
+            );
+
+            foreach ([
+                fn () => app(ProcedureOrderService::class)->updateOrder($order, ['service_id' => $service->id, 'priority' => 'urgent'], $admin),
+                fn () => app(ProcedureOrderService::class)->removeOrder($order, $admin),
+            ] as $mutation) {
+                try {
+                    $mutation();
+                    $this->fail('A paid procedure accepted a direct edit or hard removal.');
+                } catch (ValidationException $exception) {
+                    $this->assertArrayHasKey('procedure', $exception->errors());
+                }
+            }
+
+            $cancelled = app(ProcedureOrderService::class)->cancelOrder($order, 'Clinical order cancelled after payment', $admin);
+            app(ProcedureOrderService::class)->cancelOrder($cancelled, 'Idempotent retry', $admin);
+
+            $this->assertSame('cancelled', $cancelled->status->value);
+            $this->assertNotSoftDeleted('clinical_procedure_orders', ['id' => $order->id]);
+            $this->assertDatabaseHas('invoice_items', ['id' => $invoiceItemId, 'status' => 'cancelled']);
+            $this->assertSame(1, $visit->invoice->payments()->count());
+            $refund = PaymentRefund::query()->where('invoice_id', $visit->invoice->id)->sole();
+            $this->assertSame((float) $amount, (float) $refund->amount);
+            $this->assertSame('pending', $refund->status);
+            $this->assertStringStartsWith('Procedure cancellation/adjustment;', (string) $refund->notes);
+            $this->assertDatabaseHas('activity_logs', ['event' => 'paid_procedure_cancellation_requested', 'subject_id' => $order->id]);
+            $this->assertDatabaseHas('activity_logs', ['event' => 'procedure_refund_requested', 'subject_id' => $invoiceItemId]);
+        }
+    }
+
+    public function test_performed_procedure_cannot_be_deleted_and_authorized_notes_amendment_is_audited(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $service = $this->service('Completed dressing', 'PROC-PERFORMED', 'procedure', $admin);
+        $service->update(['requires_payment' => false]);
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id, 'notes' => 'Original notes'], $admin);
+        app(ProcedureOrderService::class)->completeOrder($order, $admin, 'Original performed notes');
+
         foreach ([
-            fn () => app(ProcedureOrderService::class)->updateOrder($order, ['service_id' => $service->id, 'priority' => 'normal'], $admin),
             fn () => app(ProcedureOrderService::class)->removeOrder($order, $admin),
+            fn () => app(ProcedureOrderService::class)->cancelOrder($order, 'Cannot delete performed history', $admin),
         ] as $mutation) {
             try {
                 $mutation();
-                $this->fail('Billed procedure mutation was accepted.');
+                $this->fail('A performed procedure was deleted or cancelled.');
             } catch (ValidationException $exception) {
                 $this->assertArrayHasKey('procedure', $exception->errors());
             }
         }
 
+        $amended = app(ProcedureOrderService::class)->amendPerformedOrder(
+            $order, 'Corrected performed notes', 'Corrected the documented technique', $admin,
+        );
+        $this->assertSame($order->id, $amended->id);
+        $this->assertSame('completed', $amended->status->value);
+        $this->assertSame('Corrected performed notes', $amended->notes);
         $this->assertNotSoftDeleted('clinical_procedure_orders', ['id' => $order->id]);
-        $this->assertSame(1, InvoiceItem::query()->whereKey($order->invoice_item_id)->count());
+        $log = ActivityLog::query()->where('event', 'performed_procedure_amended')->where('subject_id', $order->id)->sole();
+        $this->assertSame('Original performed notes', $log->old_values['notes']);
+        $this->assertSame('Corrected the documented technique', $log->new_values['reason']);
+    }
+
+    public function test_unauthorized_and_cross_facility_users_cannot_correct_clinical_records(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $diagnosis = app(DiagnosisService::class)->addDiagnosis($encounter, [
+            'diagnosis_name' => 'Malaria', 'diagnosis_type' => 'provisional', 'certainty' => 'suspected',
+        ], $admin);
+        $service = $this->service('Restricted procedure', 'PROC-RESTRICTED', 'procedure', $admin);
+        $service->update(['requires_payment' => false]);
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, ['service_id' => $service->id], $admin);
+        $cashier = $this->staffUser('cashier');
+
+        foreach ([
+            fn () => app(DiagnosisService::class)->updateDiagnosis($diagnosis, ['diagnosis_name' => 'Changed'], $cashier),
+            fn () => app(ProcedureOrderService::class)->removeOrder($order, $cashier),
+        ] as $mutation) {
+            try {
+                $mutation();
+                $this->fail('An unauthorized user corrected a clinical record.');
+            } catch (AuthorizationException) {
+                $this->assertTrue(true);
+            }
+        }
+
+        $otherFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
+        $foreignDoctor = $this->staffUser('doctor', $otherFacility);
+        try {
+            app(DiagnosisService::class)->updateDiagnosis($diagnosis, ['diagnosis_name' => 'Cross-facility change'], $foreignDoctor);
+            $this->fail('A cross-facility clinician corrected a diagnosis.');
+        } catch (AuthorizationException) {
+            $this->assertTrue(true);
+        }
+
+        $this->assertSame('Malaria', $diagnosis->refresh()->diagnosis_name);
+        $this->assertNotSoftDeleted('clinical_procedure_orders', ['id' => $order->id]);
     }
 
     public function test_doctor_and_clinical_officer_can_open_and_update_their_draft_medicine_item(): void

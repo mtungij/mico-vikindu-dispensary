@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 #[Fillable(['facility_id', 'patient_id', 'visit_id', 'queue_id', 'assessed_by', 'assessed_at', 'completed_by', 'completed_at', 'sequence_number', 'triage_level', 'chief_complaint_summary', 'temperature', 'systolic_bp', 'diastolic_bp', 'pulse_rate', 'respiratory_rate', 'oxygen_saturation', 'weight_kg', 'height_cm', 'bmi', 'blood_glucose', 'muac_cm', 'pain_score', 'consciousness_level', 'pregnancy_status', 'gestational_age_weeks', 'danger_signs', 'allergies_confirmed', 'fall_risk', 'infection_risk', 'notes', 'status', 'amendment_reason', 'created_by', 'updated_by'])]
@@ -67,5 +68,12 @@ class TriageAssessment extends Model
     public function completedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'completed_by');
+    }
+
+    public function clinicalAlerts(): HasMany
+    {
+        return $this->hasMany(ClinicalAlert::class, 'source_id')
+            ->where('source_type', self::class)
+            ->where('facility_id', currentFacility()?->id);
     }
 }

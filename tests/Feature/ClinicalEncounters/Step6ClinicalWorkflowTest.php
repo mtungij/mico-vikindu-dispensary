@@ -13,6 +13,7 @@ use App\Livewire\Pharmacy\Queue as PharmacyQueue;
 use App\Livewire\Triage\Assessment as TriageAssessmentComponent;
 use App\Livewire\Triage\Queue as TriageQueue;
 use App\Models\ActivityLog;
+use App\Models\ClinicalAlert;
 use App\Models\ClinicalEncounter;
 use App\Models\ClinicalNoteAmendment;
 use App\Models\ClinicalProcedureOrder;
@@ -71,6 +72,7 @@ use Database\Seeders\RoleSeeder;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -1063,13 +1065,156 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->test(OpdConsultation::class, ['visit' => $visit])
             ->assertSee('Patient Demographics')
             ->assertSee('Visit Information')
-            ->assertSee('Latest Triage Vitals')
+            ->assertSee('TRIAGE SUMMARY')
             ->assertSee('Payment / Insurance')
             ->assertDontSee('Doctor Plan')
             ->assertDontSee('wire:model.live.debounce.2000ms="form.clinical_summary"', false)
             ->set('activeTab', 'plan')
             ->assertSee('Doctor Plan')
             ->assertSee('Doctor notes / clinical summary');
+    }
+
+    public function test_opd_consultation_displays_professional_read_only_current_visit_triage_summary(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $nurse = $this->staffUser('nurse');
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $visit->patient->update(['known_allergies' => 'Penicillin']);
+        $completedAt = now()->subMinutes(7)->startOfMinute();
+        $triage = $this->completedTriage($visit, $nurse, [
+            'chief_complaint_summary' => 'Abdominal pain and vomiting',
+            'triage_level' => 'urgent',
+            'temperature' => 38.7,
+            'systolic_bp' => 150,
+            'diastolic_bp' => 95,
+            'pulse_rate' => 104,
+            'respiratory_rate' => 22,
+            'oxygen_saturation' => 97,
+            'weight_kg' => 68,
+            'height_cm' => 170,
+            'bmi' => 23.53,
+            'blood_glucose' => 5.4,
+            'notes' => 'Vomited twice this morning.',
+            'assessed_at' => $completedAt,
+            'completed_at' => $completedAt,
+        ]);
+        ClinicalAlert::query()->create([
+            'facility_id' => currentFacility()->id,
+            'patient_id' => $visit->patient_id,
+            'visit_id' => $visit->id,
+            'alert_type' => 'abnormal_vital',
+            'severity' => 'warning',
+            'title' => 'Fever',
+            'message' => 'Temperature is above the configured range.',
+            'source_type' => TriageAssessment::class,
+            'source_id' => $triage->id,
+            'status' => 'active',
+        ]);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->assertSee('TRIAGE SUMMARY')
+            ->assertSee('Abdominal pain and vomiting')
+            ->assertSee('Haraka')
+            ->assertSee('150/95')
+            ->assertSee('38.7')
+            ->assertSee('104')
+            ->assertSee('97')
+            ->assertSee('68')
+            ->assertSee('170')
+            ->assertSee('23.53')
+            ->assertSee('5.4')
+            ->assertSee('Fever')
+            ->assertSee('Penicillin')
+            ->assertSee('Vomited twice this morning.')
+            ->assertSee($completedAt->format('d M Y H:i'))
+            ->assertSee($nurse->name);
+
+        $summaryHtml = view('livewire.opd.partials.triage-summary', [
+            'triage' => $triage->load(['assessor', 'completedBy', 'clinicalAlerts']),
+            'patient' => $visit->patient,
+        ])->render();
+        $this->assertStringNotContainsString('wire:model', $summaryHtml);
+        $this->assertStringNotContainsString('wire:click', $summaryHtml);
+        $this->assertStringNotContainsString('Edit', $summaryHtml);
+    }
+
+    public function test_opd_consultation_ignores_previous_visit_triage_and_loads_without_current_triage(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $oldVisit = $visit->replicate();
+        $oldVisit->visit_number = 'VIS-OLD-TRIAGE';
+        $oldVisit->visit_status = VisitStatus::Completed;
+        $oldVisit->completed_at = now()->subDay();
+        $oldVisit->save();
+        $this->completedTriage($oldVisit, $admin, ['chief_complaint_summary' => 'Previous visit complaint']);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->assertSee('No triage assessment recorded for this visit.')
+            ->assertDontSee('Previous visit complaint')
+            ->assertOk();
+    }
+
+    public function test_opd_uses_latest_completed_current_facility_triage_assessment(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin);
+        $this->completedTriage($visit, $admin, ['chief_complaint_summary' => 'Earlier completed assessment'], 1);
+        $latest = $this->completedTriage($visit, $admin, ['chief_complaint_summary' => 'Latest valid assessment', 'notes' => null], 2);
+        $cancelled = $this->completedTriage($visit, $admin, ['chief_complaint_summary' => 'Cancelled newer assessment'], 3);
+        $cancelled->update(['status' => 'cancelled']);
+        $draft = $this->completedTriage($visit, $admin, ['chief_complaint_summary' => 'Incomplete draft assessment'], 4);
+        $draft->update(['status' => 'draft', 'completed_at' => null, 'completed_by' => null]);
+        $foreignFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
+        $foreign = $this->completedTriage($visit, $admin, ['chief_complaint_summary' => 'Foreign facility assessment'], 99);
+        $foreign->update(['facility_id' => $foreignFacility->id]);
+
+        $selected = $visit->fresh()->latestCompletedTriageAssessment()->firstOrFail();
+        $this->assertSame($latest->id, $selected->id);
+
+        Livewire::actingAs($doctor)->test(OpdConsultation::class, ['visit' => $visit])
+            ->assertSee('Latest valid assessment')
+            ->assertSee('Updated triage')
+            ->assertDontSee('Earlier completed assessment')
+            ->assertDontSee('Cancelled newer assessment')
+            ->assertDontSee('Incomplete draft assessment')
+            ->assertDontSee('Foreign facility assessment')
+            ->assertDontSee('Triage notes')
+            ->assertDontSee('Weight')
+            ->assertDontSee('Height');
+    }
+
+    public function test_opd_queue_eager_loads_compact_current_visit_triage_snapshots(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        foreach (range(1, 3) as $index) {
+            $visit = $this->opdVisit($admin);
+            $this->completedTriage($visit, $admin, [
+                'chief_complaint_summary' => 'Queue complaint '.$index,
+                'temperature' => 38 + ($index / 10),
+            ]);
+        }
+
+        $queries = [];
+        DB::listen(static function ($query) use (&$queries): void {
+            $queries[] = $query->sql;
+        });
+
+        Livewire::actingAs($doctor)->test(OpdQueue::class)
+            ->assertSee('Triage Summary')
+            ->assertSee('Queue complaint 1')
+            ->assertSee('Queue complaint 2')
+            ->assertSee('Queue complaint 3')
+            ->assertSee('Temperature:')
+            ->assertSee('Blood pressure:')
+            ->assertSee('SpO₂:');
+
+        $this->assertLessThanOrEqual(1, collect($queries)->filter(fn (string $sql) => str_contains($sql, 'triage_assessments'))->count());
+        $this->assertLessThanOrEqual(1, collect($queries)->filter(fn (string $sql) => str_contains($sql, 'clinical_alerts'))->count());
     }
 
     public function test_orders_tab_separates_lab_catalogue_from_ordered_laboratory_tests(): void
@@ -3358,6 +3503,38 @@ class Step6ClinicalWorkflowTest extends TestCase
             'infection_risk' => 'suspected',
             'notes' => 'Patient requires prompt clinical review.',
         ];
+    }
+
+    private function completedTriage(Visit $visit, User $actor, array $overrides = [], int $sequence = 1): TriageAssessment
+    {
+        $assessedAt = $overrides['assessed_at'] ?? now()->subMinutes(10);
+
+        return TriageAssessment::query()->create([
+            'facility_id' => $visit->facility_id,
+            'patient_id' => $visit->patient_id,
+            'visit_id' => $visit->id,
+            'assessed_by' => $actor->id,
+            'assessed_at' => $assessedAt,
+            'completed_by' => $actor->id,
+            'completed_at' => $overrides['completed_at'] ?? $assessedAt,
+            'sequence_number' => $sequence,
+            'triage_level' => 'urgent',
+            'chief_complaint_summary' => 'Current visit complaint',
+            'temperature' => 38.5,
+            'systolic_bp' => 120,
+            'diastolic_bp' => 80,
+            'pulse_rate' => 96,
+            'respiratory_rate' => 20,
+            'oxygen_saturation' => 96,
+            'pain_score' => 4,
+            'consciousness_level' => 'alert',
+            'pregnancy_status' => 'not_applicable',
+            'danger_signs' => [],
+            'allergies_confirmed' => true,
+            'status' => 'completed',
+            'created_by' => $actor->id,
+            ...$overrides,
+        ]);
     }
 
     private function service(string $name, string $code, string $type, User $admin): Service

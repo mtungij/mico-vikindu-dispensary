@@ -1,6 +1,6 @@
 <div class="space-y-6">
     @php
-        $triage = $visit->latestTriageAssessment;
+        $triage = $visit->latestCompletedTriageAssessment;
         $invoice = $visit->invoice;
         $payerProfile = $visit->patient->primaryPayerProfile;
         $previousDiagnoses = $visit->patient->diagnoses
@@ -37,6 +37,8 @@
             <div><p class="text-xs text-slate-500">Encounter</p><p class="font-semibold">{{ $encounter->encounter_number }}</p><p class="text-xs text-slate-500">{{ $encounter->status?->value ?? $encounter->status }} · {{ $saveState }}</p></div>
         </div>
     </div>
+
+    @include('livewire.opd.partials.triage-summary', ['triage' => $triage, 'patient' => $visit->patient])
 
     <div class="grid gap-6 xl:grid-cols-[18rem_1fr_20rem]">
         <aside class="space-y-4">
@@ -84,24 +86,6 @@
                             <div><dt class="text-slate-500">Current Department</dt><dd class="font-medium">{{ $visit->currentDepartment?->name ?? '-' }}</dd></div>
                             <div><dt class="text-slate-500">Assigned Provider</dt><dd class="font-medium">{{ $encounter->provider?->name ?? $visit->currentAssignedUser?->name ?? '-' }}</dd></div>
                         </dl>
-                    </x-card>
-
-                    <x-card>
-                        <h3 class="mb-3 font-semibold">Latest Triage Vitals</h3>
-                        @if($triage)
-                            <dl class="grid gap-3 text-sm md:grid-cols-2">
-                                <div><dt class="text-slate-500">Triage Level</dt><dd class="font-medium">{{ $triage->triage_level?->value ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">Temperature</dt><dd class="font-medium">{{ $triage->temperature ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">Blood Pressure</dt><dd class="font-medium">{{ $triage->systolic_bp ?? '-' }}/{{ $triage->diastolic_bp ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">Pulse</dt><dd class="font-medium">{{ $triage->pulse_rate ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">Respiratory Rate</dt><dd class="font-medium">{{ $triage->respiratory_rate ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">SpO2</dt><dd class="font-medium">{{ $triage->oxygen_saturation ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">BMI</dt><dd class="font-medium">{{ $triage->bmi ?? '-' }}</dd></div>
-                                <div><dt class="text-slate-500">Pain Score</dt><dd class="font-medium">{{ $triage->pain_score ?? '-' }}</dd></div>
-                            </dl>
-                        @else
-                            <p class="text-sm text-slate-500">No triage vitals recorded.</p>
-                        @endif
                     </x-card>
 
                     <x-card>

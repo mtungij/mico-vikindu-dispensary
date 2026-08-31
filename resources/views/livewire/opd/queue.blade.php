@@ -7,23 +7,22 @@
     <x-card>
         <div class="overflow-x-auto">
             <table class="min-w-full text-sm">
-                <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Queue</th><th>Patient</th><th>Age/Gender</th><th>Triage</th><th>Abnormal Vitals</th><th>Payer</th><th>Waiting</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
+                <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Queue</th><th>Patient</th><th>Age/Gender</th><th>Triage Summary</th><th>Payer</th><th>Waiting</th><th>Status</th><th class="text-right">Actions</th></tr></thead>
                 <tbody>
                     @forelse($visits as $visit)
-                        @php($triage = $visit->latestTriageAssessment)
+                        @php($triage = $visit->latestCompletedTriageAssessment)
                         <tr class="border-t border-slate-100 dark:border-slate-800">
                             <td class="py-3 font-semibold">{{ $queues->get($visit->id)?->queue_number ?? '-' }}</td>
                             <td><a href="{{ route('patients.show', $visit->patient) }}" class="font-medium text-primary">{{ $visit->patient->fullName() }}</a><div class="text-xs text-slate-500">{{ $visit->patient->patient_number }}</div></td>
                             <td>{{ $visit->patient->ageLabel() }} / {{ $visit->patient->gender->value }}</td>
-                            <td>{{ $triage?->triage_level?->value ?? '-' }}</td>
-                            <td class="max-w-xs text-xs">{{ collect([$triage?->temperature ? 'T '.$triage->temperature : null, $triage?->oxygen_saturation ? 'SpO2 '.$triage->oxygen_saturation : null, $triage?->systolic_bp ? 'BP '.$triage->systolic_bp.'/'.$triage->diastolic_bp : null])->filter()->implode(' · ') }}</td>
+                            <td>@include('livewire.opd.partials.triage-summary', ['triage' => $triage, 'patient' => $visit->patient, 'compact' => true])</td>
                             <td>{{ $visit->payer_type->value }}</td>
                             <td>{{ $visit->registered_at?->diffForHumans() }}</td>
                             <td>{{ $visit->visit_status->value }}</td>
                             <td class="text-right"><button wire:click="startConsultation({{ $visit->id }})" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800" title="Start/Resume"><x-lucide-stethoscope class="h-4 w-4" /></button></td>
                         </tr>
                     @empty
-                        <tr><td colspan="9" class="py-10 text-center text-slate-500">Hakuna mgonjwa OPD queue.</td></tr>
+                        <tr><td colspan="8" class="py-10 text-center text-slate-500">Hakuna mgonjwa OPD queue.</td></tr>
                     @endforelse
                 </tbody>
             </table>

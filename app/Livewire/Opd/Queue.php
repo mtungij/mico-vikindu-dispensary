@@ -15,11 +15,17 @@ use Livewire\WithPagination;
 class Queue extends Component
 {
     use WithPagination;
+
     public string $search = '';
+
     public string $priority = '';
+
     public string $payerType = '';
 
-    public function mount(): void { Gate::authorize('opd.view-queue'); }
+    public function mount(): void
+    {
+        Gate::authorize('opd.view-queue');
+    }
 
     public function startConsultation(Visit $visit, ClinicalEncounterService $service): mixed
     {
@@ -27,12 +33,18 @@ class Queue extends Component
         abort_unless($visit->facility_id === currentFacility()?->id, 404);
         $service->startEncounter($visit, auth()->user());
         Notifier::success('Consultation imeanza.');
+
         return redirect()->route('opd.consultation', $visit);
     }
 
     public function render(): View
     {
-        $visits = Visit::query()->forCurrentFacility()->with(['patient', 'latestTriageAssessment', 'activeClinicalEncounter', 'invoice'])
+        $visits = Visit::query()->forCurrentFacility()->with([
+            'patient',
+            'latestCompletedTriageAssessment.clinicalAlerts',
+            'activeClinicalEncounter',
+            'invoice',
+        ])
             ->whereHas('currentDepartment', fn ($query) => $query->where('code', 'OPD'))
             ->whereIn('visit_status', [VisitStatus::AwaitingDepartment->value, VisitStatus::InQueue->value, VisitStatus::InProgress->value, VisitStatus::InConsultation->value, VisitStatus::AwaitingDoctorReview->value])
             ->when($this->priority, fn ($q) => $q->where('priority', $this->priority))
@@ -41,8 +53,6 @@ class Queue extends Component
             ->orderByRaw("case priority when 'emergency' then 1 when 'urgent' then 2 else 3 end")
             ->oldest('registered_at')
             ->paginate(10);
-
-            
 
         return view('livewire.opd.queue', [
             'visits' => $visits,

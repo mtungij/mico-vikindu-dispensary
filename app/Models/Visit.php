@@ -90,6 +90,17 @@ class Visit extends Model
         return $this->hasOne(TriageAssessment::class)->latestOfMany();
     }
 
+    public function latestCompletedTriageAssessment(): HasOne
+    {
+        return $this->hasOne(TriageAssessment::class)
+            ->ofMany(
+                ['sequence_number' => 'max', 'id' => 'max'],
+                fn (Builder $query) => $query
+                    ->where('facility_id', currentFacility()?->id)
+                    ->where('status', 'completed'),
+            );
+    }
+
     public function clinicalEncounters(): HasMany
     {
         return $this->hasMany(ClinicalEncounter::class);

@@ -2,6 +2,7 @@
     <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div class="flex flex-col gap-2 sm:flex-row">
             <x-text-input wire:model.live.debounce.300ms="search" placeholder="Tafuta dawa..." />
+            <x-select-input wire:model.live="catalogStatus"><option value="active">Active medicines</option><option value="archived">Inactive / Archived</option><option value="all">All medicines</option></x-select-input>
             <x-select-input wire:model.live="billingStatus"><option value="">All billing statuses</option><option value="ready">Billing Ready</option><option value="missing_service">Missing Service</option><option value="missing_price">Missing Price</option><option value="needs_review">Needs Review</option></x-select-input>
         </div>
         <x-primary-button wire:click="create"><x-lucide-plus class="h-4 w-4" /> Dawa</x-primary-button>
@@ -27,6 +28,11 @@
                                 @endif
                                 <a href="{{ route('pharmacy.medicines.stock-card',$medicine) }}" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-clipboard-list class="inline h-4 w-4" /></a>
                                 <button wire:click="edit({{ $medicine->id }})" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-pencil class="inline h-4 w-4" /></button>
+                                @if($medicine->is_active)
+                                    @can('delete', $medicine)
+                                        <button type="button" wire:click="confirmDelete({{ $medicine->id }})" class="rounded-md p-2 text-danger hover:bg-red-50 dark:hover:bg-red-950/30" title="Futa dawa" aria-label="Futa dawa {{ $medicine->name }}"><x-lucide-trash-2 class="inline h-4 w-4" /></button>
+                                    @endcan
+                                @endif
                             </td>
                         </tr>
                     @endforeach
@@ -66,5 +72,43 @@
             <label class="flex items-center gap-2"><x-checkbox wire:model="form.is_active" /> Active</label>
             <div class="md:col-span-2 flex justify-end"><x-primary-button>Save</x-primary-button></div>
         </form>
+    </x-modal>
+
+    <x-modal :show="$showDeleteModal" title="Futa dawa" close="cancelDelete" maxWidth="lg">
+        <div class="space-y-4">
+            <p class="text-sm">Una uhakika unataka kuondoa dawa:</p>
+            <p class="text-lg font-semibold text-slate-900 dark:text-white">{{ $deletingMedicineName }}?</p>
+
+            @if(($deletionAssessment['current_stock'] ?? 0) > 0)
+                <div class="rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-200">
+                    <p class="font-semibold">Huwezi kufuta dawa yenye stock iliyopo.</p>
+                    <p class="mt-1">Current stock: {{ number_format((float) $deletionAssessment['current_stock'], 3) }}</p>
+                    <p class="mt-2">Dawa inaweza kuondolewa kwenye matumizi mapya bila kubadilisha batch au stock history yake.</p>
+                </div>
+            @elseif($deletionAssessment['has_active_prescription'] ?? false)
+                <div class="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+                    <p class="font-semibold">Dawa haiwezi kufutwa kwa sababu inatumika kwenye prescription iliyo hai.</p>
+                    <p class="mt-1">Itaondolewa kwenye matumizi mapya lakini prescription na Pharmacy workflow vitaendelea kuhifadhi medicine relationship.</p>
+                </div>
+            @elseif($deletionAssessment['has_history'] ?? false)
+                <div class="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
+                    <p class="font-semibold">Dawa hii ina historia ya matumizi na haiwezi kufutwa kabisa.</p>
+                    <p class="mt-1">Itaondolewa kwenye matumizi mapya lakini historia yake itahifadhiwa.</p>
+                </div>
+            @else
+                <div class="rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">
+                    Dawa hii haina historia ya stock, prescription au mauzo.
+                </div>
+            @endif
+
+            <x-input-error :messages="$errors->get('delete')" />
+            <div class="flex justify-end gap-2">
+                <x-secondary-button type="button" wire:click="cancelDelete">Ghairi</x-secondary-button>
+                <button type="button" wire:click="deleteMedicine" wire:loading.attr="disabled" wire:target="deleteMedicine" class="inline-flex items-center gap-2 rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50">
+                    <x-lucide-trash-2 class="h-4 w-4" />
+                    {{ ($deletionAssessment['action'] ?? 'archive') === 'delete' ? 'Futa Dawa' : 'Deactivate Medicine' }}
+                </button>
+            </div>
+        </div>
     </x-modal>
 </div>

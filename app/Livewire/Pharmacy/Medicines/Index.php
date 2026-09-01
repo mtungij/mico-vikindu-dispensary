@@ -16,10 +16,13 @@ use App\Services\MedicineBillingSetupService;
 use App\Services\MedicineCatalogService;
 use App\Services\ServicePricingService;
 use App\Support\Notifier;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 use Livewire\Component;
 use Livewire\WithPagination;
+use Throwable;
 
 class Index extends Component
 {
@@ -32,6 +35,16 @@ class Index extends Component
     public string $search = '';
 
     public string $billingStatus = '';
+
+    public string $catalogStatus = 'active';
+
+    public bool $showDeleteModal = false;
+
+    public ?int $deletingMedicineId = null;
+
+    public string $deletingMedicineName = '';
+
+    public array $deletionAssessment = [];
 
     public function mount(): void
     {
@@ -76,10 +89,70 @@ class Index extends Component
         $this->resetPage();
     }
 
+    public function updatedCatalogStatus(): void
+    {
+        $this->resetPage();
+    }
+
+    public function confirmDelete(int $medicineId, MedicineCatalogService $catalog): void
+    {
+        $this->cancelDelete();
+
+        try {
+            $medicine = Medicine::query()->forCurrentFacility()->findOrFail($medicineId);
+            $this->deletionAssessment = $catalog->deletionAssessment($medicine, auth()->user());
+            $this->deletingMedicineId = $medicine->id;
+            $this->deletingMedicineName = trim($medicine->name.' '.($medicine->strength ?? ''));
+            $this->showDeleteModal = true;
+        } catch (AuthorizationException) {
+            $this->addError('delete', 'Huna ruhusa ya kufuta dawa.');
+            Notifier::error('Huna ruhusa ya kufuta dawa.');
+        } catch (Throwable $exception) {
+            report($exception);
+            $this->addError('delete', 'Dawa haiwezi kufutwa kwa sasa. Tafadhali jaribu tena.');
+            Notifier::error('Dawa haiwezi kufutwa kwa sasa. Tafadhali jaribu tena.');
+        }
+    }
+
+    public function cancelDelete(): void
+    {
+        $this->showDeleteModal = false;
+        $this->deletingMedicineId = null;
+        $this->deletingMedicineName = '';
+        $this->deletionAssessment = [];
+        $this->resetErrorBag('delete');
+    }
+
+    public function deleteMedicine(MedicineCatalogService $catalog): void
+    {
+        try {
+            $medicine = Medicine::query()->forCurrentFacility()->findOrFail((int) $this->deletingMedicineId);
+            $result = $catalog->removeMedicine($medicine, auth()->user());
+            $this->cancelDelete();
+            $this->resetPage();
+            Notifier::success($result['outcome'] === 'deleted'
+                ? 'Dawa imeondolewa kikamilifu.'
+                : 'Dawa imeondolewa kwenye matumizi mapya. Historia yake imehifadhiwa.');
+        } catch (AuthorizationException) {
+            $this->addError('delete', 'Huna ruhusa ya kufuta dawa.');
+            Notifier::error('Huna ruhusa ya kufuta dawa.');
+        } catch (ValidationException $exception) {
+            $message = collect($exception->errors())->flatten()->first() ?? 'Dawa haiwezi kufutwa.';
+            $this->addError('delete', $message);
+            Notifier::warning($message);
+        } catch (Throwable $exception) {
+            report($exception);
+            $this->addError('delete', 'Dawa haiwezi kufutwa kwa sasa. Tafadhali jaribu tena.');
+            Notifier::error('Dawa haiwezi kufutwa kwa sasa. Tafadhali jaribu tena.');
+        }
+    }
+
     public function render(): View
     {
         $today = today()->toDateString();
         $medicines = Medicine::query()->forCurrentFacility()->with(['generic', 'category', 'dosageForm', 'dispensingUnit', 'service'])->withSum('batches', 'available_quantity')
+            ->when($this->catalogStatus === 'active', fn ($q) => $q->where('is_active', true))
+            ->when($this->catalogStatus === 'archived', fn ($q) => $q->where('is_active', false))
             ->when($this->search, fn ($q) => $q->where(fn ($search) => $search->where('name', 'like', "%{$this->search}%")->orWhere('code', 'like', "%{$this->search}%")))
             ->when($this->billingStatus === 'ready', fn ($q) => $q->where('is_active', true)->whereHas('service', fn ($service) => $service->where('is_active', true)->where('service_type', 'medicine')->where(fn ($service) => $service->where('requires_payment', false)->orWhereHas('prices', fn ($price) => $this->applicableCashPrice($price, $today)))))
             ->when($this->billingStatus === 'missing_service', fn ($q) => $q->where(fn ($medicine) => $medicine->whereNull('service_id')->orWhereDoesntHave('service')))

@@ -128,6 +128,7 @@ return [
         'pharmacy.manage-routes' => 'Kusimamia routes of administration',
         'pharmacy.view-medicines' => 'Kuangalia medicines',
         'pharmacy.manage-medicines' => 'Kusimamia medicines',
+        'pharmacy.delete-medicines' => 'Kufuta au kuarchive medicines',
         'pharmacy.manage-suppliers' => 'Kusimamia suppliers',
         'pharmacy.manage-stock-locations' => 'Kusimamia stock locations',
         'pharmacy.manage-prices' => 'Kusimamia bei za dawa',

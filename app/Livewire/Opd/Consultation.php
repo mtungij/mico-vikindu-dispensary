@@ -810,6 +810,7 @@ class Consultation extends Component
         }
 
         $medicines = Medicine::query()->forCurrentFacility()
+            ->active()
             ->with(['generic', 'dosageForm', 'dispensingUnit', 'route', 'service'])
             ->when(strlen($this->medicineSearch) >= 2, fn ($query) => $query->where(fn ($q) => $q->where('name', 'like', '%'.$this->medicineSearch.'%')->orWhere('brand_name', 'like', '%'.$this->medicineSearch.'%')->orWhereHas('generic', fn ($g) => $g->where('name', 'like', '%'.$this->medicineSearch.'%'))))
             ->orderByDesc('is_active')

@@ -307,7 +307,7 @@ class Consultation extends Component
     public function render(): View
     {
         $this->dentalEncounter->load(['patient', 'clinicalEncounter.prescriptions.items.medicine.dispensingUnit', 'toothRecords.findings.type', 'diagnoses', 'treatmentPlans.items', 'procedures.service', 'attachments', 'labOrders']);
-        $medicines = Medicine::query()->forCurrentFacility()->with(['generic', 'dosageForm', 'dispensingUnit', 'route', 'service'])
+        $medicines = Medicine::query()->forCurrentFacility()->active()->with(['generic', 'dosageForm', 'dispensingUnit', 'route', 'service'])
             ->when(strlen($this->medicineSearch) >= 2, fn ($query) => $query->where(fn ($q) => $q->where('name', 'like', '%'.$this->medicineSearch.'%')->orWhere('brand_name', 'like', '%'.$this->medicineSearch.'%')->orWhereHas('generic', fn ($g) => $g->where('name', 'like', '%'.$this->medicineSearch.'%'))))
             ->orderByDesc('is_active')->orderBy('name')->limit(50)->get();
         $readiness = app(MedicineBillingReadinessService::class);

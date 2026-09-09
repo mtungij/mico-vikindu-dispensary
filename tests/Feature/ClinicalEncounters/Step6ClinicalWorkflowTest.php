@@ -714,6 +714,38 @@ class Step6ClinicalWorkflowTest extends TestCase
         }
     }
 
+    public function test_opd_new_medicine_selector_and_backend_reject_inactive_medicine(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
+        $active = $this->medicine($admin);
+        $active->update(['name' => 'Active OPD Selector Medicine']);
+        $inactive = $this->medicine($admin);
+        $inactive->update(['name' => 'Archived OPD Selector Medicine', 'is_active' => false]);
+
+        Livewire::actingAs($admin)->test(OpdConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'orders')
+            ->assertSee($active->name)
+            ->assertDontSee($inactive->name);
+
+        try {
+            app(ClinicalEncounterService::class)->addPrescription($encounter, ['items' => [[
+                'medicine_id' => $inactive->id,
+                'medication_name' => $inactive->name,
+                'dose' => '1 tablet',
+                'frequency' => 'OD',
+                'duration_value' => 3,
+                'duration_unit' => 'days',
+            ]]], $admin);
+            $this->fail('Inactive medicine was accepted through a tampered OPD prescription payload.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('medicine_id', $exception->errors());
+        }
+
+        $this->assertDatabaseCount('prescription_items', 0);
+    }
+
     public function test_non_clinical_roles_cannot_mutate_a_doctors_draft_prescription(): void
     {
         $admin = $this->bootstrappedFacility();
@@ -1052,7 +1084,8 @@ class Step6ClinicalWorkflowTest extends TestCase
         $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
         $visit = $this->visitInDepartment($admin, $billing, $opd, VisitStatus::Waiting);
 
-        $this->actingAs($doctor)->get(route('opd.consultation', $visit))->assertForbidden();
+        $this->actingAs($doctor)->get(route('opd.consultation', $visit))->assertStatus(409);
+        $this->assertSame(0, $visit->clinicalEncounters()->count());
     }
 
     public function test_opd_summary_is_read_only_and_doctor_notes_are_in_plan_tab(): void
@@ -3218,7 +3251,7 @@ class Step6ClinicalWorkflowTest extends TestCase
         app(ClinicalEncounterService::class)->startEncounter($visit, $admin);
 
         $this->expectException(ValidationException::class);
-        app(ClinicalEncounterService::class)->startEncounter($visit->refresh(), User::factory()->create());
+        app(ClinicalEncounterService::class)->startEncounter($visit->refresh(), $this->staffUser('doctor'));
     }
 
     public function test_completed_encounter_is_immutable_without_amend_permission(): void

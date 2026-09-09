@@ -57,7 +57,8 @@ class ClinicalEncounterPolicy
                 return true;
             }
 
-            if ($model->encounter_type === ClinicalEncounterType::Opd && $user->can($permission)) {
+            if (($model->encounter_type === ClinicalEncounterType::Opd
+                || ($model->encounter_type === ClinicalEncounterType::FollowUp && $model->department?->code === 'OPD')) && $user->can($permission)) {
                 return true;
             }
         }

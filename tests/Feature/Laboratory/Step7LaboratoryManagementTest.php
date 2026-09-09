@@ -5,6 +5,8 @@ namespace Tests\Feature\Laboratory;
 use App\Enums\FacilityType;
 use App\Enums\LaboratoryResultType;
 use App\Enums\OwnershipType;
+use App\Enums\VisitStatus;
+use App\Livewire\Clinical\LaboratoryResults;
 use App\Livewire\Laboratory\Dashboard;
 use App\Livewire\Laboratory\OrderShow;
 use App\Livewire\Laboratory\Queue as LaboratoryQueue;
@@ -44,6 +46,7 @@ use App\Services\LaboratoryResultVerificationService;
 use App\Services\LaboratorySampleService;
 use App\Services\LaboratoryTestService;
 use App\Services\VisitClosureService;
+use App\Services\WorkflowService;
 use Database\Seeders\DepartmentSeeder;
 use Database\Seeders\LaboratorySampleRejectionReasonSeeder;
 use Database\Seeders\LaboratoryTestCategorySeeder;
@@ -54,6 +57,7 @@ use Database\Seeders\SpecimenTypeSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class Step7LaboratoryManagementTest extends TestCase
@@ -448,11 +452,50 @@ class Step7LaboratoryManagementTest extends TestCase
         app(LaboratoryResultService::class)->createDraft($order->items()->first()->refresh(), $admin);
     }
 
-    public function test_required_laboratory_review_creates_new_opd_review_encounter_without_reopening_original(): void
+    public function test_opd_route_distinguishes_missing_visits_and_workflow_conflicts(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $this->actingAs($admin)->get(route('opd.consultation', $visit))->assertStatus(409);
+        $this->assertSame(0, $visit->clinicalEncounters()->count());
+        $this->get(route('opd.consultation', 999999))->assertNotFound();
+    }
+
+    public function test_opd_only_permissions_allow_opd_follow_up_and_reject_pharmacy_follow_up(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = User::factory()->create();
+        StaffProfile::factory()->create(['user_id' => $doctor->id, 'facility_id' => currentFacility()->id]);
+        $doctor->givePermissionTo(['opd.consult', 'opd.complete-consultation']);
+        $parent = $this->encounter($admin);
+        $parent->update(['department_id' => Department::query()->forCurrentFacility()->where('code', 'OPD')->value('id'), 'status' => 'completed']);
+        $review = $parent->replicate();
+        $review->encounter_number .= '-REVIEW';
+        $review->encounter_type = 'follow_up';
+        $review->parent_encounter_id = $parent->id;
+        $review->status = 'in_progress';
+        $review->save();
+        $this->assertTrue($doctor->can('view', $review));
+        $this->assertTrue($doctor->can('update', $review));
+        $this->assertTrue($doctor->can('complete', $review));
+        $review->department_id = Department::query()->forCurrentFacility()->where('code', 'PHA')->value('id');
+        $review->unsetRelation('department');
+        $this->assertFalse($doctor->can('view', $review));
+        $this->assertFalse($doctor->can('complete', $review));
+    }
+
+    public static function reviewWorkflowStates(): array
+    {
+        return ['normal' => [false, false], 'stale pharmacy destination' => [true, false], 'pending pharmacy' => [true, true]];
+    }
+
+    #[DataProvider('reviewWorkflowStates')]
+    public function test_required_laboratory_review_creates_new_opd_review_encounter_without_reopening_original(bool $stale, bool $pharmacyPending): void
     {
         $admin = $this->bootstrappedFacility();
         $test = $this->configuredTest($admin);
         $original = $this->encounter($admin);
+        $original->update(['department_id' => Department::query()->forCurrentFacility()->where('code', 'OPD')->value('id')]);
         $order = app(LaboratoryOrderService::class)->createOrder($original, [
             'service_ids' => [$test->service_id],
         ], $admin);
@@ -501,7 +544,35 @@ class Step7LaboratoryManagementTest extends TestCase
             'queue_status' => 'waiting',
         ]);
 
+        $opd = Department::query()->forCurrentFacility()->where('code', 'OPD')->firstOrFail();
+        $this->assertSame($opd->id, $order->visit->refresh()->current_department_id);
+        app(LaboratoryResultReleaseService::class)->release($released, $admin);
+        app(VisitClosureService::class)->evaluate($order->visit, $admin);
+        app(VisitClosureService::class)->evaluate($order->visit, $admin);
+        $this->assertSame(1, $order->visit->queues()->where('department_id', $opd->id)->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $history = $original->getAttributes();
+        $releasedHistory = $released->only(['released_at', 'released_by', 'verified_at', 'verified_by', 'overall_result']);
+        $pharmacy = Department::query()->forCurrentFacility()->where('code', 'PHA')->firstOrFail();
+        $pharmacyQueue = $pharmacyPending ? app(WorkflowService::class)->createQueue(
+            $order->visit, $pharmacy, $admin, VisitStatus::AwaitingPharmacy, null, true
+        ) : null;
+        if ($stale) {
+            app(VisitClosureService::class)->completeDepartmentQueues($order->visit, 'OPD', $admin);
+            $order->visit->update(['visit_status' => 'awaiting_doctor_review', 'current_department_id' => $pharmacy->id, 'current_queue_id' => null]);
+        }
+        $historicalQueues = $order->visit->queues()->where('queue_status', 'completed')->get()->map->getAttributes()->all();
+        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk();
+        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk();
         $review = app(ClinicalEncounterService::class)->startEncounter($order->visit->refresh(), $admin);
+        $this->assertSame($opd->id, $review->department_id);
+        $this->assertSame($original->facility_id, $review->facility_id);
+        $this->assertSame($original->patient_id, $review->patient_id);
+        $this->assertSame($original->visit_id, $review->visit_id);
+        $this->assertSame(1, $order->visit->clinicalEncounters()->where('status', 'in_progress')->count());
+        app(LaboratoryResultReleaseService::class)->release($released, $admin);
+        app(VisitClosureService::class)->evaluate($order->visit, $admin);
+        $this->assertSame(1, $order->visit->queues()->where('department_id', $opd->id)->whereIn('queue_status', ['waiting', 'called', 'serving'])->count());
+        $this->assertSame($historicalQueues, $order->visit->queues()->where('queue_status', 'completed')->get()->map->getAttributes()->all());
         $this->assertSame($original->id, $review->parent_encounter_id);
         $this->assertSame('follow_up', $review->encounter_type->value);
         app(ClinicalEncounterService::class)->saveDraft($review, [
@@ -514,11 +585,71 @@ class Step7LaboratoryManagementTest extends TestCase
             'certainty' => 'confirmed',
             'is_primary' => true,
         ], $admin);
+        $order->refresh();
+        $secondOrder = $order->replicate();
+        $secondOrder->order_number .= '-SECOND';
+        $secondOrder->save();
+        $secondItem = $item->replicate();
+        $secondItem->laboratory_order_id = $secondOrder->id;
+        $secondItem->save();
+        $secondResult = $released->replicate();
+        $secondResult->laboratory_order_id = $secondOrder->id;
+        $secondResult->laboratory_order_item_id = $secondItem->id;
+        $secondResult->save();
+        $excluded = collect();
+        foreach (['draft', 'verified', 'entered_in_error'] as $status) {
+            $copy = $released->replicate();
+            $copy->result_status = $status;
+            $copy->save();
+            $excluded->push($copy);
+        }
+        $otherOrder = $order->replicate();
+        $otherOrder->order_number .= '-OTHER';
+        $otherOrder->visit_id = $this->visit($admin)->id;
+        $otherOrder->save();
+        $copy = $released->replicate();
+        $copy->laboratory_order_id = $otherOrder->id;
+        $copy->save();
+        $excluded->push($copy);
+        $otherFacility = currentFacility()->replicate();
+        $otherFacility->code = 'OTHER';
+        $otherFacility->save();
+        $copy = $released->replicate();
+        $copy->facility_id = $otherFacility->id;
+        $copy->save();
+        $excluded->push($copy);
+        $directOrder = $order->replicate();
+        $directOrder->order_number .= '-DIRECT';
+        $directOrder->source = LaboratoryOrder::SOURCE_RECEPTION_DIRECT;
+        $directOrder->save();
+        $copy = $released->replicate();
+        $copy->laboratory_order_id = $directOrder->id;
+        $copy->save();
+        $excluded->push($copy);
+        $excludedHistory = $excluded->map(fn ($result) => $result->refresh()->getAttributes())->all();
         app(ClinicalEncounterService::class)->signOff($review->refresh(), $admin);
         app(ClinicalEncounterService::class)->completeEncounter($review->refresh(), $admin);
 
         $this->assertNotNull($released->refresh()->reviewed_at);
-        $this->assertSame('completed', $order->visit->refresh()->visit_status->value);
+        $this->assertSame($excludedHistory, $excluded->map(fn ($result) => $result->refresh()->getAttributes())->all());
+        $this->assertNotNull($secondResult->refresh()->reviewed_at);
+        $this->assertSame($admin->id, $secondResult->reviewed_by_clinician);
+        $reviewedAt = $released->reviewed_at;
+        $this->assertSame($admin->id, $released->reviewed_by_clinician);
+        $this->assertEquals($releasedHistory, $released->only(array_keys($releasedHistory)));
+        $this->travel(5)->minutes();
+        app(ClinicalEncounterService::class)->completeEncounter($review->refresh(), $admin);
+        Livewire::actingAs($admin)->test(LaboratoryResults::class)
+            ->call('markReviewed', $released->id)->assertHasNoErrors();
+        $this->assertEquals($reviewedAt, $released->refresh()->reviewed_at);
+        $this->assertSame($history, $original->refresh()->getAttributes());
+        $this->assertSame($pharmacyPending ? 'awaiting_pharmacy' : 'completed', $order->visit->refresh()->visit_status->value);
+        if ($pharmacyQueue) {
+            $this->assertSame('waiting', $pharmacyQueue->refresh()->queue_status->value);
+            $this->assertSame($pharmacyQueue->id, $order->visit->current_queue_id);
+            $this->assertSame($pharmacy->id, $order->visit->current_department_id);
+        }
+        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk();
         $this->assertSame('completed', $original->refresh()->status->value);
     }
 

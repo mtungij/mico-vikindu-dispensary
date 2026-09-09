@@ -6,9 +6,9 @@ use App\Enums\ClinicalOrderStatus;
 use App\Enums\LaboratoryResultStatus;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
-use App\Models\Department;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryResult;
+use App\Models\Visit;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -22,8 +22,12 @@ class LaboratoryResultReleaseService
     public function release(LaboratoryResult $result, $actor): LaboratoryResult
     {
         return DB::transaction(function () use ($result, $actor) {
+            $visit = Visit::query()->lockForUpdate()->findOrFail($result->order->visit_id);
+            abort_unless($visit->facility_id === currentFacility()?->id && $result->facility_id === $visit->facility_id, 403);
             $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
             if ($result->result_status === LaboratoryResultStatus::Released) {
+                $this->visitClosure->evaluate($visit, $actor);
+
                 return $result->refresh();
             }
             if ($result->result_status !== LaboratoryResultStatus::Verified) {
@@ -79,29 +83,6 @@ class LaboratoryResultReleaseService
                 $this->workflow->updateCurrentDepartment($visit, $activeEncounter->department, $actor, $opdQueue);
                 $this->workflow->updateVisitStatus($visit->refresh(), VisitStatus::InConsultation, $actor, $opdQueue);
             }
-            if ($allVisitOrdersTerminal && $this->visitClosure->requiresDoctorReview($visit)) {
-                $opd = Department::query()
-                    ->where('facility_id', $visit->facility_id)
-                    ->where('code', 'OPD')
-                    ->where('is_active', true)
-                    ->where('can_receive_patients', true)
-                    ->where('queue_enabled', true)
-                    ->first();
-                if (! $opd) {
-                    throw ValidationException::withMessages([
-                        'destination' => 'Matokeo hayawezi kutolewa kwa sababu OPD review destination haijawekwa vizuri.',
-                    ]);
-                }
-                $this->workflow->createQueue(
-                    $visit->refresh(),
-                    $opd,
-                    $actor,
-                    VisitStatus::AwaitingDoctorReview,
-                    'Laboratory results released for required doctor review',
-                    true,
-                );
-            }
-
             $this->visitClosure->evaluate($visit->refresh(), $actor);
         }
     }

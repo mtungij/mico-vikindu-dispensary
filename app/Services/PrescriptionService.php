@@ -78,12 +78,14 @@ class PrescriptionService
 
     public function addItem(Prescription $prescription, array $data, $actor): void
     {
-        $this->authorizeDraftMutation($prescription, $actor);
-        $data = $this->prepareMedicineData($prescription, $data);
-        $data = $this->withCalculatedQuantity($data);
-        validator($data, $this->itemRules($data), $this->itemMessages())->validate();
-        $data = $this->normalizedItemData($data);
-        $prescription->items()->create([...$data, 'status' => 'prescribed', 'created_by' => $actor->id]);
+        DB::transaction(function () use ($prescription, $data, $actor): void {
+            $this->authorizeDraftMutation($prescription, $actor);
+            $data = $this->prepareMedicineData($prescription, $data);
+            $data = $this->withCalculatedQuantity($data);
+            validator($data, $this->itemRules($data), $this->itemMessages())->validate();
+            $data = $this->normalizedItemData($data);
+            $prescription->items()->create([...$data, 'status' => 'prescribed', 'created_by' => $actor->id]);
+        });
     }
 
     public function updateItem(PrescriptionItem $item, array $data, $actor): PrescriptionItem
@@ -91,7 +93,7 @@ class PrescriptionService
         return DB::transaction(function () use ($item, $data, $actor): PrescriptionItem {
             $item = PrescriptionItem::query()->with('prescription')->lockForUpdate()->findOrFail($item->id);
             $this->authorizeDraftMutation($item->prescription, $actor);
-            $data = $this->prepareMedicineData($item->prescription, $data);
+            $data = $this->prepareMedicineData($item->prescription, $data, $item->medicine_id);
             $data = $this->withCalculatedQuantity($data);
             validator($data, $this->itemRules($data), $this->itemMessages())->validate();
             $data = $this->normalizedItemData($data);
@@ -194,7 +196,7 @@ class PrescriptionService
         return $data;
     }
 
-    private function prepareMedicineData(Prescription $prescription, array $data): array
+    private function prepareMedicineData(Prescription $prescription, array $data, ?int $existingMedicineId = null): array
     {
         if (empty($data['medicine_id'])) {
             return $data;
@@ -204,8 +206,9 @@ class PrescriptionService
         $medicine = Medicine::withTrashed()
             ->with(['service', 'generic', 'dosageForm', 'route'])
             ->where('facility_id', $prescription->facility_id)
+            ->lockForUpdate()
             ->find($data['medicine_id']);
-        if (! $medicine) {
+        if (! $medicine || ((! $medicine->is_active || $medicine->trashed()) && $medicine->id !== $existingMedicineId)) {
             throw ValidationException::withMessages([
                 'medicine_id' => 'Selected medicine is not available at this facility. Contact Pharmacy/Administrator.',
             ]);

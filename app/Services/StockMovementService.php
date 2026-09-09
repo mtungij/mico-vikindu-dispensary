@@ -10,6 +10,7 @@ use App\Models\Medicine;
 use App\Models\MedicineBatch;
 use App\Models\StockLocation;
 use App\Models\StockMovement;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class StockMovementService
@@ -20,6 +21,7 @@ class StockMovementService
         $before = (float) $batch->available_quantity;
         $after = $before + (float) $quantity;
         $batch->update(['available_quantity' => $after, 'status' => $after > 0 && $batch->status === MedicineBatchStatus::Exhausted ? MedicineBatchStatus::Active : $batch->status, 'updated_by' => $actor->id]);
+
         return $this->movement($batch, $type, StockMovementDirection::In, $quantity, $before, $after, $actor, $reference, $reason, $notes);
     }
 
@@ -35,35 +37,49 @@ class StockMovementService
         }
         $after = $before - (float) $quantity;
         $batch->update(['available_quantity' => $after, 'status' => $after <= 0 ? MedicineBatchStatus::Exhausted : $batch->status, 'updated_by' => $actor->id]);
+
         return $this->movement($batch, $type, StockMovementDirection::Out, $quantity, $before, $after, $actor, $reference, $reason, $notes);
     }
 
     public function openingStock(Medicine $medicine, StockLocation $location, array $data, $actor): MedicineBatch
     {
-        $batch = MedicineBatch::query()->create([
-            'facility_id' => $medicine->facility_id,
-            'medicine_id' => $medicine->id,
-            'stock_location_id' => $location->id,
-            'supplier_id' => $data['supplier_id'] ?? null,
-            'batch_number' => $data['batch_number'],
-            'manufacturing_date' => $data['manufacturing_date'] ?? null,
-            'expiry_date' => $data['expiry_date'] ?? null,
-            'received_quantity' => 0,
-            'available_quantity' => 0,
-            'unit_cost' => $data['unit_cost'],
-            'selling_price_snapshot' => $data['selling_price'] ?? null,
-            'status' => MedicineBatchStatus::Active,
-            'received_at' => now(),
-            'created_by' => $actor->id,
-        ]);
-        $this->stockIn($batch, StockMovementType::OpeningStock, (string) $data['quantity'], $actor, $batch, $data['reason'] ?? 'Opening stock', $data['notes'] ?? null);
-        ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'opening_stock_posted', 'subject_type' => $batch::class, 'subject_id' => $batch->id]);
-        return $batch->refresh();
+        return DB::transaction(function () use ($medicine, $location, $data, $actor): MedicineBatch {
+            $medicine = Medicine::query()
+                ->withTrashed()
+                ->where('facility_id', currentFacility()?->id)
+                ->lockForUpdate()
+                ->find($medicine->id);
+            if (! $medicine || ! $medicine->is_active || $medicine->trashed()) {
+                throw ValidationException::withMessages(['medicine_id' => 'Dawa hii haipatikani kwa opening stock mpya.']);
+            }
+
+            $batch = MedicineBatch::query()->create([
+                'facility_id' => $medicine->facility_id,
+                'medicine_id' => $medicine->id,
+                'stock_location_id' => $location->id,
+                'supplier_id' => $data['supplier_id'] ?? null,
+                'batch_number' => $data['batch_number'],
+                'manufacturing_date' => $data['manufacturing_date'] ?? null,
+                'expiry_date' => $data['expiry_date'] ?? null,
+                'received_quantity' => 0,
+                'available_quantity' => 0,
+                'unit_cost' => $data['unit_cost'],
+                'selling_price_snapshot' => $data['selling_price'] ?? null,
+                'status' => MedicineBatchStatus::Active,
+                'received_at' => now(),
+                'created_by' => $actor->id,
+            ]);
+            $this->stockIn($batch, StockMovementType::OpeningStock, (string) $data['quantity'], $actor, $batch, $data['reason'] ?? 'Opening stock', $data['notes'] ?? null);
+            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'opening_stock_posted', 'subject_type' => $batch::class, 'subject_id' => $batch->id]);
+
+            return $batch->refresh();
+        });
     }
 
     public function reverseMovement(StockMovement $movement, $actor, string $reason): StockMovement
     {
         $batch = $movement->batch()->lockForUpdate()->firstOrFail();
+
         return $movement->direction === StockMovementDirection::Out
             ? $this->stockIn($batch, StockMovementType::CancellationReversal, (string) $movement->quantity, $actor, $movement, $reason)
             : $this->stockOut($batch, StockMovementType::CancellationReversal, (string) $movement->quantity, $actor, $movement, $reason);

@@ -43,18 +43,43 @@ class ClinicalEncounterService
     {
         return DB::transaction(function () use ($visit, $actor) {
             $visit = Visit::query()->lockForUpdate()->findOrFail($visit->id);
+            Gate::forUser($actor)->authorize('opd.consult');
+            abort_unless($visit->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
             if (in_array($visit->visit_status, [VisitStatus::Completed, VisitStatus::Cancelled, VisitStatus::Referred, VisitStatus::Discharged], true)) {
                 throw ValidationException::withMessages(['visit' => 'Visit si active.']);
             }
 
+            $isLaboratoryReview = $this->visitClosure->hasReleasedUnreviewedResult($visit);
+            if ($visit->visit_status === VisitStatus::AwaitingDoctorReview && ! $isLaboratoryReview) {
+                throw ValidationException::withMessages(['visit' => 'No released laboratory result currently requires OPD review. Refresh the visit workflow before starting consultation.']);
+            }
+            $parentEncounter = $isLaboratoryReview ? $this->visitClosure->doctorReviewParent($visit) : null;
+            if ($isLaboratoryReview && ! $parentEncounter && ! $visit->activeClinicalEncounter) {
+                throw ValidationException::withMessages(['visit' => 'A completed OPD encounter is required to start laboratory follow-up review.']);
+            }
+            if ($isLaboratoryReview) {
+                $this->visitClosure->ensureDoctorReviewQueue($visit, $actor);
+                $visit->refresh();
+            }
+
             $existing = ClinicalEncounter::query()
                 ->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)
+                ->where('patient_id', $visit->patient_id)
                 ->where('department_id', $visit->current_department_id)
                 ->where('provider_user_id', $actor->id)
                 ->whereNotIn('status', [ClinicalEncounterStatus::Completed->value, ClinicalEncounterStatus::Cancelled->value, ClinicalEncounterStatus::Referred->value])
                 ->first();
             if ($existing) {
+                if ($isLaboratoryReview) {
+                    $this->workflow->updateVisitStatus($visit, VisitStatus::InConsultation, $actor, $visit->currentQueue);
+                }
+
                 return $existing;
+            }
+
+            if ($isLaboratoryReview && ! $parentEncounter) {
+                throw ValidationException::withMessages(['visit' => 'A completed OPD encounter is required to start laboratory follow-up review.']);
             }
 
             if (ClinicalEncounter::query()->where('visit_id', $visit->id)->where('department_id', $visit->current_department_id)->whereNotIn('status', [ClinicalEncounterStatus::Completed->value, ClinicalEncounterStatus::Cancelled->value, ClinicalEncounterStatus::Referred->value])->exists()) {
@@ -65,18 +90,6 @@ class ClinicalEncounterService
             if ($queue) {
                 $this->workflow->startService($queue, $actor);
             }
-
-            $isLaboratoryReview = $visit->visit_status === VisitStatus::AwaitingDoctorReview;
-            $parentEncounter = $isLaboratoryReview
-                ? ClinicalEncounter::query()
-                    ->where('visit_id', $visit->id)
-                    ->where('status', ClinicalEncounterStatus::Completed)
-                    ->whereHas('laboratoryOrders.results', fn ($query) => $query
-                        ->where('result_status', 'released')
-                        ->whereNull('reviewed_at'))
-                    ->latest('completed_at')
-                    ->first()
-                : null;
 
             $encounter = ClinicalEncounter::query()->create([
                 'facility_id' => $visit->facility_id,
@@ -311,26 +324,22 @@ class ClinicalEncounterService
                     $this->workflow->completeQueue($queue, $actor);
                 });
 
+            if ($encounter->encounter_type === ClinicalEncounterType::FollowUp && $encounter->parent_encounter_id) {
+                $this->visitClosure->pendingReviewResults($visit)
+                    ->whereHas('order', fn ($query) => $query->where('clinical_encounter_id', $encounter->parent_encounter_id))
+                    ->lockForUpdate()->get()
+                    ->each(fn ($result) => $result->update([
+                        'reviewed_by_clinician' => $actor->id,
+                        'reviewed_at' => $completedAt,
+                        'updated_by' => $actor->id,
+                    ]));
+            }
+
             $this->createDownstreamQueues($encounter, $destinations, $actor);
             if ($next === VisitStatus::Referred) {
                 $this->workflow->updateVisitStatus($encounter->visit, VisitStatus::Referred, $actor);
             } else {
                 $this->visitClosure->evaluate($encounter->visit, $actor);
-            }
-
-            if ($encounter->encounter_type === ClinicalEncounterType::FollowUp && $encounter->parent_encounter_id) {
-                $encounter->parentEncounter?->laboratoryOrders()
-                    ->with('results')
-                    ->get()
-                    ->flatMap->results
-                    ->where('result_status', LaboratoryResultStatus::Released)
-                    ->whereNull('reviewed_at')
-                    ->each(fn ($result) => $result->update([
-                        'reviewed_by_clinician' => $actor->id,
-                        'reviewed_at' => now(),
-                        'updated_by' => $actor->id,
-                    ]));
-                $this->visitClosure->evaluate($encounter->visit->refresh(), $actor);
             }
 
             $this->audit($actor, 'clinical_encounter_completed', $encounter, [

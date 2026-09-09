@@ -92,6 +92,11 @@ class MedicineCatalogService
 
             DB::table('medicine_batches')->where('medicine_id', $medicine->id)->lockForUpdate()->get();
             $assessment = $this->buildDeletionAssessment($medicine);
+            if ($assessment['action'] === 'block') {
+                throw ValidationException::withMessages([
+                    'medicine' => 'Dawa haiwezi kuondolewa kwa sababu bado inatumika kwenye huduma ya mgonjwa iliyo hai.',
+                ]);
+            }
             $old = $medicine->only(['is_active', 'deleted_at']);
 
             if ($assessment['action'] === 'delete') {
@@ -176,7 +181,6 @@ class MedicineCatalogService
             || $hasPrescriptionHistory
             || $hasDispensingHistory
             || $hasBillingHistory
-            || $hasServiceMapping
             || $hasOtherHistory;
 
         return [
@@ -190,7 +194,7 @@ class MedicineCatalogService
             'has_service_mapping' => $hasServiceMapping,
             'has_other_history' => $hasOtherHistory,
             'has_history' => $hasHistory,
-            'action' => $hasHistory || $currentStock > 0 ? 'archive' : 'delete',
+            'action' => $hasActivePrescription ? 'block' : ($hasHistory || $currentStock > 0 ? 'archive' : 'delete'),
         ];
     }
 

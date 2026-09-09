@@ -7,7 +7,9 @@ use App\Enums\OwnershipType;
 use App\Enums\ServiceType;
 use App\Livewire\Pharmacy\DispensePrescription as DispensePrescriptionComponent;
 use App\Livewire\Pharmacy\Medicines\Index as MedicineIndex;
+use App\Livewire\Pharmacy\OpeningStock;
 use App\Livewire\Pharmacy\Queue as PharmacyQueue;
+use App\Livewire\Pharmacy\Receipts\Create as CreateReceipt;
 use App\Models\ClinicalEncounter;
 use App\Models\Department;
 use App\Models\DispensingItem;
@@ -22,6 +24,7 @@ use App\Models\PaymentMethod;
 use App\Models\Permission;
 use App\Models\Prescription;
 use App\Models\PrescriptionItem;
+use App\Models\PurchaseReceiptItem;
 use App\Models\Service;
 use App\Models\ServiceCategory;
 use App\Models\ServicePrice;
@@ -37,6 +40,7 @@ use App\Services\PaymentConfirmationService;
 use App\Services\PharmacyBatchAllocationService;
 use App\Services\PharmacyDispensingService;
 use App\Services\PrescriptionService;
+use App\Services\StockMovementService;
 use App\Services\StockReceivingService;
 use Database\Seeders\DepartmentSeeder;
 use Database\Seeders\DosageFormSeeder;
@@ -97,26 +101,17 @@ class Step8PharmacyInventoryTest extends TestCase
     public function test_delete_confirmation_cancel_and_unused_soft_delete_refresh_active_list(): void
     {
         $admin = $this->bootstrappedFacility();
-        $unit = MedicineUnit::query()->forCurrentFacility()->firstOrFail();
-        $medicine = Medicine::query()->create([
-            'facility_id' => currentFacility()->id,
-            'name' => 'Completely Unused Medicine',
-            'code' => 'UNUSED-DELETE',
-            'purchase_unit_id' => $unit->id,
-            'dispensing_unit_id' => $unit->id,
-            'pack_size' => 1,
-            'purchase_to_dispensing_factor' => 1,
-            'is_active' => true,
-            'created_by' => $admin->id,
-        ]);
+        [$medicine] = $this->catalog();
+        $serviceId = $medicine->service_id;
+        $priceIds = ServicePrice::query()->where('service_id', $serviceId)->pluck('id');
 
         $component = Livewire::actingAs($admin)->test(MedicineIndex::class)
-            ->set('search', 'Completely Unused')
+            ->set('search', 'Test Medicine')
             ->call('confirmDelete', $medicine->id)
             ->assertSet('showDeleteModal', true)
             ->assertSet('deletingMedicineId', $medicine->id)
             ->assertSet('deletionAssessment.action', 'delete')
-            ->assertSee('Dawa hii haina historia ya stock, prescription au mauzo.')
+            ->assertSee('Dawa hii haina historia ya matumizi na inaweza kuondolewa.')
             ->call('cancelDelete')
             ->assertSet('showDeleteModal', false);
 
@@ -125,10 +120,14 @@ class Step8PharmacyInventoryTest extends TestCase
         $component->call('confirmDelete', $medicine->id)
             ->call('deleteMedicine')
             ->assertHasNoErrors()
-            ->assertDontSee('Completely Unused Medicine');
+            ->assertDontSee('Test Medicine');
 
         $this->assertSoftDeleted('medicines', ['id' => $medicine->id]);
+        $this->assertDatabaseHas('services', ['id' => $serviceId]);
+        $this->assertSame($priceIds->all(), ServicePrice::query()->where('service_id', $serviceId)->pluck('id')->all());
         $this->assertDatabaseHas('activity_logs', ['event' => 'medicine_safely_deleted', 'subject_id' => $medicine->id]);
+        $component->call('create')
+            ->assertDontSeeHtml('<option value="'.$serviceId.'">Test Medicine (Active)</option>');
     }
 
     public function test_medicine_with_current_stock_is_only_archived_and_stock_and_billing_remain_unchanged(): void
@@ -143,7 +142,7 @@ class Step8PharmacyInventoryTest extends TestCase
         Livewire::actingAs($admin)->test(MedicineIndex::class)
             ->call('confirmDelete', $medicine->id)
             ->assertSet('deletionAssessment.action', 'archive')
-            ->assertSee('Huwezi kufuta dawa yenye stock iliyopo.')
+            ->assertSee('Dawa hii bado ina stock ya 210.000')
             ->assertSee('210.000')
             ->call('deleteMedicine')
             ->assertHasNoErrors()
@@ -158,25 +157,64 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertDatabaseHas('services', ['id' => $serviceId]);
         $this->assertSame($priceCount, ServicePrice::query()->where('service_id', $serviceId)->count());
         $this->assertDatabaseHas('activity_logs', ['event' => 'medicine_archived', 'subject_id' => $medicine->id]);
+        $this->actingAs($admin)->get(route('pharmacy.medicines.stock-card', $medicine))->assertOk();
+    }
+
+    public function test_delete_confirmation_is_rechecked_when_stock_arrives_before_execution(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$medicine, $supplier, $location] = $this->catalog();
+
+        $component = Livewire::actingAs($admin)->test(MedicineIndex::class)
+            ->call('confirmDelete', $medicine->id)
+            ->assertSet('deletionAssessment.action', 'delete');
+
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'AFTER-CONFIRM', today()->addYear()->toDateString(), 12);
+
+        $component->call('deleteMedicine')->assertHasNoErrors();
+
+        $this->assertNotSoftDeleted('medicines', ['id' => $medicine->id]);
+        $this->assertFalse($medicine->refresh()->is_active);
+        $this->assertSame('12.000', MedicineBatch::query()->where('medicine_id', $medicine->id)->sole()->available_quantity);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'medicine_archived', 'subject_id' => $medicine->id]);
     }
 
     public function test_active_and_historical_prescriptions_keep_medicine_relationship_after_archive(): void
     {
         $admin = $this->bootstrappedFacility();
-        [$medicine] = $this->catalog();
+        [$medicine, $supplier, $location] = $this->catalog();
+        $this->receiveBatch($admin, $medicine, $supplier, $location, 'ACTIVE-RX', today()->addYear()->toDateString(), 6);
         $prescription = $this->prescription($admin, $medicine, 6);
         $item = $prescription->items()->firstOrFail();
 
         $assessment = app(MedicineCatalogService::class)->deletionAssessment($medicine, $admin);
         $this->assertTrue($assessment['has_active_prescription']);
-        $result = app(MedicineCatalogService::class)->removeMedicine($medicine, $admin);
+        $this->assertSame('block', $assessment['action']);
+        try {
+            app(MedicineCatalogService::class)->removeMedicine($medicine, $admin);
+            $this->fail('Medicine in an active prescription was deactivated.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('medicine', $exception->errors());
+        }
 
-        $this->assertSame('archived', $result['outcome']);
         $this->assertNotSoftDeleted('medicines', ['id' => $medicine->id]);
-        $this->assertFalse($medicine->refresh()->is_active);
+        $this->assertTrue($medicine->refresh()->is_active);
         $this->assertSame($medicine->id, $item->refresh()->medicine?->id);
         $this->assertSame($medicine->name, $item->medicine->name);
         $this->assertDatabaseHas('prescription_items', ['id' => $item->id, 'medicine_id' => $medicine->id]);
+
+        $prescription->encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+        $dispensing = app(PharmacyDispensingService::class)->dispense($prescription->refresh(), [[
+            'prescription_item_id' => $item->id,
+            'medicine_id' => $medicine->id,
+            'quantity' => 6,
+        ]], $location, $admin);
+        $this->assertSame(6.0, (float) $dispensing->items()->sole()->dispensed_quantity);
+
+        $result = app(MedicineCatalogService::class)->removeMedicine($medicine->refresh(), $admin);
+        $this->assertSame('archived', $result['outcome']);
+        $this->assertFalse($medicine->refresh()->is_active);
+        $this->assertSame($medicine->name, $item->refresh()->medicine?->name);
     }
 
     public function test_dispensing_history_resolves_archived_medicine_without_stock_or_history_deletion(): void
@@ -193,6 +231,8 @@ class Step8PharmacyInventoryTest extends TestCase
         ]], $location, $admin);
         $dispensingItem = $dispensing->items()->firstOrFail();
         $movementCount = StockMovement::query()->where('medicine_id', $medicine->id)->count();
+        $movement = StockMovement::query()->where('medicine_id', $medicine->id)->firstOrFail();
+        $receiptItem = PurchaseReceiptItem::query()->where('medicine_id', $medicine->id)->sole();
 
         app(MedicineCatalogService::class)->removeMedicine($medicine, $admin);
 
@@ -202,6 +242,56 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->assertSame(1, DispensingItem::query()->whereKey($dispensingItem->id)->count());
         $this->assertSame($movementCount, StockMovement::query()->where('medicine_id', $medicine->id)->count());
         $this->assertSame('0.000', MedicineBatch::query()->where('medicine_id', $medicine->id)->sole()->available_quantity);
+        $this->assertSame($medicine->name, $movement->refresh()->medicine?->name);
+        $this->assertSame($medicine->name, $receiptItem->refresh()->medicine?->name);
+    }
+
+    public function test_new_stock_selectors_exclude_inactive_medicines_and_backend_rejects_tampered_ids(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        [$active, $supplier, $location] = $this->catalog();
+        $inactive = $this->additionalMedicine('Archived Selector Medicine', 'ARCH-SELECT');
+        $inactive->update(['is_active' => false]);
+
+        Livewire::actingAs($admin)->test(CreateReceipt::class)
+            ->assertSee($active->name)
+            ->assertDontSee($inactive->name);
+        Livewire::actingAs($admin)->test(OpeningStock::class)
+            ->assertSee($active->name)
+            ->assertDontSee($inactive->name);
+
+        try {
+            app(StockReceivingService::class)->receive([
+                'supplier_id' => $supplier->id,
+                'stock_location_id' => $location->id,
+            ], [[
+                'medicine_id' => $inactive->id,
+                'batch_number' => 'BLOCKED-RECEIPT',
+                'expiry_date' => today()->addYear()->toDateString(),
+                'quantity_received' => 10,
+                'unit_cost' => 10,
+            ]], $admin);
+            $this->fail('Inactive medicine was accepted through a tampered receipt payload.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('medicine_id', $exception->errors());
+        }
+
+        try {
+            app(StockMovementService::class)->openingStock($inactive, $location, [
+                'batch_number' => 'BLOCKED-OPENING',
+                'expiry_date' => today()->addYear()->toDateString(),
+                'quantity' => 10,
+                'unit_cost' => 10,
+                'reason' => 'Tampered opening stock',
+            ], $admin);
+            $this->fail('Inactive medicine was accepted through a tampered opening-stock payload.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('medicine_id', $exception->errors());
+        }
+
+        $this->assertDatabaseMissing('medicine_batches', ['medicine_id' => $inactive->id]);
+        $this->assertDatabaseMissing('purchase_receipt_items', ['medicine_id' => $inactive->id]);
+        $this->assertDatabaseMissing('stock_movements', ['medicine_id' => $inactive->id]);
     }
 
     public function test_backend_blocks_unauthorized_and_cross_facility_medicine_deletion(): void

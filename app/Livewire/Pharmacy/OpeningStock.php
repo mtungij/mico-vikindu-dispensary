@@ -25,7 +25,7 @@ class OpeningStock extends Component
 
     public function post(StockMovementService $stock): void
     {
-        $medicine = Medicine::query()->forCurrentFacility()->findOrFail($this->medicine_id);
+        $medicine = Medicine::query()->forCurrentFacility()->active()->findOrFail($this->medicine_id);
         $location = StockLocation::query()->forCurrentFacility()->findOrFail($this->stock_location_id);
         $stock->openingStock($medicine, $location, $this->data, auth()->user());
         Notifier::success('inventory.opening_stock_posted');

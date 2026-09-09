@@ -7,10 +7,12 @@ use App\Enums\PurchaseOrderStatus;
 use App\Enums\PurchaseReceiptStatus;
 use App\Enums\StockMovementType;
 use App\Models\ActivityLog;
+use App\Models\Medicine;
 use App\Models\MedicineBatch;
 use App\Models\PurchaseReceipt;
 use App\Models\StockLocation;
 use App\Models\Supplier;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -39,10 +41,21 @@ class StockReceivingService
             ]);
 
             foreach ($items as $line) {
-                $medicine = \App\Models\Medicine::query()->where('facility_id', currentFacility()->id)->findOrFail($line['medicine_id']);
-                if ($medicine->track_batch && blank($line['batch_number'] ?? null)) throw ValidationException::withMessages(['batch_number' => 'Batch number inahitajika.']);
-                if ($medicine->track_expiry && blank($line['expiry_date'] ?? null)) throw ValidationException::withMessages(['expiry_date' => 'Expiry date inahitajika.']);
-                if ($medicine->track_expiry && ! empty($line['expiry_date']) && \Illuminate\Support\Carbon::parse($line['expiry_date'])->isPast() && ! $actor->can('pharmacy.manage-expiry')) {
+                $medicine = Medicine::query()
+                    ->withTrashed()
+                    ->where('facility_id', currentFacility()->id)
+                    ->lockForUpdate()
+                    ->find($line['medicine_id']);
+                if (! $medicine || ! $medicine->is_active || $medicine->trashed()) {
+                    throw ValidationException::withMessages(['medicine_id' => 'Dawa hii haipatikani kwa stock receipt mpya.']);
+                }
+                if ($medicine->track_batch && blank($line['batch_number'] ?? null)) {
+                    throw ValidationException::withMessages(['batch_number' => 'Batch number inahitajika.']);
+                }
+                if ($medicine->track_expiry && blank($line['expiry_date'] ?? null)) {
+                    throw ValidationException::withMessages(['expiry_date' => 'Expiry date inahitajika.']);
+                }
+                if ($medicine->track_expiry && ! empty($line['expiry_date']) && Carbon::parse($line['expiry_date'])->isPast() && ! $actor->can('pharmacy.manage-expiry')) {
                     throw ValidationException::withMessages(['expiry_date' => 'Expired stock haiwezi kupokelewa bila ruhusa.']);
                 }
                 $qty = (float) ($line['quantity_received'] ?? 0) + (float) ($line['bonus_quantity'] ?? 0);
@@ -62,7 +75,9 @@ class StockReceivingService
                     'rejection_reason' => $line['rejection_reason'] ?? null,
                     'notes' => $line['notes'] ?? null,
                 ]);
-                if ($qty <= 0) continue;
+                if ($qty <= 0) {
+                    continue;
+                }
                 $batch = MedicineBatch::query()->firstOrCreate([
                     'facility_id' => $medicine->facility_id,
                     'medicine_id' => $medicine->id,
@@ -91,15 +106,19 @@ class StockReceivingService
             }
 
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'stock_received', 'subject_type' => $receipt::class, 'subject_id' => $receipt->id]);
+
             return $receipt->refresh();
         });
     }
 
     public function verify(PurchaseReceipt $receipt, $actor): PurchaseReceipt
     {
-        if ($receipt->status !== PurchaseReceiptStatus::Received) throw ValidationException::withMessages(['receipt' => 'Receipt haiwezi ku-verify.']);
+        if ($receipt->status !== PurchaseReceiptStatus::Received) {
+            throw ValidationException::withMessages(['receipt' => 'Receipt haiwezi ku-verify.']);
+        }
         $receipt->update(['status' => PurchaseReceiptStatus::Verified, 'verified_by' => $actor->id, 'verified_at' => now(), 'updated_by' => $actor->id]);
         ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'receipt_verified', 'subject_type' => $receipt::class, 'subject_id' => $receipt->id]);
+
         return $receipt->refresh();
     }
 }

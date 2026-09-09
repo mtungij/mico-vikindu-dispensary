@@ -28,6 +28,7 @@ use App\Services\DiagnosisService;
 use App\Services\MedicineBillingReadinessService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
+use App\Services\VisitClosureService;
 use App\Support\MedicationDirections;
 use App\Support\Notifier;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -102,26 +103,34 @@ class Consultation extends Component
         Gate::authorize('opd.consult');
         abort_unless($visit->facility_id === currentFacility()?->id, 403);
         abort_unless(auth()->user()?->belongsToCurrentFacility(), 403);
-        $latestEncounter = $visit->clinicalEncounters()->with('department')->latest('id')->first();
-        abort_unless($this->visitCanOpenOpdConsultation($visit, $latestEncounter), 403);
+        try {
+            $closure = app(VisitClosureService::class);
+            if ($closure->hasReleasedUnreviewedResult($visit)) {
+                $visit = $closure->evaluate($visit, auth()->user());
+            }
+            $latestEncounter = $visit->clinicalEncounters()->with('department')->latest('id')->first();
+            abort_unless($this->visitCanOpenOpdConsultation($visit, $latestEncounter), 409, 'This visit is not ready for OPD consultation.');
 
-        $this->visit = $visit->load([
-            'patient.primaryPayerProfile.insuranceProvider',
-            'patient.primaryPayerProfile.corporateAccount',
-            'patient.diagnoses',
-            'latestCompletedTriageAssessment.assessor',
-            'latestCompletedTriageAssessment.completedBy',
-            'latestCompletedTriageAssessment.clinicalAlerts',
-            'invoice.insuranceProvider',
-            'invoice.corporateAccount',
-            'currentDepartment',
-            'currentAssignedUser',
-            'currentQueue',
-        ]);
-        $this->encounter = $this->visit->activeClinicalEncounter
-            ?: ($visit->visit_status !== VisitStatus::AwaitingDoctorReview && $latestEncounter?->isTerminal()
-                ? $latestEncounter
-                : $service->startEncounter($this->visit, auth()->user()));
+            $this->visit = $visit->load([
+                'patient.primaryPayerProfile.insuranceProvider',
+                'patient.primaryPayerProfile.corporateAccount',
+                'patient.diagnoses',
+                'latestCompletedTriageAssessment.assessor',
+                'latestCompletedTriageAssessment.completedBy',
+                'latestCompletedTriageAssessment.clinicalAlerts',
+                'invoice.insuranceProvider',
+                'invoice.corporateAccount',
+                'currentDepartment',
+                'currentAssignedUser',
+                'currentQueue',
+            ]);
+            $this->encounter = $this->visit->activeClinicalEncounter
+                ?: ($visit->visit_status !== VisitStatus::AwaitingDoctorReview && $latestEncounter?->isTerminal()
+                    ? $latestEncounter
+                    : $service->startEncounter($this->visit, auth()->user()));
+        } catch (ValidationException $exception) {
+            abort(409, collect($exception->errors())->flatten()->implode(' '));
+        }
         Gate::authorize('view', $this->encounter);
         $this->form->fillFromModel($this->encounter);
         $this->appointmentForm->patient_id = $this->visit->patient_id;

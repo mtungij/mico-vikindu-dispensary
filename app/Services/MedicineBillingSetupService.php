@@ -120,6 +120,9 @@ class MedicineBillingSetupService
             if ($service->facility_id !== $medicine->facility_id || $service->service_type !== ServiceType::Medicine) {
                 throw ValidationException::withMessages(['service_id' => 'Existing Billing Service is incompatible or belongs to another facility. It was not replaced automatically.']);
             }
+            if (Medicine::withTrashed()->where('service_id', $service->id)->whereKeyNot($medicine->id)->exists()) {
+                throw ValidationException::withMessages(['service_id' => 'This Billing Service is already linked to another active or historical medicine.']);
+            }
 
             if ($this->isSystemManaged($medicine, $service) && $service->is_active !== $medicine->is_active) {
                 $old = $service->is_active;
@@ -138,7 +141,7 @@ class MedicineBillingSetupService
             if ($service->trashed() || ! $service->is_active || $service->service_type !== ServiceType::Medicine) {
                 throw ValidationException::withMessages(['service_id' => 'A matching Billing Service exists but is inactive or incompatible. Review it manually.']);
             }
-            if (Medicine::query()->where('service_id', $service->id)->whereKeyNot($medicine->id)->exists()) {
+            if (Medicine::withTrashed()->where('service_id', $service->id)->whereKeyNot($medicine->id)->exists()) {
                 throw ValidationException::withMessages(['service_id' => 'The matching Billing Service is already linked to another medicine. Review it manually.']);
             }
         } else {

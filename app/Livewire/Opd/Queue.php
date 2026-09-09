@@ -30,7 +30,7 @@ class Queue extends Component
     public function startConsultation(Visit $visit, ClinicalEncounterService $service): mixed
     {
         Gate::authorize('opd.start-consultation');
-        abort_unless($visit->facility_id === currentFacility()?->id, 404);
+        abort_unless($visit->facility_id === currentFacility()?->id, 403);
         $service->startEncounter($visit, auth()->user());
         Notifier::success('Consultation imeanza.');
 

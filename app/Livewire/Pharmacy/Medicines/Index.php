@@ -44,6 +44,8 @@ class Index extends Component
 
     public string $deletingMedicineName = '';
 
+    public string $deletingMedicineUnit = '';
+
     public array $deletionAssessment = [];
 
     public function mount(): void
@@ -99,10 +101,13 @@ class Index extends Component
         $this->cancelDelete();
 
         try {
-            $medicine = Medicine::query()->forCurrentFacility()->findOrFail($medicineId);
+            $medicine = Medicine::query()->forCurrentFacility()->with('dispensingUnit')->findOrFail($medicineId);
             $this->deletionAssessment = $catalog->deletionAssessment($medicine, auth()->user());
             $this->deletingMedicineId = $medicine->id;
             $this->deletingMedicineName = trim($medicine->name.' '.($medicine->strength ?? ''));
+            $this->deletingMedicineUnit = $medicine->dispensingUnit?->symbol
+                ?? $medicine->dispensingUnit?->name
+                ?? 'unit';
             $this->showDeleteModal = true;
         } catch (AuthorizationException) {
             $this->addError('delete', 'Huna ruhusa ya kufuta dawa.');
@@ -119,6 +124,7 @@ class Index extends Component
         $this->showDeleteModal = false;
         $this->deletingMedicineId = null;
         $this->deletingMedicineName = '';
+        $this->deletingMedicineUnit = '';
         $this->deletionAssessment = [];
         $this->resetErrorBag('delete');
     }
@@ -131,17 +137,20 @@ class Index extends Component
             $this->cancelDelete();
             $this->resetPage();
             Notifier::success($result['outcome'] === 'deleted'
-                ? 'Dawa imeondolewa kikamilifu.'
+                ? 'Dawa imeondolewa.'
                 : 'Dawa imeondolewa kwenye matumizi mapya. Historia yake imehifadhiwa.');
         } catch (AuthorizationException) {
+            $this->cancelDelete();
             $this->addError('delete', 'Huna ruhusa ya kufuta dawa.');
             Notifier::error('Huna ruhusa ya kufuta dawa.');
         } catch (ValidationException $exception) {
             $message = collect($exception->errors())->flatten()->first() ?? 'Dawa haiwezi kufutwa.';
+            $this->cancelDelete();
             $this->addError('delete', $message);
             Notifier::warning($message);
         } catch (Throwable $exception) {
             report($exception);
+            $this->cancelDelete();
             $this->addError('delete', 'Dawa haiwezi kufutwa kwa sasa. Tafadhali jaribu tena.');
             Notifier::error('Dawa haiwezi kufutwa kwa sasa. Tafadhali jaribu tena.');
         }
@@ -164,8 +173,19 @@ class Index extends Component
             ->paginate(12);
         $readiness = app(MedicineBillingReadinessService::class);
         $medicines->getCollection()->each(fn (Medicine $medicine) => $medicine->setAttribute('billing_readiness', $readiness->inspectForPayer($medicine, currentFacility()->id, PayerType::Cash)));
+        $linkedServiceIds = Medicine::withTrashed()
+            ->forCurrentFacility()
+            ->whereNotNull('service_id')
+            ->when($this->form->id, fn ($query) => $query->whereKeyNot($this->form->id))
+            ->select('service_id');
+        $services = Service::query()
+            ->forCurrentFacility()
+            ->where('service_type', 'medicine')
+            ->whereNotIn('id', $linkedServiceIds)
+            ->orderBy('name')
+            ->get();
 
-        return view('livewire.pharmacy.medicines.index', ['medicines' => $medicines, 'categories' => MedicineCategory::query()->forCurrentFacility()->get(), 'generics' => GenericMedicine::query()->forCurrentFacility()->get(), 'forms' => DosageForm::query()->forCurrentFacility()->get(), 'units' => MedicineUnit::query()->forCurrentFacility()->get(), 'routes' => MedicineRoute::query()->forCurrentFacility()->get(), 'services' => Service::query()->forCurrentFacility()->where('service_type', 'medicine')->orderBy('name')->get()])->layout('components.layouts.app', ['title' => 'Medicines', 'description' => 'Medicine catalog, stock level na pricing link.']);
+        return view('livewire.pharmacy.medicines.index', ['medicines' => $medicines, 'categories' => MedicineCategory::query()->forCurrentFacility()->get(), 'generics' => GenericMedicine::query()->forCurrentFacility()->get(), 'forms' => DosageForm::query()->forCurrentFacility()->get(), 'units' => MedicineUnit::query()->forCurrentFacility()->get(), 'routes' => MedicineRoute::query()->forCurrentFacility()->get(), 'services' => $services])->layout('components.layouts.app', ['title' => 'Medicines', 'description' => 'Medicine catalog, stock level na pricing link.']);
     }
 
     private function applicableCashPrice($query, string $today): void

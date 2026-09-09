@@ -7,6 +7,7 @@ use App\Enums\ProcedureOrderStatus;
 use App\Enums\QueueStatus;
 use App\Enums\VisitStatus;
 use App\Models\ClinicalEncounter;
+use App\Models\Department;
 use App\Models\Invoice;
 use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryResult;
@@ -15,7 +16,9 @@ use App\Models\PatientQueue;
 use App\Models\Prescription;
 use App\Models\Visit;
 use App\Models\WorkflowSetting;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class VisitClosureService
 {
@@ -50,6 +53,9 @@ class VisitClosureService
             }
 
             [$status, $queue] = $this->legacyStatusAndQueue($visit, $blockers);
+            if ($status === VisitStatus::AwaitingDoctorReview) {
+                $queue = $this->ensureDoctorReviewQueue($visit, $actor);
+            }
             $updates = [
                 'visit_status' => $status,
                 'current_queue_id' => $queue?->id,
@@ -72,6 +78,7 @@ class VisitClosureService
             Visit::query()->lockForUpdate()->findOrFail($visit->id);
             PatientQueue::query()
                 ->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)
                 ->whereHas('department', fn ($query) => $query
                     ->where('facility_id', $visit->facility_id)
                     ->where('code', strtoupper($departmentCode)))
@@ -97,6 +104,7 @@ class VisitClosureService
             Visit::query()->lockForUpdate()->findOrFail($visit->id);
             PatientQueue::query()
                 ->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)
                 ->whereHas('department', fn ($query) => $query
                     ->where('facility_id', $visit->facility_id)
                     ->where('code', strtoupper($departmentCode)))
@@ -113,6 +121,7 @@ class VisitClosureService
             Visit::query()->lockForUpdate()->findOrFail($visit->id);
             PatientQueue::query()
                 ->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)
                 ->whereHas('department', fn ($query) => $query
                     ->where('facility_id', $visit->facility_id)
                     ->where('code', strtoupper($departmentCode)))
@@ -138,6 +147,7 @@ class VisitClosureService
             Visit::query()->lockForUpdate()->findOrFail($visit->id);
             PatientQueue::query()
                 ->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)
                 ->whereIn('department_id', $departmentIds)
                 ->whereIn('queue_status', ['waiting', 'called', 'serving'])
                 ->lockForUpdate()
@@ -155,10 +165,12 @@ class VisitClosureService
     {
         $hasDirectLaboratoryOrder = LaboratoryOrder::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->where('source', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
             ->exists();
         $hasClinicianLaboratoryOrder = LaboratoryOrder::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->where('source', '!=', LaboratoryOrder::SOURCE_RECEPTION_DIRECT)
             ->exists();
         if ($hasDirectLaboratoryOrder && ! $hasClinicianLaboratoryOrder) {
@@ -184,6 +196,7 @@ class VisitClosureService
 
         if (Invoice::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->where('balance_amount', '>', 0)
             ->whereNotIn('invoice_status', ['voided', 'cancelled'])
             ->exists()) {
@@ -192,6 +205,7 @@ class VisitClosureService
 
         if (Prescription::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereIn('status', [
                 PrescriptionStatus::Draft->value,
                 PrescriptionStatus::Prescribed->value,
@@ -203,6 +217,7 @@ class VisitClosureService
 
         $uncollectedLaboratoryWork = LaboratoryOrder::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereNotIn('status', ['completed', 'cancelled'])
             ->whereHas('items', fn ($query) => $query
                 ->whereNull('sample_id')
@@ -231,19 +246,23 @@ class VisitClosureService
 
         $hasActiveAdmission = ObservationAdmission::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereIn('status', ['awaiting_payment', 'awaiting_bed', 'admitted', 'under_observation', 'ready_for_discharge'])
             ->exists();
         $hasPendingAdmissionDecision = ClinicalEncounter::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereIn('outcome', ['admitted_bed_rest', 'observation'])
             ->exists()
-            && ObservationAdmission::query()->where('visit_id', $visit->id)->doesntExist();
+            && ObservationAdmission::query()->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)->doesntExist();
         if ($hasActiveAdmission || $hasPendingAdmissionDecision) {
             $blockers[] = 'admission';
         }
 
         $activeQueueCodes = PatientQueue::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereIn('queue_status', [
                 QueueStatus::Waiting->value,
                 QueueStatus::Called->value,
@@ -266,10 +285,6 @@ class VisitClosureService
         if ($activeQueueCodes->contains('BED')) {
             $blockers[] = 'admission';
         }
-        if ($activeQueueCodes->contains('OPD')
-            && $visit->visit_status === VisitStatus::AwaitingDoctorReview) {
-            $blockers[] = 'doctor_review';
-        }
 
         return array_values(array_unique($blockers));
     }
@@ -278,15 +293,11 @@ class VisitClosureService
     {
         $hasUnreleasedWork = LaboratoryOrder::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereNotIn('status', ['completed', 'cancelled'])
             ->exists();
-        $hasUnreviewedReleasedResults = LaboratoryResult::query()
-            ->whereHas('order', fn ($query) => $query->where('visit_id', $visit->id))
-            ->where('result_status', 'released')
-            ->whereNull('reviewed_at')
-            ->exists();
 
-        return $hasUnreleasedWork || $hasUnreviewedReleasedResults;
+        return $hasUnreleasedWork || $this->hasReleasedUnreviewedResult($visit);
     }
 
     /** @param array<int, string> $blockers */
@@ -310,6 +321,7 @@ class VisitClosureService
             }
             $queue = PatientQueue::query()
                 ->where('visit_id', $visit->id)
+                ->where('facility_id', $visit->facility_id)
                 ->whereIn('queue_status', ['waiting', 'called', 'serving'])
                 ->whereHas('department', fn ($query) => $query->whereIn('code', $codes))
                 ->latest()
@@ -321,19 +333,60 @@ class VisitClosureService
         return [VisitStatus::InProgress, null];
     }
 
-    private function hasReleasedUnreviewedResult(Visit $visit): bool
+    public function pendingReviewResults(Visit $visit): Builder
     {
         return LaboratoryResult::query()
-            ->whereHas('order', fn ($query) => $query->where('visit_id', $visit->id))
+            ->where('facility_id', $visit->facility_id)
+            ->whereHas('order', fn ($query) => $query
+                ->where('facility_id', $visit->facility_id)
+                ->where('patient_id', $visit->patient_id)
+                ->where('visit_id', $visit->id)
+                ->where('source', '!=', LaboratoryOrder::SOURCE_RECEPTION_DIRECT))
             ->where('result_status', 'released')
-            ->whereNull('reviewed_at')
-            ->exists();
+            ->whereNull('reviewed_at');
+    }
+
+    public function hasReleasedUnreviewedResult(Visit $visit): bool
+    {
+        return $this->requiresDoctorReview($visit) && $this->pendingReviewResults($visit)->exists();
+    }
+
+    public function doctorReviewParent(Visit $visit): ?ClinicalEncounter
+    {
+        return $visit->clinicalEncounters()
+            ->where('facility_id', $visit->facility_id)
+            ->where('patient_id', $visit->patient_id)
+            ->where('status', 'completed')
+            ->whereHas('department', fn ($query) => $query
+                ->where('facility_id', $visit->facility_id)->where('code', 'OPD'))
+            ->whereHas('laboratoryOrders.results', fn ($query) => $query
+                ->whereIn('id', $this->pendingReviewResults($visit)->select('laboratory_results.id')))
+            ->latest('completed_at')->latest('id')->first();
+    }
+
+    // Caller holds the visit lock, shared by release, opening and completion.
+    public function ensureDoctorReviewQueue(Visit $visit, $actor): PatientQueue
+    {
+        $parent = $this->doctorReviewParent($visit);
+        $department = Department::query()
+            ->where('facility_id', $visit->facility_id)->where('code', 'OPD')
+            ->where('is_active', true)->where('can_receive_patients', true)
+            ->where('queue_enabled', true)
+            ->when($parent, fn ($query) => $query->orderByRaw('id = ? desc', [$parent->department_id]))
+            ->orderBy('id')->first();
+        if (! $department) {
+            throw ValidationException::withMessages(['visit' => 'An active OPD queue destination is required for laboratory review.']);
+        }
+
+        return $this->workflow->createQueue($visit, $department, $actor,
+            VisitStatus::AwaitingDoctorReview, 'Laboratory results require doctor review', true);
     }
 
     private function admissionVisitStatus(Visit $visit): VisitStatus
     {
         if (ClinicalEncounter::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->where('outcome', 'observation')
             ->exists()) {
             return VisitStatus::UnderObservation;
@@ -341,6 +394,7 @@ class VisitClosureService
 
         return ObservationAdmission::query()
             ->where('visit_id', $visit->id)
+            ->where('facility_id', $visit->facility_id)
             ->whereIn('status', ['admitted', 'under_observation', 'ready_for_discharge'])
             ->exists()
                 ? VisitStatus::UnderObservation

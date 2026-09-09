@@ -66,6 +66,33 @@ class DentalPrescriptionWorkflowTest extends TestCase
         $this->assertDatabaseCount('prescriptions', 0);
     }
 
+    public function test_dental_new_medicine_selector_and_backend_reject_inactive_medicine(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $active = $this->medicine($admin, 'Active Dental Selector Medicine', 'DEN-ACTIVE', 100);
+        $inactive = $this->medicine($admin, 'Archived Dental Selector Medicine', 'DEN-ARCHIVED', 100);
+        $inactive->update(['is_active' => false]);
+
+        $component = Livewire::actingAs($admin)->test(DentalConsultation::class, ['visit' => $visit])
+            ->set('activeTab', 'medicines')
+            ->assertSee($active->name)
+            ->assertDontSee($inactive->name);
+
+        try {
+            app(ClinicalEncounterService::class)->addPrescription(
+                $component->get('dentalEncounter')->clinicalEncounter,
+                ['items' => [$this->itemData($inactive, 3)]],
+                $admin,
+            );
+            $this->fail('Inactive medicine was accepted through a tampered Dental prescription payload.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('medicine_id', $exception->errors());
+        }
+
+        $this->assertDatabaseCount('prescription_items', 0);
+    }
+
     public function test_dental_ui_adds_edits_and_removes_items_in_one_unbilled_draft_prescription(): void
     {
         $admin = $this->bootstrappedFacility();

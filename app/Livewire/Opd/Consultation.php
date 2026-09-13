@@ -19,13 +19,13 @@ use App\Models\Department;
 use App\Models\Diagnosis;
 use App\Models\LaboratoryTest;
 use App\Models\Medicine;
-use App\Models\PatientQueue;
 use App\Models\PrescriptionItem;
 use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
 use App\Services\MedicineBillingReadinessService;
+use App\Services\OpdConsultationAvailabilityService;
 use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
 use App\Services\VisitClosureService;
@@ -37,6 +37,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
+use Livewire\Attributes\Locked;
 use Livewire\Attributes\On;
 use Livewire\Component;
 
@@ -44,7 +45,14 @@ class Consultation extends Component
 {
     public Visit $visit;
 
-    public ClinicalEncounter $encounter;
+    #[Locked]
+    public ?ClinicalEncounter $encounter = null;
+
+    #[Locked]
+    public ?array $workflowBlocked = null;
+
+    #[Locked]
+    public ?array $workflowHistory = null;
 
     public ClinicalEncounterForm $form;
 
@@ -103,13 +111,28 @@ class Consultation extends Component
         Gate::authorize('opd.consult');
         abort_unless($visit->facility_id === currentFacility()?->id, 403);
         abort_unless(auth()->user()?->belongsToCurrentFacility(), 403);
+        $this->visit = $visit;
+        $latestEncounter = $visit->clinicalEncounters()->with('department')->latest('id')->first();
+        $policyEncounter = $visit->activeClinicalEncounter ?: $latestEncounter;
+        if ($policyEncounter) {
+            Gate::authorize('view', $policyEncounter);
+        }
         try {
+            $availability = app(OpdConsultationAvailabilityService::class)->resolve($visit, $latestEncounter);
+            if (! $availability['allowed']) {
+                abort_if($availability['reason_code'] === 'conflict', 409, $availability['message']);
+                if ($availability['show_history']) {
+                    $this->workflowHistory = $availability;
+                } else {
+                    $this->workflowBlocked = $availability;
+
+                    return;
+                }
+            }
             $closure = app(VisitClosureService::class);
-            if ($closure->hasReleasedUnreviewedResult($visit)) {
+            if ($availability['allowed'] && $closure->hasReleasedUnreviewedResult($visit)) {
                 $visit = $closure->evaluate($visit, auth()->user());
             }
-            $latestEncounter = $visit->clinicalEncounters()->with('department')->latest('id')->first();
-            abort_unless($this->visitCanOpenOpdConsultation($visit, $latestEncounter), 409, 'This visit is not ready for OPD consultation.');
 
             $this->visit = $visit->load([
                 'patient.primaryPayerProfile.insuranceProvider',
@@ -137,50 +160,15 @@ class Consultation extends Component
         $this->appointmentForm->department_id = $this->encounter->department_id;
     }
 
-    private function visitCanOpenOpdConsultation(Visit $visit, ?ClinicalEncounter $latestEncounter = null): bool
+    public function hydrate(): void
     {
-        $visit->loadMissing(['currentDepartment', 'activeClinicalEncounter']);
-
-        $visitIsTerminal = in_array($visit->visit_status, [VisitStatus::Completed, VisitStatus::Cancelled, VisitStatus::Referred, VisitStatus::Discharged], true);
-        if ($latestEncounter?->department?->code === 'OPD' && ($latestEncounter->isTerminal() || $visitIsTerminal)) {
-            return true;
+        Gate::authorize('opd.consult');
+        abort_unless($this->visit->facility_id === currentFacility()?->id && auth()->user()?->belongsToCurrentFacility(), 403);
+        if ($this->encounter) {
+            Gate::authorize('view', $this->encounter);
         }
-
-        if ($visit->currentDepartment?->code !== 'OPD') {
-            return false;
-        }
-
-        $openStatuses = [
-            VisitStatus::InProgress,
-            VisitStatus::InQueue,
-            VisitStatus::InConsultation,
-            VisitStatus::AwaitingDepartment,
-            VisitStatus::AwaitingDoctorReview,
-        ];
-        $laboratoryInterruptionStatuses = [
-            VisitStatus::AwaitingPayment,
-            VisitStatus::AwaitingLab,
-            VisitStatus::AwaitingSample,
-            VisitStatus::Processing,
-            VisitStatus::AwaitingVerification,
-            VisitStatus::ResultsReady,
-            VisitStatus::AwaitingResults,
-        ];
-        if (! in_array($visit->visit_status, $openStatuses, true)
-            && (! $visit->activeClinicalEncounter
-                || ! in_array($visit->visit_status, $laboratoryInterruptionStatuses, true))) {
-            return false;
-        }
-
-        if ($visit->activeClinicalEncounter?->department_id === $visit->current_department_id) {
-            return true;
-        }
-
-        return PatientQueue::query()
-            ->where('visit_id', $visit->id)
-            ->where('department_id', $visit->current_department_id)
-            ->whereIn('queue_status', ['waiting', 'called', 'serving'])
-            ->exists();
+        // The workflow card has navigation links only; reject forged clinical actions.
+        abort_if($this->workflowBlocked !== null || $this->encounter === null, 409);
     }
 
     public function autosave(ClinicalEncounterService $service): void
@@ -775,6 +763,13 @@ class Consultation extends Component
 
     public function render(): View
     {
+        if ($this->workflowBlocked !== null) {
+            return view('livewire.opd.workflow-blocked', [
+                'state' => $this->workflowBlocked,
+                'actions' => app(OpdConsultationAvailabilityService::class)->navigation($this->visit, $this->workflowBlocked['reason_code'], auth()->user()),
+            ])->layout('components.layouts.app', ['title' => $this->workflowBlocked['title'], 'description' => $this->visit->visit_number]);
+        }
+
         $this->visit->loadMissing([
             'patient.primaryPayerProfile.insuranceProvider',
             'patient.primaryPayerProfile.corporateAccount',

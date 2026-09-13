@@ -72,6 +72,16 @@ class VisitClosureService
         });
     }
 
+    /** Read-only projection using the same blockers and priority as closure. */
+    public function workflowState(Visit $visit): array
+    {
+        $blockers = $this->blockers($visit);
+        [$status, $queue, $reason] = $this->legacyStatusAndQueue($visit, $blockers);
+        [, , $afterPayment] = $this->legacyStatusAndQueue($visit, array_values(array_diff($blockers, ['payment'])));
+
+        return compact('blockers', 'status', 'queue', 'reason', 'afterPayment');
+    }
+
     public function completeDepartmentQueues(Visit $visit, string $departmentCode, $actor): void
     {
         DB::transaction(function () use ($visit, $departmentCode, $actor): void {
@@ -327,10 +337,10 @@ class VisitClosureService
                 ->latest()
                 ->first();
 
-            return [$status, $queue];
+            return [$status, $queue, $blocker];
         }
 
-        return [VisitStatus::InProgress, null];
+        return [VisitStatus::InProgress, null, null];
     }
 
     public function pendingReviewResults(Visit $visit): Builder

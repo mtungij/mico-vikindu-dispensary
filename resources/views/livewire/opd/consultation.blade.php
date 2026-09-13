@@ -1,4 +1,7 @@
 <div class="space-y-6">
+    @if($workflowHistory)
+        @include('livewire.opd.workflow-blocked', ['state' => $workflowHistory, 'actions' => app(\App\Services\OpdConsultationAvailabilityService::class)->navigation($visit, $workflowHistory['reason_code'], auth()->user())])
+    @endif
     @php
         $triage = $visit->latestCompletedTriageAssessment;
         $invoice = $visit->invoice;

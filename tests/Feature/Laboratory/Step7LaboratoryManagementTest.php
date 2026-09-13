@@ -561,8 +561,10 @@ class Step7LaboratoryManagementTest extends TestCase
             $order->visit->update(['visit_status' => 'awaiting_doctor_review', 'current_department_id' => $pharmacy->id, 'current_queue_id' => null]);
         }
         $historicalQueues = $order->visit->queues()->where('queue_status', 'completed')->get()->map->getAttributes()->all();
-        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk();
-        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk();
+        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk()
+            ->assertDontSee('id="workflow-title"', false);
+        $this->actingAs($admin)->get(route('opd.consultation', $order->visit_id))->assertOk()
+            ->assertDontSee('id="workflow-title"', false);
         $review = app(ClinicalEncounterService::class)->startEncounter($order->visit->refresh(), $admin);
         $this->assertSame($opd->id, $review->department_id);
         $this->assertSame($original->facility_id, $review->facility_id);

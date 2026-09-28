@@ -28,6 +28,7 @@ use App\Models\StaffProfile;
 use App\Models\User;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
+use App\Services\LaboratoryOrderItemDecisionService;
 use App\Services\LaboratorySampleService;
 use App\Services\PaymentConfirmationService;
 use Database\Seeders\BillingSettingsSeeder;
@@ -38,6 +39,7 @@ use Database\Seeders\PermissionSeeder;
 use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\RoleSeeder;
 use Database\Seeders\SpecimenTypeSeeder;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
@@ -322,6 +324,76 @@ class LaboratoryPaymentWorkflowTest extends TestCase
         } catch (HttpException $exception) {
             $this->assertSame(403, $exception->getStatusCode());
         }
+    }
+
+    public function test_insurance_lab_item_decision_preserves_payer_history(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $technician = $this->staffUser('laboratory-technician', $facility);
+        $provider = InsuranceProvider::query()->create([
+            'facility_id' => $facility->id,
+            'name' => 'Test insurer',
+            'code' => 'INS-LAB-DECIDE',
+            'provider_type' => 'private_insurance',
+            'claim_submission_method' => 'manual_report',
+            'requires_pre_authorization' => false,
+            'is_active' => true,
+        ]);
+        $encounter = $this->encounter($doctor, 'insurance', [
+            'insurance_provider_id' => $provider->id,
+            'coverage_status' => 'active',
+        ]);
+        $service = $this->laboratoryService('Covered test', 'COVERED-DECIDE', 'insurance', 9000, $admin, $provider->id);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$service->id]], $doctor);
+        $item = $order->items()->firstOrFail();
+        $charge = $item->invoiceItem;
+        $this->assertGreaterThan(0, (float) $charge->insurance_amount);
+        $profileId = $charge->invoice->patient_payer_profile_id;
+        $this->actingAs($technician);
+        app(LaboratoryOrderItemDecisionService::class)->decide($item, 'not_performed', 'sample_unavailable', null, $technician);
+        $this->assertSame('not_performed', $item->refresh()->status);
+        $this->assertSame('cancelled', $charge->refresh()->status);
+        $this->assertSame($profileId, $charge->invoice->refresh()->patient_payer_profile_id);
+        $this->assertGreaterThan(0, (float) $charge->insurance_amount);
+        $this->assertSame(0, $charge->invoice->payments()->count());
+    }
+
+    public function test_unprivileged_user_cannot_decide_a_lab_item(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $receptionist = $this->staffUser('receptionist', $facility);
+        $encounter = $this->encounter($doctor, 'cash');
+        $service = $this->laboratoryService('Protected test', 'PROTECTED-DECIDE', 'cash', 3000, $admin);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$service->id]], $doctor);
+        $this->expectException(AuthorizationException::class);
+        app(LaboratoryOrderItemDecisionService::class)->decide(
+            $order->items()->firstOrFail(), 'cancelled', 'patient_declined', null, $receptionist,
+        );
+    }
+
+    public function test_cross_facility_technician_cannot_decide_a_lab_item(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $encounter = $this->encounter($doctor, 'cash');
+        $service = $this->laboratoryService('Isolated test', 'ISOLATED-DECIDE', 'cash', 3000, $admin);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$service->id]], $doctor);
+        $otherFacility = Facility::query()->create([
+            'name' => 'Isolated Facility', 'code' => 'ISOLATED', 'facility_type' => FacilityType::Dispensary,
+            'ownership_type' => OwnershipType::Private, 'phone_primary' => '+255700000998', 'region' => 'Dar es Salaam',
+            'district' => 'Ilala', 'ward' => 'Upanga', 'physical_address' => 'Upanga', 'setup_completed_at' => now(),
+            'created_by' => $admin->id, 'updated_by' => $admin->id,
+        ]);
+        $foreignTechnician = $this->staffUser('laboratory-technician', $otherFacility);
+        $this->expectException(AuthorizationException::class);
+        app(LaboratoryOrderItemDecisionService::class)->decide(
+            $order->items()->firstOrFail(), 'cancelled', 'patient_declined', null, $foreignTechnician,
+        );
     }
 
     /** @return array{User, Facility} */

@@ -35,7 +35,34 @@
                 @foreach($order->items as $item)
                     <div class="rounded-md border border-slate-200 p-3 dark:border-slate-700">
                         <strong>{{ $item->test_name_snapshot }}</strong>
-                        <p class="text-sm text-slate-500">{{ $item->laboratoryTest?->name ?? 'Not configured' }} · {{ $item->result_status ?? $item->status }}</p>
+                        <p class="text-sm text-slate-500">Status: {{ $item->status }} · Payment: {{ $item->invoiceItem?->paid_amount > 0 ? 'Paid/partial' : ($item->invoiceItem?->status ?? 'No charge') }} · Result: {{ $item->result_status ?? 'Pending' }}</p>
+                        @if($item->terminal_decided_at)
+                            <p class="mt-1 text-xs text-slate-500">{{ \App\Services\LaboratoryOrderItemDecisionService::REASONS[$item->terminal_reason_code] ?? $item->terminal_reason_code }}{{ $item->terminal_reason ? ': '.$item->terminal_reason : '' }} · {{ $item->terminalDecider?->name }} · {{ $item->terminal_decided_at->format('d/m/Y H:i') }}</p>
+                        @elseif(! in_array($item->status, ['completed', 'cancelled', 'not_performed', 'entered_in_error'], true) && ! in_array($item->result_status, ['pending_verification', 'verified', 'released'], true) && $item->results->isEmpty())
+                            @can('decideItem', $order)
+                                <div class="mt-2 flex gap-2">
+                                    <button type="button" wire:click="beginDecision({{ $item->id }}, 'cancelled')" class="rounded border border-red-300 px-2 py-1 text-xs text-red-700">Cancel Test</button>
+                                    <button type="button" wire:click="beginDecision({{ $item->id }}, 'not_performed')" class="rounded border border-amber-300 px-2 py-1 text-xs text-amber-700">Mark Not Performed</button>
+                                </div>
+                            @endcan
+                        @endif
+                        @if($decidingItemId === $item->id)
+                            <form wire:submit="decide" class="mt-3 space-y-2 rounded bg-slate-50 p-3 dark:bg-slate-800">
+                                <p class="text-sm font-semibold">{{ $decision === 'cancelled' ? 'Cancel Test' : 'Mark Not Performed' }}</p>
+                                <select wire:model="reasonCode" class="w-full rounded border-slate-300 text-sm" required>
+                                    <option value="">Select reason</option>
+                                    @foreach(\App\Services\LaboratoryOrderItemDecisionService::REASONS as $code => $label)
+                                        <option value="{{ $code }}">{{ $label }}</option>
+                                    @endforeach
+                                </select>
+                                @error('reasonCode') <p class="text-xs text-red-600">{{ $message }}</p> @enderror
+                                <textarea wire:model="reasonDetail" class="w-full rounded border-slate-300 text-sm" placeholder="Additional detail where required"></textarea>
+                                @error('reasonDetail') <p class="text-xs text-red-600">{{ $message }}</p> @enderror
+                                @error('reason') <p class="text-xs text-red-600">{{ $message }}</p> @enderror
+                                @error('item') <p class="text-xs text-red-600">{{ $message }}</p> @enderror
+                                <div class="flex gap-2"><button type="submit" class="rounded bg-primary px-3 py-1 text-sm text-white">Confirm decision</button><button type="button" wire:click="$set('decidingItemId', null)" class="text-sm">Back</button></div>
+                            </form>
+                        @endif
                     </div>
                 @endforeach
             </div>

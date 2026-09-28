@@ -80,7 +80,7 @@ class LaboratoryReportService
         );
 
         $items = $order->items()
-            ->whereNotIn('status', ['cancelled', 'entered_in_error'])
+            ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])
             ->with(['results' => fn ($query) => $query->latest('result_version')])
             ->get();
         if ($items->isEmpty()

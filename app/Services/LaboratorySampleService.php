@@ -75,8 +75,8 @@ class LaboratorySampleService
             $errors = [];
             foreach ($items as $item) {
                 $name = $item->test_name_snapshot ?: "Kipimo #{$item->id}";
-                if ($item->status === 'cancelled') {
-                    $errors["order_item_ids.{$item->id}"] = "{$name}: kipimo kimefutwa.";
+                if (in_array($item->status, ['cancelled', 'not_performed', 'entered_in_error'], true)) {
+                    $errors["order_item_ids.{$item->id}"] = "{$name}: kipimo hakipo tena kwenye kazi za maabara.";
                 } elseif ($item->sample_id !== null) {
                     $errors["order_item_ids.{$item->id}"] = "{$name}: sampuli tayari imekusanywa.";
                 } elseif (! in_array($item->status, $eligibleItemStatuses, true)) {
@@ -221,7 +221,7 @@ class LaboratorySampleService
             ->whereNotIn('status', ['completed', 'cancelled'])
             ->whereHas('items', fn ($query) => $query
                 ->whereNull('sample_id')
-                ->whereNotIn('status', ['completed', 'cancelled']))
+                ->whereNotIn('status', ['completed', 'cancelled', 'not_performed', 'entered_in_error']))
             ->doesntExist();
     }
 

@@ -150,7 +150,7 @@ class Dashboard extends Component
 
     private function loadedOrderIsReportEligible(LaboratoryOrder $order): bool
     {
-        $items = $order->items->whereNotIn('status', ['cancelled', 'entered_in_error']);
+        $items = $order->items->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error']);
 
         return $items->isNotEmpty() && ! $items->contains(function ($item): bool {
             $result = $item->results->sortByDesc('result_version')->first();

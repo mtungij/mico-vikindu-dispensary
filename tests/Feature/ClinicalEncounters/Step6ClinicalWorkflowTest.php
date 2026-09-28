@@ -119,10 +119,22 @@ class Step6ClinicalWorkflowTest extends TestCase
             ->call('addPrescription')
             ->assertHasNoErrors();
         $this->assertDatabaseCount('invoice_items', 0);
+        $clinical = app(ClinicalEncounterService::class);
+        $clinical->partialCompleteEncounter($encounter->refresh(), $doctor, [
+            'clinical_summary' => 'Initial treatment ordered.',
+        ]);
+        $this->assertDatabaseCount('invoice_items', 1);
+        $this->assertSame(1, $encounter->prescriptions()->count());
+        $this->assertNull($encounter->refresh()->completed_at);
+        $queueCount = PatientQueue::query()->where('visit_id', $visit->id)->count();
+        $clinical->partialCompleteEncounter($encounter->refresh(), $doctor);
+        $this->assertDatabaseCount('invoice_items', 1);
+        $this->assertSame($queueCount, PatientQueue::query()->where('visit_id', $visit->id)->count());
         $this->prepareEncounterForCompletion($encounter, $doctor);
 
-        app(ClinicalEncounterService::class)->completeEncounter($encounter->refresh(), $doctor);
+        $clinical->completeEncounter($encounter->refresh(), $doctor);
 
+        $this->assertDatabaseCount('invoice_items', 1);
         $item = $encounter->prescriptions()->sole()->items()->sole();
         $this->assertNotNull($item->invoice_item_id);
         $this->assertSame($medicine->service_id, $item->invoiceItem->service_id);
@@ -3329,6 +3341,88 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->actingAs($admin)->get(route('reports.opd.export'))->assertOk();
         $this->actingAs($admin)->get(route('reports.diagnoses.export'))->assertOk();
         $this->actingAs($admin)->get(route('reports.referrals.export'))->assertOk();
+    }
+
+    public function test_partial_consultation_stays_editable_and_can_be_completed_later(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $service = app(ClinicalEncounterService::class);
+        $first = $service->partialCompleteEncounter($encounter, $doctor, [
+            'clinical_summary' => 'Severe pain assessed; initial treatment planned.',
+        ]);
+        $this->assertSame('in_progress', $first->status->value);
+        $this->assertNull($first->completed_at);
+        $this->assertNotNull($first->partial_completed_at);
+        $this->assertFalse($first->isReadOnly());
+        $this->assertNotSame('completed', $visit->refresh()->visit_status->value);
+        $service->partialCompleteEncounter($first, $doctor, []);
+        $this->assertSame(1, ClinicalEncounter::query()->where('visit_id', $visit->id)->count());
+        $service->saveDraft($first->refresh(), ['treatment_plan' => 'Continue treatment.'], $doctor);
+        $completed = $service->completeEncounter($first->refresh(), $doctor, ['outcome' => 'discharged_home']);
+        $this->assertSame('completed', $completed->status->value);
+        $this->assertNotNull($completed->completed_at);
+    }
+
+    public function test_cross_facility_clinician_cannot_partial_complete_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        $otherFacility = Facility::factory()->create(['created_by' => $admin->id, 'updated_by' => $admin->id]);
+        $foreignDoctor = $this->staffUser('doctor', $otherFacility);
+
+        $this->expectException(AuthorizationException::class);
+        app(ClinicalEncounterService::class)->partialCompleteEncounter($encounter, $foreignDoctor, [
+            'clinical_summary' => 'Foreign facility attempt',
+        ]);
+    }
+
+    public function test_partial_consultation_keeps_initial_procedure_and_its_charge_actionable(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+        Department::query()->create([
+            'facility_id' => currentFacility()->id, 'name' => 'Procedures', 'code' => 'PRC',
+            'department_type' => 'clinical', 'queue_enabled' => true, 'can_receive_patients' => true,
+            'is_active' => true, 'created_by' => $admin->id,
+        ]);
+        $procedure = $this->service('Initial pain procedure', 'INITIAL-PAIN', 'procedure', $admin);
+        $order = app(ProcedureOrderService::class)->createOrder($encounter, [
+            'service_id' => $procedure->id,
+        ], $doctor);
+        $chargeId = $order->invoice_item_id;
+        $clinical = app(ClinicalEncounterService::class);
+        $clinical->partialCompleteEncounter($encounter, $doctor, [
+            'assessment_notes' => 'Severe pain; initial treatment required.',
+        ]);
+        $this->assertNull($encounter->refresh()->completed_at);
+        $this->assertNotSame('cancelled', $order->refresh()->status->value);
+        $this->assertDatabaseHas('invoice_items', ['id' => $chargeId]);
+        $queueCount = PatientQueue::query()->where('visit_id', $visit->id)->count();
+        $clinical->partialCompleteEncounter($encounter->refresh(), $doctor);
+        $this->assertSame($queueCount, PatientQueue::query()->where('visit_id', $visit->id)->count());
+        $this->assertSame(1, InvoiceItem::query()->where('reference_type', ClinicalProcedureOrder::class)
+            ->where('reference_id', $order->id)->count());
+    }
+
+    public function test_cashier_cannot_partial_complete_consultation(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $doctor = $this->staffUser('doctor');
+        $cashier = $this->staffUser('cashier');
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $encounter = app(ClinicalEncounterService::class)->startEncounter($visit, $doctor);
+
+        $this->expectException(AuthorizationException::class);
+        app(ClinicalEncounterService::class)->partialCompleteEncounter($encounter, $cashier, [
+            'clinical_summary' => 'Unauthorized attempt',
+        ]);
     }
 
     private function bootstrappedFacility(): User

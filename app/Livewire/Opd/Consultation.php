@@ -652,6 +652,22 @@ class Consultation extends Component
         }
     }
 
+    public function partialConsultation(ClinicalEncounterService $service): void
+    {
+        $this->resetErrorBag();
+        try {
+            Gate::authorize('complete', $this->encounter);
+            $this->form->validate();
+            $this->encounter = $service->partialCompleteEncounter($this->encounter, auth()->user(), $this->form->normalize());
+            $this->visit = $this->visit->refresh();
+            Notifier::success('Initial treatment and orders sent. Consultation remains open.');
+        } catch (ValidationException $exception) {
+            $this->showValidationFailure($exception);
+        } catch (AuthorizationException) {
+            $this->showAuthorizationFailure('You are not authorized to pause this consultation.');
+        }
+    }
+
     public function completeConsultation(ClinicalEncounterService $service): mixed
     {
         $this->resetErrorBag();

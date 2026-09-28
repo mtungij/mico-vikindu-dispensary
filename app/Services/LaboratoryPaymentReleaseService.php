@@ -32,6 +32,7 @@ class LaboratoryPaymentReleaseService
                 ->where('facility_id', $invoice->facility_id)
                 ->whereHas('items.invoiceItem', fn ($query) => $query->where('invoice_id', $invoice->id))
                 ->where('payment_status', ClinicalPaymentStatus::Pending->value)
+                ->whereNotIn('status', [ClinicalOrderStatus::Completed->value, ClinicalOrderStatus::Cancelled->value])
                 ->lockForUpdate()
                 ->get();
 
@@ -41,7 +42,7 @@ class LaboratoryPaymentReleaseService
                     'status' => ClinicalOrderStatus::Ordered,
                     'updated_by' => $actor->id,
                 ]);
-                $order->items()->update(['status' => 'ready_for_collection']);
+                $order->items()->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error', 'completed'])->update(['status' => 'ready_for_collection']);
                 $laboratory = Department::query()
                     ->where('facility_id', $order->facility_id)
                     ->where('code', 'LAB')

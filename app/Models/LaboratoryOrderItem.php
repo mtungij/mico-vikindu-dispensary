@@ -8,14 +8,14 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
-#[Fillable(['laboratory_order_id', 'service_id', 'laboratory_test_id', 'specimen_type_id', 'sample_id', 'test_name_snapshot', 'test_code_snapshot', 'unit_price_snapshot', 'payer_amount', 'insurance_amount', 'patient_amount', 'priority', 'status', 'result_status', 'result_entered_at', 'result_verified_at', 'result_released_at', 'specimen_type', 'notes', 'invoice_item_id', 'created_by'])]
+#[Fillable(['laboratory_order_id', 'service_id', 'laboratory_test_id', 'specimen_type_id', 'sample_id', 'test_name_snapshot', 'test_code_snapshot', 'unit_price_snapshot', 'payer_amount', 'insurance_amount', 'patient_amount', 'priority', 'status', 'result_status', 'result_entered_at', 'result_verified_at', 'result_released_at', 'specimen_type', 'notes', 'invoice_item_id', 'created_by', 'terminal_reason_code', 'terminal_reason', 'terminal_decided_at', 'terminal_decided_by'])]
 class LaboratoryOrderItem extends Model
 {
     use HasFactory, SoftDeletes;
 
     protected function casts(): array
     {
-        return ['result_entered_at' => 'datetime', 'result_verified_at' => 'datetime', 'result_released_at' => 'datetime'];
+        return ['result_entered_at' => 'datetime', 'result_verified_at' => 'datetime', 'result_released_at' => 'datetime', 'terminal_decided_at' => 'datetime'];
     }
 
     public function order(): BelongsTo
@@ -41,6 +41,11 @@ class LaboratoryOrderItem extends Model
     public function sample(): BelongsTo
     {
         return $this->belongsTo(LaboratorySample::class, 'sample_id');
+    }
+
+    public function terminalDecider(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'terminal_decided_by');
     }
 
     public function invoiceItem(): BelongsTo

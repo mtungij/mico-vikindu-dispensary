@@ -104,7 +104,7 @@ class LaboratoryResultService
         if (! $item->laboratory_test_id) {
             throw ValidationException::withMessages(['laboratory_test_id' => 'Order item haina configured laboratory test.']);
         }
-        if ($item->status === 'cancelled') {
+        if (in_array($item->status, ['cancelled', 'not_performed', 'entered_in_error'], true)) {
             throw ValidationException::withMessages(['item' => 'Kipimo hiki kimefutwa.']);
         }
         if (! $item->sample || $item->sample->sample_status !== LaboratorySampleStatus::Accepted) {

@@ -489,6 +489,17 @@
                         <span wire:loading.remove wire:target="saveDraft">Save Draft</span>
                         <span wire:loading wire:target="saveDraft">Saving Draft...</span>
                     </x-secondary-button>
+                    <div class="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                        <button type="button" wire:click="partialConsultation" wire:loading.attr="disabled" wire:target="partialConsultation" class="rounded-md bg-amber-700 px-4 py-2 font-semibold text-white disabled:opacity-60">Partial Consultation</button>
+                        <p class="mt-1">Tuma huduma za awali kama Lab, dawa, procedure au treatment bila kufunga consultation.</p>
+                    </div>
+                    @if($encounter->partial_completed_at)
+                        <p class="text-sm text-amber-800">Initial treatment and orders have been sent. Consultation remains open.</p>
+                    @endif
+                    @if(app(\App\Services\VisitClosureService::class)->hasReleasedUnreviewedResult($visit))
+                        <p class="text-sm font-semibold text-emerald-700">Laboratory results ready for review.</p>
+                    @endif
+                    <p class="text-sm text-slate-500">Kamilisha consultation baada ya diagnosis na mpango wa mwisho wa matibabu.</p>
                     <x-primary-button type="button" wire:click="completeConsultation" wire:loading.attr="disabled" wire:target="completeConsultation" :disabled="$completionMissing !== []">
                         <span wire:loading.remove wire:target="completeConsultation">Complete Consultation</span>
                         <span wire:loading wire:target="completeConsultation">Completing...</span>

@@ -51,7 +51,7 @@ class VerifyResult extends Component
     public function release(LaboratoryResultReleaseService $service): void
     {
         $verifiedResults = $this->laboratoryResult->order->items()
-            ->whereNotIn('status', ['cancelled', 'entered_in_error'])
+            ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])
             ->with(['results' => fn ($query) => $query->latest('result_version')])
             ->get()
             ->map(fn ($item) => $item->results->first())

@@ -37,14 +37,20 @@ class VisitClosureService
                 return $visit;
             }
 
-            if ($visit->clinicalEncounters()
+            $activeEncounter = $visit->clinicalEncounters()
                 ->whereIn('status', ['waiting', 'in_progress', 'signed_off', 'paused'])
-                ->exists()) {
+                ->latest('id')->first();
+            if ($activeEncounter && ! $activeEncounter->partial_completed_at) {
                 return $visit;
             }
 
             $blockers = $this->blockers($visit);
             if ($blockers === []) {
+                if ($activeEncounter) {
+                    $visit->update(['visit_status' => VisitStatus::InConsultation, 'completed_at' => null, 'updated_by' => $actor->id]);
+
+                    return $visit->refresh();
+                }
                 if ($visit->visit_status === VisitStatus::Completed) {
                     return $visit;
                 }
@@ -234,7 +240,7 @@ class VisitClosureService
                 ->where(fn ($query) => $query
                     ->whereNull('result_status')
                     ->orWhereNotIn('result_status', ['verified', 'released', 'cancelled', 'entered_in_error']))
-                ->whereNotIn('status', ['completed', 'cancelled']))
+                ->whereNotIn('status', ['completed', 'cancelled', 'not_performed', 'entered_in_error']))
             ->exists();
         if ($uncollectedLaboratoryWork) {
             $blockers[] = 'laboratory';

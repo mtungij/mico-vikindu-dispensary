@@ -26,6 +26,8 @@ use App\Models\LaboratoryTest;
 use App\Models\LaboratoryTestCategory;
 use App\Models\Patient;
 use App\Models\PatientQueue;
+use App\Models\PaymentMethod;
+use App\Models\PaymentRefund;
 use App\Models\Permission;
 use App\Models\Service;
 use App\Models\ServiceCategory;
@@ -38,6 +40,7 @@ use App\Models\Visit;
 use App\Models\WorkflowSetting;
 use App\Services\ClinicalEncounterService;
 use App\Services\DiagnosisService;
+use App\Services\LaboratoryOrderItemDecisionService;
 use App\Services\LaboratoryOrderService;
 use App\Services\LaboratoryReportService;
 use App\Services\LaboratoryResultReleaseService;
@@ -45,6 +48,7 @@ use App\Services\LaboratoryResultService;
 use App\Services\LaboratoryResultVerificationService;
 use App\Services\LaboratorySampleService;
 use App\Services\LaboratoryTestService;
+use App\Services\PaymentConfirmationService;
 use App\Services\VisitClosureService;
 use App\Services\WorkflowService;
 use Database\Seeders\DepartmentSeeder;
@@ -55,6 +59,7 @@ use Database\Seeders\RolePermissionSeeder;
 use Database\Seeders\RoleSeeder;
 use Database\Seeders\SpecimenTypeSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -1076,6 +1081,141 @@ class Step7LaboratoryManagementTest extends TestCase
         $this->actingAs($viewer)
             ->get(route('clinical.laboratory-results'))
             ->assertOk();
+    }
+
+    public function test_unperformed_lab_item_reconciles_only_its_charge_and_mixed_order_releases(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $first = $this->configuredTest($admin);
+        $second = $this->additionalConfiguredTest($admin, $first, 'Urinalysis', 'URI');
+        $encounter = $this->encounter($admin);
+        $order = app(LaboratoryOrderService::class)->createOrder($encounter, [
+            'service_ids' => [$first->service_id, $second->service_id],
+        ], $admin);
+        $firstItem = $order->items()->where('laboratory_test_id', $first->id)->firstOrFail();
+        $secondItem = $order->items()->where('laboratory_test_id', $second->id)->firstOrFail();
+        $charge = $secondItem->invoiceItem;
+        $originalBalance = (float) $charge->invoice->balance_amount;
+        $this->assertGreaterThan(0, $originalBalance);
+
+        $decisions = app(LaboratoryOrderItemDecisionService::class);
+        try {
+            $decisions->decide($secondItem, 'not_performed', 'other', null, $admin);
+            $this->fail('A free-text reason must be required.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('reason', $exception->errors());
+        }
+        $decisions->decide($secondItem, 'not_performed', 'sample_unavailable', null, $admin);
+        $decisions->decide($secondItem->refresh(), 'not_performed', 'sample_unavailable', null, $admin);
+        $this->assertSame('not_performed', $secondItem->refresh()->status);
+        $this->assertSame('cancelled', $charge->refresh()->status);
+        $this->assertLessThan($originalBalance, (float) $charge->invoice->refresh()->balance_amount);
+        $this->assertSame(0, $charge->invoice->payments()->count());
+        $this->assertSame(0, $secondItem->results()->count());
+        $this->assertNotSame('completed', $order->refresh()->status->value);
+        $this->assertFalse(app(LaboratoryReportService::class)->isEligible($order));
+
+        $order->update(['status' => 'ordered', 'payment_status' => 'paid']);
+        $firstItem->update(['status' => 'ready_for_collection']);
+        $order->visit->invoice()->update(['balance_amount' => 0, 'payment_status' => 'paid', 'invoice_status' => 'paid']);
+        $encounter->update(['status' => 'completed', 'completed_at' => now(), 'completed_by' => $admin->id]);
+        $this->createLaboratoryQueue($order, $admin);
+        app(LaboratorySampleService::class)->collectSample($order, [
+            'order_item_ids' => [$firstItem->id],
+        ], $admin, true);
+        $result = $this->submitResult($firstItem->refresh(), $first, 13.2, $admin);
+        $result = app(LaboratoryResultVerificationService::class)->verify($result, $admin);
+        app(LaboratoryResultReleaseService::class)->release($result, $admin);
+        $this->assertSame('completed', $order->refresh()->status->value);
+        $this->assertSame(0, $secondItem->results()->count());
+        $this->assertTrue(app(LaboratoryReportService::class)->isEligible($order));
+        try {
+            $decisions->decide($firstItem->refresh(), 'cancelled', 'patient_declined', null, $admin);
+            $this->fail('A released test must not be cancelled.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('item', $exception->errors());
+        }
+    }
+
+    public function test_paid_lab_item_decision_preserves_payment_and_requests_one_refund(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $test = $this->configuredTest($admin);
+        $order = app(LaboratoryOrderService::class)->createOrder($this->encounter($admin), [
+            'service_ids' => [$test->service_id],
+        ], $admin);
+        $item = $order->items()->firstOrFail();
+        $invoice = $order->visit->invoice->refresh();
+        $amount = (float) $invoice->balance_amount;
+        $this->assertGreaterThan(0, $amount);
+        $method = PaymentMethod::query()->create([
+            'facility_id' => currentFacility()->id, 'name' => 'Lab cash', 'code' => 'CASH-LAB',
+            'type' => 'cash', 'is_cash' => true, 'is_active' => true,
+        ]);
+        app(PaymentConfirmationService::class)->confirmPayment(
+            $invoice, $method, $amount, $admin, ['idempotency_key' => (string) Str::uuid()],
+        );
+        $decisions = app(LaboratoryOrderItemDecisionService::class);
+        $decisions->decide($item, 'cancelled', 'patient_declined', null, $admin);
+        $decisions->decide($item->refresh(), 'cancelled', 'patient_declined', null, $admin);
+        $this->assertSame('cancelled', $item->refresh()->status);
+        $this->assertSame('cancelled', $item->invoiceItem->refresh()->status);
+        $this->assertSame(1, $invoice->payments()->count());
+        $refund = PaymentRefund::query()->where('invoice_id', $invoice->id)->sole();
+        $this->assertSame('pending', $refund->status);
+        $this->assertSame($amount, (float) $refund->amount);
+        $this->assertSame(1, PaymentRefund::query()->where('invoice_id', $invoice->id)->count());
+    }
+
+    public function test_partial_consultation_mixed_lab_items_resume_same_encounter_and_review_released_result(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $first = $this->configuredTest($admin);
+        $second = $this->additionalConfiguredTest($admin, $first, 'Urinalysis Review', 'URI-REV');
+        $encounter = $this->encounter($admin);
+        WorkflowSetting::query()->updateOrCreate(
+            ['facility_id' => currentFacility()->id, 'key' => 'require_doctor_review_after_laboratory'],
+            ['value' => true, 'created_by' => $admin->id],
+        );
+        $order = app(LaboratoryOrderService::class)->createOrder($encounter, [
+            'service_ids' => [$first->service_id, $second->service_id],
+        ], $admin);
+        $clinical = app(ClinicalEncounterService::class);
+        $clinical->partialCompleteEncounter($encounter, $admin, [
+            'clinical_summary' => 'Initial assessment with pending laboratory results.',
+        ]);
+        $this->assertNull($encounter->refresh()->completed_at);
+        $invoice = $order->visit->invoice->refresh();
+        $method = PaymentMethod::query()->create([
+            'facility_id' => currentFacility()->id, 'name' => 'Review cash', 'code' => 'CASH-REVIEW',
+            'type' => 'cash', 'is_cash' => true, 'is_active' => true,
+        ]);
+        app(PaymentConfirmationService::class)->confirmPayment(
+            $invoice, $method, (float) $invoice->balance_amount, $admin,
+            ['idempotency_key' => (string) Str::uuid()],
+        );
+        $firstItem = $order->items()->where('laboratory_test_id', $first->id)->firstOrFail();
+        $secondItem = $order->items()->where('laboratory_test_id', $second->id)->firstOrFail();
+        app(LaboratoryOrderItemDecisionService::class)->decide(
+            $secondItem, 'not_performed', 'sample_unavailable', null, $admin,
+        );
+        app(LaboratorySampleService::class)->collectSample($order->refresh(), [
+            'order_item_ids' => [$firstItem->id],
+        ], $admin, true);
+        $result = $this->submitResult($firstItem->refresh(), $first, 13.4, $admin);
+        $result = app(LaboratoryResultVerificationService::class)->verify($result, $admin);
+        $result = app(LaboratoryResultReleaseService::class)->release($result, $admin);
+        $this->assertSame('completed', $order->refresh()->status->value);
+        $this->assertNull($result->refresh()->reviewed_at);
+        $this->assertSame(0, $secondItem->results()->count());
+        $this->assertSame(1, ClinicalEncounter::query()->where('visit_id', $encounter->visit_id)->count());
+        $completed = $clinical->completeEncounter($encounter->refresh(), $admin, [
+            'outcome' => 'discharged_home',
+            'treatment_plan' => 'Reviewed released result and completed treatment.',
+        ]);
+        $this->assertSame('completed', $completed->status->value);
+        $this->assertNotNull($result->refresh()->reviewed_at);
+        $this->assertSame(1, ClinicalEncounter::query()->where('visit_id', $encounter->visit_id)->count());
     }
 
     private function bootstrappedFacility(): User

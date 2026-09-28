@@ -11,14 +11,17 @@ class LaboratoryOrderStatusService
     public function recalculate(LaboratoryOrder $order, $actor = null): LaboratoryOrder
     {
         $order->load('items');
-        $items = $order->items->where('status', '!=', 'cancelled');
+        $items = $order->items;
         if ($items->isEmpty()) {
             return $order;
         }
 
-        $resultStatuses = $items->pluck('result_status')->filter();
-        $allReleased = $items->every(fn ($item): bool => $item->result_status === LaboratoryResultStatus::Released->value || $item->status === 'completed');
-        $allSubmitted = $items->every(fn ($item): bool => in_array($item->result_status, [
+        $terminal = ['cancelled', 'not_performed', 'entered_in_error'];
+        $active = $items->whereNotIn('status', $terminal);
+        $resultStatuses = $active->pluck('result_status')->filter();
+        $allReleased = $items->every(fn ($item): bool => in_array($item->status, $terminal, true)
+            || $item->result_status === LaboratoryResultStatus::Released->value || $item->status === 'completed');
+        $allSubmitted = $active->isNotEmpty() && $active->every(fn ($item): bool => in_array($item->result_status, [
             LaboratoryResultStatus::PendingVerification->value,
             LaboratoryResultStatus::Verified->value,
             LaboratoryResultStatus::Released->value,
@@ -40,9 +43,7 @@ class LaboratoryOrderStatusService
         if ($actor) {
             $updates['updated_by'] = $actor->id;
         }
-        if ($status === ClinicalOrderStatus::Completed) {
-            $updates['completed_at'] = $order->completed_at ?? now();
-        }
+        $updates['completed_at'] = $status === ClinicalOrderStatus::Completed ? ($order->completed_at ?? now()) : null;
         $order->update($updates);
 
         return $order->refresh();

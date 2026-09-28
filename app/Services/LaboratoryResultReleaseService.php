@@ -24,6 +24,10 @@ class LaboratoryResultReleaseService
         return DB::transaction(function () use ($result, $actor) {
             $visit = Visit::query()->lockForUpdate()->findOrFail($result->order->visit_id);
             abort_unless($visit->facility_id === currentFacility()?->id && $result->facility_id === $visit->facility_id, 403);
+            $item = $result->orderItem()->lockForUpdate()->firstOrFail();
+            if (in_array($item->status, ['cancelled', 'not_performed', 'entered_in_error'], true)) {
+                throw ValidationException::withMessages(['result' => 'This test has a terminal decision.']);
+            }
             $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
             if ($result->result_status === LaboratoryResultStatus::Released) {
                 $this->visitClosure->evaluate($visit, $actor);
@@ -46,7 +50,7 @@ class LaboratoryResultReleaseService
     {
         $order = $result->order;
         $hasUnreleasedItems = $order->items()
-            ->whereNotIn('status', ['cancelled', 'entered_in_error'])
+            ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])
             ->where(fn ($query) => $query
                 ->whereNull('result_status')
                 ->orWhere('result_status', '!=', LaboratoryResultStatus::Released->value))

@@ -324,9 +324,11 @@ class ClinicalEncounterService
                     $this->workflow->completeQueue($queue, $actor);
                 });
 
-            if ($encounter->encounter_type === ClinicalEncounterType::FollowUp && $encounter->parent_encounter_id) {
+            if (($encounter->encounter_type === ClinicalEncounterType::FollowUp && $encounter->parent_encounter_id)
+                || $encounter->partial_completed_at) {
+                $reviewOrderEncounterId = $encounter->parent_encounter_id ?: $encounter->id;
                 $this->visitClosure->pendingReviewResults($visit)
-                    ->whereHas('order', fn ($query) => $query->where('clinical_encounter_id', $encounter->parent_encounter_id))
+                    ->whereHas('order', fn ($query) => $query->where('clinical_encounter_id', $reviewOrderEncounterId))
                     ->lockForUpdate()->get()
                     ->each(fn ($result) => $result->update([
                         'reviewed_by_clinician' => $actor->id,
@@ -348,6 +350,61 @@ class ClinicalEncounterService
                 'completed_by' => $encounter->completed_by,
                 'next_visit_status' => $next->value,
                 'destinations' => array_keys($destinations),
+            ]);
+
+            return $encounter->refresh();
+        });
+    }
+
+    public function partialCompleteEncounter(ClinicalEncounter $encounter, $actor, array $data = []): ClinicalEncounter
+    {
+        return DB::transaction(function () use ($encounter, $actor, $data): ClinicalEncounter {
+            $visit = Visit::query()->lockForUpdate()->findOrFail($encounter->visit_id);
+            $encounter = ClinicalEncounter::query()->lockForUpdate()->findOrFail($encounter->id);
+            $encounter->setRelation('visit', $visit);
+            Gate::forUser($actor)->authorize('complete', $encounter);
+            abort_unless($actor->belongsToCurrentFacility() && $visit->facility_id === currentFacility()?->id
+                && $encounter->facility_id === $visit->facility_id, 403);
+            $this->ensureOpenForFinalization($encounter);
+            if (! in_array($encounter->status, [ClinicalEncounterStatus::InProgress], true)) {
+                throw ValidationException::withMessages(['encounter' => 'Only an active consultation can be paused.']);
+            }
+            $encounter->update([...$this->draftFields($data), 'updated_by' => $actor->id]);
+            $encounter->refresh();
+            $this->validateClinicalContentFacility($encounter);
+            if (! $encounter->started_at || ! $encounter->provider_user_id
+                || ! (filled($encounter->clinical_summary) || filled($encounter->assessment_notes)
+                    || filled($encounter->treatment_plan) || $encounter->diagnoses()->exists()
+                    || $encounter->laboratoryOrders()->where('status', '!=', 'cancelled')->exists()
+                    || $encounter->prescriptions()->whereHas('items')->exists()
+                    || $encounter->procedureOrders()->where('status', '!=', 'cancelled')->exists())) {
+                throw ValidationException::withMessages(['clinical_content' => 'Record an assessment, treatment plan, or valid order before partial consultation.']);
+            }
+            if ($encounter->laboratoryOrders()->where('status', '!=', 'cancelled')
+                ->whereHas('items', fn ($query) => $query->whereNull('laboratory_test_id')
+                    ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error']))->exists()) {
+                throw ValidationException::withMessages(['laboratory' => 'A laboratory service has no configured test.']);
+            }
+            $encounter->prescriptions()->where('status', PrescriptionStatus::Draft->value)
+                ->lockForUpdate()->get()->each(function (Prescription $prescription) use ($actor): void {
+                    if ($prescription->items()->exists()) {
+                        $this->prescriptions->finalizePrescription($prescription, $actor);
+                    } else {
+                        $this->prescriptions->deleteEmptyDraftIfSafe($prescription, $actor);
+                    }
+                });
+            $encounter->load('visit.invoice');
+            $this->createDownstreamQueues($encounter, $this->resolveRequiredDestinations($encounter), $actor);
+            $encounter->update([
+                'partial_completed_at' => now(),
+                'partial_completed_by' => $actor->id,
+                'updated_by' => $actor->id,
+            ]);
+            $this->visitClosure->evaluate($visit->refresh(), $actor);
+            $this->audit($actor, 'clinical_encounter_partial_completed', $encounter, [
+                'visit_id' => $visit->id,
+                'status' => $encounter->status->value,
+                'partial_completed_at' => $encounter->partial_completed_at,
             ]);
 
             return $encounter->refresh();
@@ -641,9 +698,9 @@ class ClinicalEncounterService
         if ($encounter->laboratoryOrders()
             ->where('status', '!=', 'cancelled')
             ->where(fn ($orders) => $orders
-                ->where('payment_status', 'pending')
+                ->where('payment_status', 'pending')->whereHas('items', fn ($query) => $query->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error']))
                 ->orWhereHas('items', fn ($query) => $query
-                    ->whereNotIn('status', ['cancelled'])
+                    ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])
                     ->where(fn ($query) => $query
                         ->where('result_status', '!=', LaboratoryResultStatus::Released->value)
                         ->orWhereNull('result_status'))))

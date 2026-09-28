@@ -61,6 +61,11 @@ class LaboratoryOrderPolicy
         return $this->canAccessReport($user, $model, 'laboratory-results.print');
     }
 
+    public function decideItem(User $user, LaboratoryOrder $model): bool
+    {
+        return $this->can($user, 'laboratory-results.enter', $model);
+    }
+
     public function cancel(User $user, LaboratoryOrder $model): bool
     {
         return $this->can($user, 'laboratory-orders.cancel', $model);

@@ -94,15 +94,13 @@ class Queue extends Component
 
     public function render(LaboratoryReportService $reports): View
     {
-        $processablePayments = ['paid', 'covered', 'waived', 'not_required'];
-        $canOverridePayment = auth()->user()->can('laboratory.override-payment');
         $orders = LaboratoryOrder::query()->forCurrentFacility()->with(['patient', 'items.laboratoryTest.specimenType', 'items.sample', 'items.results'])
             ->when($this->search, fn ($q) => $q->where(fn ($searchQuery) => $searchQuery->where('order_number', 'like', "%{$this->search}%")->orWhereHas('patient', fn ($p) => $p->where('first_name', 'like', "%{$this->search}%")->orWhere('last_name', 'like', "%{$this->search}%")->orWhere('patient_number', 'like', "%{$this->search}%"))))
-            ->when($this->tab === 'awaiting_payment', fn ($q) => $q->where('payment_status', 'pending'))
+            ->when($this->tab === 'awaiting_payment', fn ($q) => $q->whereHas('items', fn ($items) => $items->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error', 'completed'])->whereNotIn('id', LaboratoryOrderItem::query()->financiallyCleared()->select('id'))))
             ->when($this->tab === 'awaiting_sample', fn ($q) => $q
-                ->when(! $canOverridePayment, fn ($orders) => $orders->whereIn('payment_status', $processablePayments))
-                ->whereHas('items', fn ($items) => $items->whereNull('sample_id')->whereIn('status', ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'])))
-            ->when($this->tab === 'processing', fn ($q) => $q->when(! $canOverridePayment, fn ($orders) => $orders->whereIn('payment_status', $processablePayments))->whereHas('items', fn ($items) => $items
+
+                ->whereHas('items', fn ($items) => $items->financiallyCleared()->whereNull('sample_id')->whereIn('status', ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'])))
+            ->when($this->tab === 'processing', fn ($q) => $q->whereHas('items', fn ($items) => $items->financiallyCleared()
                 ->whereNotNull('sample_id')
                 ->whereIn('status', ['sample_collected', 'sample_accepted', 'processing'])
                 ->whereHas('sample', fn ($sample) => $sample->where('sample_status', 'accepted'))
@@ -113,9 +111,9 @@ class Queue extends Component
 
         $items = LaboratoryOrderItem::query()->whereHas('order', fn ($order) => $order->forCurrentFacility());
         $tabCounts = [
-            'awaiting_payment' => (clone $items)->whereHas('order', fn ($order) => $order->where('payment_status', 'pending'))->count(),
-            'awaiting_sample' => (clone $items)->whereNull('sample_id')->whereIn('status', ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'])->when(! $canOverridePayment, fn ($query) => $query->whereHas('order', fn ($order) => $order->whereIn('payment_status', $processablePayments)))->count(),
-            'processing' => (clone $items)->whereNotNull('sample_id')->whereIn('status', ['sample_collected', 'sample_accepted', 'processing'])->where(fn ($query) => $query->whereNull('result_status')->orWhereIn('result_status', ['draft', 'entered']))->whereHas('sample', fn ($sample) => $sample->where('sample_status', 'accepted'))->when(! $canOverridePayment, fn ($query) => $query->whereHas('order', fn ($order) => $order->whereIn('payment_status', $processablePayments)))->count(),
+            'awaiting_payment' => (clone $items)->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error', 'completed'])->whereNotIn('id', LaboratoryOrderItem::query()->financiallyCleared()->select('id'))->count(),
+            'awaiting_sample' => (clone $items)->whereNull('sample_id')->whereIn('status', ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'])->financiallyCleared()->count(),
+            'processing' => (clone $items)->whereNotNull('sample_id')->whereIn('status', ['sample_collected', 'sample_accepted', 'processing'])->where(fn ($query) => $query->whereNull('result_status')->orWhereIn('result_status', ['draft', 'entered']))->whereHas('sample', fn ($sample) => $sample->where('sample_status', 'accepted'))->financiallyCleared()->count(),
             'pending_verification' => (clone $items)->where('result_status', 'pending_verification')->count(),
             'completed' => (clone $items)->whereIn('result_status', ['verified', 'released'])->count(),
         ];

@@ -29,6 +29,7 @@ use App\Models\User;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
 use App\Services\LaboratoryOrderItemDecisionService;
+use App\Services\LaboratoryResultService;
 use App\Services\LaboratorySampleService;
 use App\Services\PaymentConfirmationService;
 use Database\Seeders\BillingSettingsSeeder;
@@ -41,6 +42,7 @@ use Database\Seeders\RoleSeeder;
 use Database\Seeders\SpecimenTypeSeeder;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Symfony\Component\HttpKernel\Exception\HttpException;
@@ -178,8 +180,10 @@ class LaboratoryPaymentWorkflowTest extends TestCase
         Livewire::actingAs($technician)
             ->test(LaboratoryQueue::class)
             ->set('tab', 'processing')
+            ->assertDontSee($order->order_number)
+            ->set('tab', 'awaiting_payment')
             ->assertSee($order->order_number)
-            ->assertSee('Ingiza Matokeo');
+            ->assertDontSee('Ingiza Matokeo');
     }
 
     public function test_unauthorized_users_cannot_confirm_payment_or_collect_samples(): void
@@ -394,6 +398,173 @@ class LaboratoryPaymentWorkflowTest extends TestCase
         app(LaboratoryOrderItemDecisionService::class)->decide(
             $order->items()->firstOrFail(), 'cancelled', 'patient_declined', null, $foreignTechnician,
         );
+    }
+
+    public function test_production_partial_cash_selection_does_not_open_unselected_lab_tests_until_second_payment(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $cashier = $this->staffUser('cashier', $facility);
+        $technician = $this->staffUser('laboratory-technician', $facility);
+        $encounter = $this->encounter($doctor, 'cash');
+        $services = collect([
+            $this->laboratoryService('Malaria', 'SELECT-MAL', 'cash', 5000, $admin),
+            $this->laboratoryService('Hemoglobin', 'SELECT-HB', 'cash', 4000, $admin),
+            $this->laboratoryService('Urinalysis', 'SELECT-UA', 'cash', 3000, $admin),
+            $this->laboratoryService('RPR', 'SELECT-RPR', 'cash', 4000, $admin),
+        ]);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => $services->pluck('id')->all()], $doctor);
+        $items = $order->items()->orderBy('id')->get();
+        $invoice = $items[0]->invoiceItem->invoice;
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        $selection = [$items[0]->invoice_item_id => '5000.00', $items[1]->invoice_item_id => '4000.00'];
+        $this->actingAs($cashier);
+        $screen = Livewire::test(InvoiceShow::class, ['invoice' => $invoice])->call('openPaymentModal')
+            ->set('selectedItems', array_map('strval', array_keys($selection)))
+            ->set('payment_method_id', $cash->id)->assertSet('amount', '9000.00')
+            ->call('confirmPayment')->assertHasNoErrors()->assertSet('showPaymentModal', false);
+        $payment = $invoice->payments()->sole();
+        $retry = app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 9000, $cashier, [
+            'allocations' => $selection, 'idempotency_key' => $payment->idempotency_key,
+        ]);
+        $this->assertSame($payment->id, $retry->id);
+        $this->assertSame(2, $payment->allocations()->count());
+        $firstAllocations = $payment->allocations()->get()->toArray();
+        $firstPayment = $payment->fresh()->getAttributes();
+        $this->assertSame('9000.00', $invoice->refresh()->paid_amount);
+        $this->assertSame('7000.00', $invoice->balance_amount);
+        $this->assertSame('16000.00', $invoice->total_amount);
+        $this->assertSame('partial', $invoice->payment_status);
+        foreach ($items as $index => $item) {
+            $this->assertSame($index < 2, $item->isFinanciallyCleared());
+            $this->assertSame($index < 2 ? 'ready_for_collection' : 'awaiting_payment', $item->refresh()->status);
+            $this->assertSame($index < 2 ? $selection[$item->invoice_item_id] : '0.00', $item->invoiceItem->refresh()->paid_amount);
+        }
+        $screen->call('openPaymentModal')->assertSee('PAID / CLEARED')->assertSee('UNPAID')
+            ->assertSet('selectedItems', [(string) $items[2]->invoice_item_id, (string) $items[3]->invoice_item_id]);
+        Livewire::actingAs($technician)->test(LaboratoryQueue::class)
+            ->assertSee('Malaria')->assertSee('Hemoglobin')->assertDontSee('Urinalysis')->assertDontSee('RPR')
+            ->set('tab', 'awaiting_payment')->assertSee('Urinalysis')->assertSee('RPR')
+            ->assertDontSeeHtml('wire:click="openCollect('.$order->id.', '.$items[2]->id.')"');
+        $this->actingAs($technician);
+        foreach (['collect', 'result'] as $action) {
+            try {
+                if ($action === 'collect') {
+                    app(LaboratorySampleService::class)->collectSample($order, ['order_item_ids' => [$items[2]->id]], $technician, true);
+                } else {
+                    app(LaboratoryResultService::class)->createDraft($items[2], $technician);
+                }
+                $this->fail('An unselected test was processed.');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('payment', $exception->errors());
+            }
+        }
+        $technician->givePermissionTo('laboratory.override-payment');
+        try {
+            app(LaboratorySampleService::class)->collectSample($order, ['order_item_ids' => [$items[3]->id]], $technician, true);
+            $this->fail('An override bypassed explicit cashier selection.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('payment', $exception->errors());
+        }
+        app(LaboratorySampleService::class)->collectSample($order, ['order_item_ids' => [$items[0]->id, $items[1]->id]], $technician, true);
+        $firstSample = $items[0]->refresh()->sample_id;
+        $this->actingAs($cashier);
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 7000, $cashier, [
+            'allocations' => [$items[2]->invoice_item_id => 3000, $items[3]->invoice_item_id => 4000],
+            'idempotency_key' => (string) Str::uuid(),
+        ]);
+        $this->assertSame($firstAllocations, $payment->allocations()->get()->toArray());
+        $this->assertSame($firstPayment, $payment->fresh()->getAttributes());
+        $this->assertSame('16000.00', $invoice->refresh()->paid_amount);
+        $this->assertSame('0.00', $invoice->balance_amount);
+        $this->assertSame('paid', $invoice->payment_status);
+        $this->assertSame($firstSample, $items[0]->refresh()->sample_id);
+        $this->assertSame('sample_accepted', $items[0]->status);
+        $this->assertTrue($items->every(fn ($item) => $item->isFinanciallyCleared()));
+        $this->assertSame(2, $invoice->payments()->count());
+        $this->assertDatabaseCount('payment_allocations', 4);
+        $this->assertDatabaseCount('laboratory_orders', 1);
+        $this->assertDatabaseCount('invoice_items', 4);
+        $this->assertDatabaseCount('invoices', 1);
+        $this->assertSame(1, $encounter->visit->queues()->whereHas('department', fn ($q) => $q->where('code', 'LAB'))->count());
+        $this->actingAs($technician);
+        app(LaboratorySampleService::class)->collectSample($order, ['order_item_ids' => [$items[2]->id, $items[3]->id]], $technician, true);
+    }
+
+    public function test_selective_allocations_reject_invalid_items_amounts_and_changed_retry_without_writes(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $cashier = $this->staffUser('cashier', $facility);
+        $encounter = $this->encounter($doctor, 'cash');
+        $service = $this->laboratoryService('Selection validation', 'SELECT-VALID', 'cash', 5000, $admin);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$service->id]], $doctor);
+        $charge = $order->items()->sole()->invoiceItem;
+        $invoice = $charge->invoice;
+        $otherEncounter = $this->encounter($doctor, 'cash');
+        $otherOrder = app(ClinicalEncounterService::class)->addLabOrder($otherEncounter, ['service_ids' => [$service->id]], $doctor);
+        $otherCharge = $otherOrder->items()->sole()->invoiceItem;
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        $this->actingAs($cashier);
+        foreach ([[], [$charge->id => 0], [$charge->id => -100], [$charge->id => 1000.001], [$charge->id => 999], [$otherCharge->id => 1000], [999999 => 1000]] as $allocations) {
+            try {
+                app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 1000, $cashier, ['allocations' => $allocations]);
+                $this->fail('Invalid allocation accepted.');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('allocations', $exception->errors());
+            }
+        }
+        // A forged foreign-facility item attached to this invoice is also rejected.
+        $foreignFacility = $facility->replicate();
+        $foreignFacility->code = 'FOREIGN-SELECT';
+        $foreignFacility->save();
+        $otherCharge->update(['invoice_id' => $invoice->id, 'facility_id' => $foreignFacility->id]);
+        try {
+            app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 1000, $cashier, ['allocations' => [$otherCharge->id => 1000]]);
+            $this->fail('Cross-facility allocation accepted.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('allocations', $exception->errors());
+        }
+        $otherCharge->update(['facility_id' => $facility->id]);
+        $charge->update(['status' => 'cancelled']);
+        try {
+            app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 1000, $cashier, ['allocations' => [$charge->id => 1000]]);
+            $this->fail('Cancelled allocation accepted.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('allocations', $exception->errors());
+        }
+        $charge->update(['status' => 'pending']);
+        $this->assertDatabaseCount('payments', 0);
+        $this->assertDatabaseCount('payment_allocations', 0);
+        $key = (string) Str::uuid();
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 4000, $cashier, ['allocations' => [$charge->id => 4000], 'idempotency_key' => $key]);
+        foreach ([['amount' => 2000, 'data' => ['allocations' => [$charge->id => 2000]]], ['amount' => 4000, 'data' => ['allocations' => [$otherCharge->id => 4000], 'idempotency_key' => $key]]] as $attempt) {
+            try {
+                app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, $attempt['amount'], $cashier, $attempt['data']);
+                $this->fail('Stale balance or changed retry accepted.');
+            } catch (ValidationException $exception) {
+                $this->assertArrayHasKey('allocations', $exception->errors());
+            }
+        }
+        $this->assertDatabaseCount('payments', 1);
+        $this->assertSame('4000.00', $charge->refresh()->paid_amount);
+    }
+
+    public function test_free_lab_item_is_ready_without_payment_on_a_mixed_unpaid_invoice(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $encounter = $this->encounter($doctor, 'cash');
+        $free = $this->laboratoryService('Free lab', 'FREE-SELECT', 'cash', 0, $admin);
+        $paid = $this->laboratoryService('Paid lab', 'PAID-SELECT', 'cash', 5000, $admin);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$free->id, $paid->id]], $doctor);
+        $this->assertTrue($order->items()->where('service_id', $free->id)->sole()->isFinanciallyCleared());
+        $this->assertFalse($order->items()->where('service_id', $paid->id)->sole()->isFinanciallyCleared());
+        $this->assertSame('ordered', $order->status->value);
+        $this->assertDatabaseCount('payments', 0);
     }
 
     /** @return array{User, Facility} */

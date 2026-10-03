@@ -29,6 +29,7 @@ class LaboratoryResultReleaseService
                 throw ValidationException::withMessages(['result' => 'This test has a terminal decision.']);
             }
             $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
+            app(LaboratoryPaymentGuard::class)->ensureItemProcessable($result->orderItem, $actor, 'release_result');
             if ($result->result_status === LaboratoryResultStatus::Released) {
                 $this->visitClosure->evaluate($visit, $actor);
 

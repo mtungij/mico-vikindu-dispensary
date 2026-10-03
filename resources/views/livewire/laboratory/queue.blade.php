@@ -16,7 +16,8 @@
                     @foreach($orders as $order)
                         @php
                             $visibleItems = $order->items->filter(fn ($item) => match ($tab) {
-                                'awaiting_sample' => $item->sample_id === null && in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true),
+                                'awaiting_payment' => ! $item->isFinanciallyCleared() && ! in_array($item->status, ['cancelled', 'not_performed', 'entered_in_error', 'completed'], true),
+                                'awaiting_sample' => $item->isFinanciallyCleared() && $item->sample_id === null && in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true),
                                 'processing' => $item->sample_id !== null && in_array($item->status, ['sample_collected', 'sample_accepted', 'processing'], true) && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true)),
                                 'pending_verification' => $item->result_status === 'pending_verification',
                                 'completed' => in_array($item->result_status, ['verified', 'released'], true),
@@ -30,25 +31,25 @@
                             <td>{{ $order->patient?->fullName() }}<div class="text-xs text-slate-500">{{ $order->patient?->patient_number }}</div></td>
                             <td>{{ $item->test_name_snapshot }}<div class="text-xs text-slate-500">{{ $item->laboratoryTest?->specimenType?->name ?? 'Specimen not configured' }}</div></td>
                             <td>{{ $order->priority }}</td>
-                            <td>{{ $order->payment_status->value }}</td>
+                            <td>{{ $item->isFinanciallyCleared() ? 'Ready / Cleared' : 'Awaiting Payment' }}</td>
                             <td>{{ $item->result_status ?? $item->status }}</td>
                             <td>{{ $order->ordered_at?->diffForHumans() }}</td>
                             <td class="text-right">
                                 <a href="{{ route('laboratory.orders.show', $order) }}" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-eye class="h-4 w-4" /></a>
                                 @if(auth()->user()->can('laboratory.collect-sample') && auth()->user()->can('laboratory.accept-sample') && $item->sample_id === null && in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true))
-                                    @if($order->payment_status->value !== 'pending' || auth()->user()->can('laboratory.override-payment'))
+                                    @if($item->isFinanciallyCleared())
                                         <button type="button" wire:click="openCollect({{ $order->id }}, {{ $item->id }})" wire:loading.attr="disabled" class="rounded-md p-2 hover:bg-slate-100 disabled:opacity-50 dark:hover:bg-slate-800" aria-label="Collect and accept {{ $item->test_name_snapshot }}"><x-lucide-test-tube class="h-4 w-4" /></button>
                                     @endif
                                 @endif
-                                @if(auth()->user()->can('laboratory-results.enter') && $item->sample?->sample_status?->value === 'accepted' && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true)))
+                                @if($item->isFinanciallyCleared() && auth()->user()->can('laboratory-results.enter') && $item->sample?->sample_status?->value === 'accepted' && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true)))
                                     <a href="{{ route('laboratory.results.entry', ['laboratoryOrder' => $order, 'item' => $item->id]) }}" class="inline-flex items-center gap-1 rounded-md px-2 py-1 hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-clipboard-check class="h-4 w-4" /> Ingiza Matokeo</a>
                                 @endif
                                 @php
                                     $latestResult = $item->results->sortByDesc('result_version')->first();
                                 @endphp
-                                @if($latestResult?->result_status?->value === 'pending_verification' && auth()->user()->can('laboratory-results.verify'))
+                                @if($item->isFinanciallyCleared() && $latestResult?->result_status?->value === 'pending_verification' && auth()->user()->can('laboratory-results.verify'))
                                     <a href="{{ route('laboratory.results.verify', $latestResult) }}" class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-primary hover:bg-slate-100 dark:hover:bg-slate-800"><x-lucide-file-check-2 class="h-4 w-4" /> Verify Results</a>
-                                @elseif($latestResult?->result_status?->value === 'verified' && auth()->user()->can('laboratory-results.release'))
+                                @elseif($item->isFinanciallyCleared() && $latestResult?->result_status?->value === 'verified' && auth()->user()->can('laboratory-results.release'))
                                     <a href="{{ route('laboratory.results.verify', $latestResult) }}" class="inline-flex items-center gap-1 rounded-md bg-amber-100 px-2 py-1 text-amber-800 hover:bg-amber-200 dark:bg-amber-950/40 dark:text-amber-200"><x-lucide-send class="h-4 w-4" /> Release Results</a>
                                 @endif
                                 @if($loop->first && ($reportEligibility[$order->id] ?? false))
@@ -86,7 +87,7 @@
                     <legend class="text-sm font-semibold">Chagua vipimo vya sampuli hii</legend>
                     @foreach($selectedOrder->items as $item)
                         @php
-                            $disabled = $item->sample_id !== null || ! in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true);
+                            $disabled = ! $item->isFinanciallyCleared() || $item->sample_id !== null || ! in_array($item->status, ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'], true);
                         @endphp
                         <label wire:key="collect-item-{{ $item->id }}" class="flex items-start gap-3 rounded-md border border-slate-200 p-3 dark:border-slate-700 {{ $disabled ? 'opacity-60' : '' }}">
                             <input type="checkbox" wire:model.live="sampleForm.order_item_ids" value="{{ $item->id }}" @disabled($disabled) class="mt-1 rounded border-slate-300 text-primary">

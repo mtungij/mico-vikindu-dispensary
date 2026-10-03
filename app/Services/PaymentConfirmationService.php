@@ -2,7 +2,6 @@
 
 namespace App\Services;
 
-use App\Events\LaboratoryPaymentConfirmed;
 use App\Models\FacilitySetting;
 use App\Models\Invoice;
 use App\Models\Payment;
@@ -31,6 +30,7 @@ class PaymentConfirmationService
                 $actor->can('billing.receive-payment') && $actor->can('billing.confirm-payment'),
                 403
             );
+            $invoice->items()->orderBy('id')->lockForUpdate()->get();
             $this->statuses->recalculate($invoice);
             $invoice = $invoice->refresh();
 
@@ -41,7 +41,7 @@ class PaymentConfirmationService
 
             $invoice = $this->statuses->ensureCanReceivePayment($invoice, false);
 
-            if ($amount <= 0) {
+            if (! is_finite($amount) || $amount <= 0 || abs($amount - round($amount, 2)) > 0.000001) {
                 throw ValidationException::withMessages(['amount' => 'Kiasi cha malipo lazima kiwe zaidi ya sifuri.']);
             }
             if ((float) $invoice->balance_amount <= 0) {
@@ -87,12 +87,17 @@ class PaymentConfirmationService
                 'notes' => $data['notes'] ?? null,
                 'metadata' => [
                     ...(array) ($data['metadata'] ?? []),
+                    'allocation_mode' => array_key_exists('allocations', $data) ? 'explicit' : 'automatic',
                     'invoice_balance_before' => number_format($balanceBefore, 2, '.', ''),
                     'invoice_balance_after' => number_format(max(0, $balanceBefore - $amount), 2, '.', ''),
                 ],
             ]);
 
-            $this->allocateToItems($payment, $invoice, $amount, $actor);
+            if (array_key_exists('allocations', $data)) {
+                $this->allocateExplicitly($payment, $invoice, $amount, $actor, $data['allocations']);
+            } else {
+                $this->allocateToItems($payment, $invoice, $amount, $actor);
+            }
             $invoice = $this->statuses->recalculate($invoice);
             $this->receipts->createForPayment($payment);
             $this->audit->record('payment_confirmed', $payment, [
@@ -118,10 +123,8 @@ class PaymentConfirmationService
 
             $this->workflow->releasePaidInvoice($invoice->refresh(), $actor);
             app(PrescriptionBillingService::class)->releasePaidInvoice($invoice->refresh(), $actor);
-            if ((float) $invoice->balance_amount === 0.0 && $invoice->payment_status === 'paid') {
-                LaboratoryPaymentConfirmed::dispatch($invoice->refresh(), $actor);
-                app(ProcedureOrderService::class)->releasePaidInvoice($invoice->refresh(), $actor);
-            }
+            app(LaboratoryPaymentReleaseService::class)->releaseForInvoice($invoice->refresh(), $actor);
+            app(ProcedureOrderService::class)->releasePaidInvoice($invoice->refresh(), $actor);
 
             return $payment->refresh();
         });
@@ -155,7 +158,74 @@ class PaymentConfirmationService
             throw ValidationException::withMessages(['payment' => 'This payment reference was already used for a different payment.']);
         }
 
+        if ($existing->payment_method_id !== $method->id) {
+            throw ValidationException::withMessages(['payment' => 'This payment reference was already used with another method.']);
+        }
+        if (array_key_exists('allocations', $data)) {
+            $requested = $this->normalizeAllocations($data['allocations']);
+            $stored = $existing->allocations()->whereNotNull('invoice_item_id')->get()
+                ->mapWithKeys(fn ($row) => [$row->invoice_item_id => number_format((float) $row->allocated_amount, 2, '.', '')])->all();
+            ksort($stored);
+            if ($requested !== $stored) {
+                throw ValidationException::withMessages(['allocations' => 'This payment reference was already used with a different item selection.']);
+            }
+        }
+
         return $existing;
+    }
+
+    private function normalizeAllocations(mixed $allocations): array
+    {
+        if (! is_array($allocations) || $allocations === []) {
+            throw ValidationException::withMessages(['allocations' => 'Select at least one outstanding item.']);
+        }
+        $normalized = [];
+        foreach ($allocations as $id => $value) {
+            if (! ctype_digit((string) $id) || (int) $id <= 0 || ! is_numeric($value)
+                || ! is_finite((float) $value) || (float) $value <= 0
+                || abs((float) $value - round((float) $value, 2)) > 0.000001) {
+                throw ValidationException::withMessages(['allocations' => 'Each selected item requires a positive amount with at most two decimal places.']);
+            }
+            if (array_key_exists((int) $id, $normalized)) {
+                throw ValidationException::withMessages(['allocations' => 'Duplicate item allocation.']);
+            }
+            $normalized[(int) $id] = number_format((float) $value, 2, '.', '');
+        }
+        ksort($normalized);
+
+        return $normalized;
+    }
+
+    private function allocateExplicitly(Payment $payment, Invoice $invoice, float $amount, $actor, mixed $allocations): void
+    {
+        $allocations = $this->normalizeAllocations($allocations);
+        $total = array_sum(array_map(fn ($value) => (int) round((float) $value * 100), $allocations));
+        if ($total !== (int) round($amount * 100)) {
+            throw ValidationException::withMessages(['allocations' => 'Selected total must equal the amount received.']);
+        }
+        $items = $invoice->items()->where('facility_id', $invoice->facility_id)
+            ->whereIn('id', array_keys($allocations))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        if ($items->count() !== count($allocations)) {
+            throw ValidationException::withMessages(['allocations' => 'Every selected item must belong to this invoice and facility.']);
+        }
+        foreach ($allocations as $id => $allocated) {
+            $item = $items[$id];
+            $balance = round((float) $item->patient_amount - (float) $item->paid_amount, 2);
+            if (in_array($item->status, ['cancelled', 'reversed', 'non_billable'], true)
+                || $balance <= 0 || (float) $allocated > $balance) {
+                throw ValidationException::withMessages(['allocations' => "{$item->description}: allocation exceeds the payable balance or the item is inactive."]);
+            }
+            $payment->allocations()->create([
+                'facility_id' => $invoice->facility_id,
+                'invoice_id' => $invoice->id,
+                'invoice_item_id' => $id,
+                'allocated_amount' => $allocated,
+                'allocation_type' => 'invoice_item',
+                'allocated_by' => $actor->id,
+                'allocated_at' => now(),
+            ]);
+            $item->update(['paid_amount' => round((float) $item->paid_amount + (float) $allocated, 2)]);
+        }
     }
 
     private function allocateToItems(Payment $payment, Invoice $invoice, float $amount, $actor): void

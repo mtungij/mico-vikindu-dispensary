@@ -35,8 +35,7 @@ class LaboratorySampleService
                 403,
                 'Order hii ni ya facility nyingine.',
             );
-            $this->paymentGuard->ensureProcessable($order, $actor, 'collect_sample');
-            $eligibleStatuses = [ClinicalOrderStatus::Ordered, ClinicalOrderStatus::SamplePending, ClinicalOrderStatus::Processing];
+            $eligibleStatuses = [ClinicalOrderStatus::AwaitingPayment, ClinicalOrderStatus::Ordered, ClinicalOrderStatus::SamplePending, ClinicalOrderStatus::Processing];
             if ($actor->can('laboratory.override-payment')) {
                 $eligibleStatuses[] = ClinicalOrderStatus::AwaitingPayment;
             }
@@ -58,9 +57,13 @@ class LaboratorySampleService
                 $itemIds = $order->items()
                     ->whereNull('sample_id')
                     ->whereIn('status', ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'])
+                    ->when(! $actor->can('laboratory.override-payment'), fn ($query) => $query->financiallyCleared())
                     ->pluck('id')->map(fn ($id): int => (int) $id)->values();
             }
             if ($itemIds->isEmpty()) {
+                if ($order->items()->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error', 'completed'])->exists()) {
+                    throw ValidationException::withMessages(['payment' => 'Awaiting Payment: no financially cleared tests available.']);
+                }
                 $storedItems = $order->items()->withTrashed()->get(['id', 'status', 'deleted_at']);
                 $message = $storedItems->isEmpty()
                     ? 'Order hii haina vipimo vilivyohifadhiwa. Tafadhali futa order hii na daktari aagize vipimo upya.'
@@ -74,6 +77,7 @@ class LaboratorySampleService
             $eligibleItemStatuses = ['ordered', 'awaiting_payment', 'ready_for_collection', 'pending_collection'];
             $errors = [];
             foreach ($items as $item) {
+                $this->paymentGuard->ensureItemProcessable($item, $actor, 'collect_sample');
                 $name = $item->test_name_snapshot ?: "Kipimo #{$item->id}";
                 if (in_array($item->status, ['cancelled', 'not_performed', 'entered_in_error'], true)) {
                     $errors["order_item_ids.{$item->id}"] = "{$name}: kipimo hakipo tena kwenye kazi za maabara.";
@@ -144,7 +148,9 @@ class LaboratorySampleService
     public function receiveSample(LaboratorySample $sample, $actor): LaboratorySample
     {
         abort_unless($actor->can('laboratory.receive-sample'), 403);
-        $this->paymentGuard->ensureProcessable($sample->order, $actor, 'receive_sample');
+        foreach ($sample->order->items()->where('sample_id', $sample->id)->get() as $item) {
+            $this->paymentGuard->ensureItemProcessable($item, $actor, 'receive_sample');
+        }
         $sample->update(['sample_status' => LaboratorySampleStatus::Received, 'received_by' => $actor->id, 'received_at' => now(), 'updated_by' => $actor->id]);
         $this->audit($actor, 'sample_received', $sample);
 
@@ -161,7 +167,9 @@ class LaboratorySampleService
                 403,
                 'Sampuli hii ni ya facility nyingine.',
             );
-            $this->paymentGuard->ensureProcessable($sample->order, $actor, 'accept_sample');
+            foreach ($sample->order->items()->where('sample_id', $sample->id)->get() as $item) {
+                $this->paymentGuard->ensureItemProcessable($item, $actor, 'accept_sample');
+            }
             $sample->update(['sample_status' => LaboratorySampleStatus::Accepted, 'quality_status' => 'acceptable', 'accepted_by' => $actor->id, 'accepted_at' => now(), 'updated_by' => $actor->id]);
             $sample->order->items()->where('sample_id', $sample->id)->update(['status' => 'sample_accepted']);
             $this->orderStatuses->recalculate($sample->order, $actor);

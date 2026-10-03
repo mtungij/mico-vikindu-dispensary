@@ -46,7 +46,9 @@
                 </thead>
                 <tbody>
                     @foreach($invoice->items as $item)
-                        @php($medicineFinancial = $item->prescriptionItem ? app(\App\Services\MedicineFinancialClearanceService::class)->forItem($item->prescriptionItem) : null)
+                        @php
+                            $medicineFinancial = $item->prescriptionItem ? app(\App\Services\MedicineFinancialClearanceService::class)->forItem($item->prescriptionItem) : null;
+                        @endphp
                         <tr class="border-t border-slate-100 dark:border-slate-800">
                             <td class="px-3 py-2">{{ $item->description_snapshot ?? $item->description }}@if($medicineFinancial)<div class="text-xs text-slate-500">Unit price: {{ number_format((float) $medicineFinancial['billed_unit_price'], 2) }}</div>@endif</td>
                             <td class="px-3 py-2">{{ $item->quantity }}</td>
@@ -80,7 +82,7 @@
 
     @if($showPaymentModal)
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4" role="dialog" aria-modal="true">
-            <div class="w-full max-w-lg rounded-md bg-white p-5 shadow-xl dark:bg-card-dark">
+            <div class="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-md bg-white p-5 shadow-xl dark:bg-card-dark">
                 <div class="mb-4 flex items-center justify-between gap-3">
                     <h3 class="font-semibold">Receive Payment</h3>
                     <button type="button" wire:click="closePaymentModal" class="rounded-md p-2 hover:bg-slate-100 dark:hover:bg-slate-800">
@@ -100,6 +102,45 @@
                         <div><span class="block text-xs text-slate-500">Remaining balance</span><strong>{{ number_format(max(0, (float) $invoice->balance_amount - (float) $amount), 2) }}</strong></div>
                     </div>
 
+                    <div class="overflow-x-auto">
+                        <p class="mb-2 text-sm">Chagua huduma zinazolipiwa sasa. Unselected items remain awaiting payment.</p>
+                        <table class="min-w-full text-left text-sm">
+                            <thead><tr><th>Service / Select</th><th>Patient total</th><th>Previously paid</th><th>Outstanding</th><th>Pay now (TSh)</th></tr></thead>
+                            <tbody>
+                            @foreach($invoice->items->groupBy('item_type') as $type => $items)
+                                <tr><th colspan="5" class="pt-3 text-xs uppercase text-slate-500">{{ str_replace('_', ' ', $type) }}</th></tr>
+                                @foreach($items as $item)
+                                    @php
+                                        $outstanding = max(0, (float) $item->patient_amount - (float) $item->paid_amount);
+                                        $inactive = in_array($item->status, ['cancelled', 'reversed', 'non_billable'], true);
+                                        $selected = in_array((string) $item->id, array_map('strval', $selectedItems), true);
+                                    @endphp
+                                    <tr wire:key="payment-item-{{ $item->id }}" class="border-b border-slate-200">
+                                        <td class="py-2"><label class="flex items-center gap-2"><input type="checkbox" wire:model.live="selectedItems" value="{{ $item->id }}" @disabled($inactive || $outstanding <= 0)><span>{{ $item->description }}<span class="block text-xs text-slate-500">{{ $inactive ? ucfirst($item->status) : ($outstanding <= 0 ? 'PAID / CLEARED' : ((float) $item->paid_amount > 0 ? 'PARTIALLY PAID' : 'UNPAID')) }}</span></span></label></td>
+                                        <td>{{ number_format($item->patient_amount, 2) }}</td>
+                                        <td>{{ number_format($item->paid_amount, 2) }}</td>
+                                        <td>{{ number_format($outstanding, 2) }}</td>
+                                        <td class="py-2">
+                                            @if(! $inactive && $outstanding > 0)
+                                                <input aria-label="Pay now for {{ $item->description }}" type="number" min="0.01" max="{{ $outstanding }}" step="0.01" wire:model.live.debounce.300ms="itemAmounts.{{ $item->id }}" @disabled(! $selected) class="w-32 rounded border-slate-300 dark:bg-slate-900">
+                                                @if($item->prescriptionItem)
+                                                    <label class="mt-1 block text-xs">Or medicine quantity to pay for
+                                                        <input type="number" min="{{ $item->prescriptionItem->medicine?->dispensingUnit?->decimal_allowed ? '0.001' : '1' }}" step="{{ $item->prescriptionItem->medicine?->dispensingUnit?->decimal_allowed ? '0.001' : '1' }}" wire:model.live.debounce.300ms="medicineQuantities.{{ $item->id }}" @disabled(! $selected) class="w-24 rounded border-slate-300 dark:bg-slate-900">
+                                                    </label>
+                                                @endif
+                                            @else
+                                                {{ $inactive ? '—' : 'PAID / CLEARED' }}
+                                            @endif
+                                        </td>
+                                    </tr>
+                                @endforeach
+                            @endforeach
+                            </tbody>
+                        </table>
+                        <p class="mt-3 font-semibold">Selected total: TSh {{ number_format($this->selectedTotal(), 2) }}</p>
+                        @error('allocations') <p role="alert" class="text-sm text-red-600">{{ $message }}</p> @enderror
+                    </div>
+
                     <label class="block">
                         <span class="text-sm">Method</span>
                         <select wire:model.live="payment_method_id" class="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900">
@@ -114,8 +155,8 @@
                     </label>
 
                     <label class="block">
-                        <span class="text-sm">Amount</span>
-                        <input type="number" step="0.01" min="0.01" wire:model="amount" class="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900">
+                        <span class="text-sm">Amount received (must equal selected total)</span>
+                        <input type="number" step="0.01" min="0.01" wire:model.live="amount" class="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 dark:border-slate-700 dark:bg-slate-900">
                         @error('amount')
                             <p class="mt-1 text-xs text-red-600">{{ $message }}</p>
                         @enderror

@@ -30,6 +30,12 @@ class Show extends Component
 
     public string $amount = '0';
 
+    public array $selectedItems = [];
+
+    public array $itemAmounts = [];
+
+    public array $medicineQuantities = [];
+
     public ?string $transaction_reference = null;
 
     public ?string $payment_idempotency_key = null;
@@ -59,8 +65,64 @@ class Show extends Component
         $this->resetErrorBag();
         $this->invoice = $this->loadInvoice($this->invoice->refresh());
         $this->amount = (string) $this->invoice->balance_amount;
+        $this->selectedItems = [];
+        $this->itemAmounts = [];
+        $this->medicineQuantities = [];
+        foreach ($this->invoice->items as $item) {
+            $balance = max(0, (float) $item->patient_amount - (float) $item->paid_amount);
+            if ($balance > 0 && ! in_array($item->status, ['cancelled', 'reversed', 'non_billable'], true)) {
+                $this->selectedItems[] = (string) $item->id;
+                $this->itemAmounts[$item->id] = number_format($balance, 2, '.', '');
+            }
+        }
         $this->payment_idempotency_key = (string) Str::uuid();
         $this->showPaymentModal = true;
+    }
+
+    public function selectedTotal(): float
+    {
+        return round(collect($this->selectedItems)->unique()->sum(fn ($id) => max(0, (float) ($this->itemAmounts[$id] ?? 0))), 2);
+    }
+
+    public function updatedSelectedItems(): void
+    {
+        $this->amount = number_format($this->selectedTotal(), 2, '.', '');
+    }
+
+    public function updatedItemAmounts(): void
+    {
+        $this->medicineQuantities = [];
+        $this->updatedSelectedItems();
+    }
+
+    public function updatedMedicineQuantities($value, $id): void
+    {
+        $item = $this->invoice->items()->with('prescriptionItem.medicine.dispensingUnit')->find($id);
+        if (! $item?->prescriptionItem || ! is_numeric($value) || (float) $value <= 0) {
+            $this->addError('allocations', 'Enter a positive medicine quantity.');
+
+            return;
+        }
+        $quantity = (float) $value;
+        $prescribed = (float) $item->prescriptionItem->quantity;
+        $decimalAllowed = (bool) $item->prescriptionItem->medicine?->dispensingUnit?->decimal_allowed;
+        if ((! $decimalAllowed && floor($quantity) !== $quantity) || $quantity > $prescribed || $prescribed <= 0) {
+            $this->addError('allocations', 'Enter a valid quantity for this medicine.');
+
+            return;
+        }
+        // Buy additional financial quantity without changing the prescription or charge.
+        $due = (float) $item->patient_amount;
+        $balance = max(0, $due - (float) $item->paid_amount);
+        $pay = ceil(round($due * $quantity / $prescribed, 8) * 100) / 100;
+        if ($pay > $balance) {
+            $this->addError('allocations', 'Quantity exceeds the remaining unpaid quantity.');
+
+            return;
+        }
+        $this->resetErrorBag('allocations');
+        $this->itemAmounts[$id] = number_format($pay, 2, '.', '');
+        $this->updatedSelectedItems();
     }
 
     public function closePaymentModal(): void
@@ -139,17 +201,21 @@ class Show extends Component
             'amount' => ['required', 'numeric', 'min:0.01'],
             'transaction_reference' => ['nullable', 'string', 'max:120'],
             'payment_idempotency_key' => ['required', 'uuid'],
+            'selectedItems' => ['required', 'array', 'min:1'],
+            'selectedItems.*' => ['required', 'integer', 'distinct'],
+            'itemAmounts' => ['required', 'array'],
         ]);
 
         try {
             $invoice = Invoice::query()->forCurrentFacility()->findOrFail($this->invoice->id);
-            $this->ensureInvoiceCanReceivePayment($invoice);
+            // Payment service validates under locks and handles retries before paid-invoice rejection.
 
             $method = PaymentMethod::query()
                 ->forCurrentFacility()
                 ->where('is_active', true)
                 ->findOrFail($data['payment_method_id']);
 
+            $data['allocations'] = collect($this->selectedItems)->unique()->mapWithKeys(fn ($id) => [$id => $this->itemAmounts[$id] ?? 0])->all();
             $data['idempotency_key'] = $data['payment_idempotency_key'];
             $payment = $service->confirmPayment($invoice, $method, (float) $data['amount'], auth()->user(), $data);
 
@@ -170,7 +236,7 @@ class Show extends Component
             $message = $medicineReady
                 ? 'Payment confirmed. Patient is ready for Pharmacy.'
                 : ($this->invoice->payment_status === 'partial'
-                    ? 'Partial payment recorded. Medicine balance remains unpaid.'
+                    ? 'Partial payment recorded. Only the selected items received payment.'
                     : 'Malipo yamethibitishwa'.($receiptNumber ? " na risiti namba {$receiptNumber} imetengenezwa." : '.'));
 
             Notifier::success($message);

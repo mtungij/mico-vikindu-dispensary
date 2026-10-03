@@ -38,6 +38,7 @@ use App\Models\Patient;
 use App\Models\PatientInsuranceMembership;
 use App\Models\PatientPayerProfile;
 use App\Models\PatientQueue;
+use App\Models\PaymentAllocation;
 use App\Models\PaymentMethod;
 use App\Models\PaymentRefund;
 use App\Models\Permission;
@@ -3341,6 +3342,88 @@ class Step6ClinicalWorkflowTest extends TestCase
         $this->actingAs($admin)->get(route('reports.opd.export'))->assertOk();
         $this->actingAs($admin)->get(route('reports.diagnoses.export'))->assertOk();
         $this->actingAs($admin)->get(route('reports.referrals.export'))->assertOk();
+    }
+
+    public function test_mixed_invoice_selective_payment_keeps_partial_consultation_open_and_releases_only_selected_items(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->opdVisit($admin, VisitStatus::InProgress);
+        $clinical = app(ClinicalEncounterService::class);
+        $encounter = $clinical->startEncounter($visit, $admin);
+        $labs = collect([
+            $this->service('Selected lab', 'MIX-LAB-1', 'laboratory_test', $admin),
+            $this->service('Unpaid lab', 'MIX-LAB-2', 'laboratory_test', $admin),
+        ]);
+        $category = LaboratoryTestCategory::factory()->create(['facility_id' => currentFacility()->id, 'created_by' => $admin->id]);
+        $specimen = SpecimenType::factory()->create(['facility_id' => currentFacility()->id, 'created_by' => $admin->id]);
+        foreach ($labs as $lab) {
+            LaboratoryTest::factory()->create([
+                'facility_id' => currentFacility()->id, 'service_id' => $lab->id,
+                'laboratory_test_category_id' => $category->id, 'specimen_type_id' => $specimen->id,
+                'name' => $lab->name, 'code' => $lab->code, 'created_by' => $admin->id,
+            ]);
+        }
+        $order = $clinical->addLabOrder($encounter, ['service_ids' => $labs->pluck('id')->all()], $admin);
+        $labItems = $order->items()->orderBy('id')->get();
+        $medicine = $this->medicine($admin);
+        $medicine->update(['service_id' => $this->service('Mixed medicine', 'MIX-MED', 'medicine', $admin)->id]);
+        $prescription = $clinical->addPrescription($encounter, ['items' => [[
+            'medicine_id' => $medicine->id, 'medication_name' => $medicine->name,
+            'dose' => '1 tablet', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 3,
+        ]]], $admin);
+        $procedure = app(ProcedureOrderService::class)->createOrder($encounter, [
+            'service_id' => $this->service('Mixed procedure', 'MIX-PROC', 'procedure', $admin)->id,
+        ], $admin);
+        $clinical->partialCompleteEncounter($encounter, $admin, ['clinical_summary' => 'Initial treatment; remaining tests pending.']);
+        $invoice = $visit->invoice->refresh();
+        $registration = app(BillingChargeService::class)->addServiceCharge($invoice, $this->service('Registration', 'MIX-REG', 'registration', $admin), $admin);
+        $consultation = app(BillingChargeService::class)->addServiceCharge($invoice, $this->service('Consultation', 'MIX-CONS', 'consultation', $admin), $admin);
+        $medicineItem = $prescription->items()->sole();
+        $cash = PaymentMethod::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Mixed cash', 'code' => 'MIX-CASH', 'type' => 'cash', 'is_cash' => true, 'is_active' => true]);
+        $data = ['allocations' => [$registration->id => 1000, $labItems[0]->invoice_item_id => 1000, $medicineItem->invoice_item_id => 1000], 'idempotency_key' => (string) Str::uuid()];
+        $payment = app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 3000, $admin, $data);
+        $beforeRetry = $payment->allocations()->get()->toArray();
+        $queueCount = $visit->queues()->count();
+        $retry = app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 3000, $admin, $data);
+        $this->assertSame($payment->id, $retry->id);
+        $this->assertSame($beforeRetry, $payment->allocations()->get()->toArray());
+        $this->assertSame($queueCount, $visit->queues()->count());
+        $this->assertSame(1, $invoice->payments()->count());
+        $this->assertSame(3, $payment->allocations()->count());
+        $this->assertTrue($labItems[0]->isFinanciallyCleared());
+        $this->assertFalse($labItems[1]->isFinanciallyCleared());
+        $this->assertSame('awaiting_payment', $labItems[1]->refresh()->status);
+        $this->assertSame('1.000', app(MedicineFinancialClearanceService::class)->forItem($medicineItem->refresh())['paid_quantity']);
+        $this->assertSame('awaiting_payment', $procedure->refresh()->status->value);
+        $this->assertSame('0.00', $consultation->refresh()->paid_amount);
+        $this->assertSame('partially_paid', $invoice->refresh()->status);
+        $this->assertSame('5000.00', $invoice->balance_amount);
+        $this->assertSame('in_progress', $encounter->refresh()->status->value);
+        $this->assertNull($encounter->completed_at);
+        $this->assertNotNull($encounter->partial_completed_at);
+        $this->assertFalse($encounter->isReadOnly());
+        // The previously captured invoice/charge is stale: the lock-time balance must win.
+        try {
+            app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 1000, $admin, ['allocations' => [$registration->id => 1000]]);
+            $this->fail('A stale fully paid item accepted another payment.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('allocations', $exception->errors());
+        }
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 1000, $admin, ['allocations' => [$procedure->invoice_item_id => 1000]]);
+        $this->assertSame('ordered', $procedure->refresh()->status->value);
+        $this->assertFalse($labItems[1]->isFinanciallyCleared());
+        $this->assertSame('4000.00', $invoice->refresh()->balance_amount);
+        $this->assertSame($beforeRetry, $payment->allocations()->get()->toArray());
+        $this->assertSame(1, Invoice::query()->where('visit_id', $visit->id)->count());
+        $this->assertSame(6, $invoice->items()->count());
+        $this->assertSame(2, $invoice->payments()->count());
+        $this->assertSame(4, PaymentAllocation::query()->where('invoice_id', $invoice->id)->count());
+        foreach (['LAB', 'PHA'] as $code) {
+            $this->assertSame(1, $visit->queues()->whereHas('department', fn ($query) => $query->where('code', $code))->count());
+        }
+        $this->assertNull($encounter->refresh()->completed_at);
+        $clinical->saveDraft($encounter, ['treatment_plan' => 'Doctor resumed this consultation.'], $admin);
+        $this->assertSame('Doctor resumed this consultation.', $encounter->refresh()->treatment_plan);
     }
 
     public function test_partial_consultation_stays_editable_and_can_be_completed_later(): void

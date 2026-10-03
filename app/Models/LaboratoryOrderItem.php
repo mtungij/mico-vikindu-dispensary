@@ -18,6 +18,29 @@ class LaboratoryOrderItem extends Model
         return ['result_entered_at' => 'datetime', 'result_verified_at' => 'datetime', 'result_released_at' => 'datetime', 'terminal_decided_at' => 'datetime'];
     }
 
+    public function scopeFinanciallyCleared($query)
+    {
+        return $query->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])
+            ->whereHas('order', fn ($order) => $order->where('status', '!=', 'cancelled'))
+            ->where(function ($eligible) {
+                $eligible->whereHas('invoiceItem', fn ($charge) => $charge
+                    ->whereNotIn('status', ['cancelled', 'reversed', 'non_billable'])
+                    ->whereColumn('paid_amount', '>=', 'patient_amount')
+                    ->where(fn ($authorization) => $authorization
+                        ->whereNull('coverage_snapshot->requires_pre_authorization')
+                        ->orWhere('coverage_snapshot->requires_pre_authorization', false)
+                        ->orWhereNotNull('insurance_pre_authorization_id')))
+                    // Preserve legacy orders without a linked charge; never infer cash clearance from a partial invoice.
+                    ->orWhere(fn ($legacy) => $legacy->whereNull('invoice_item_id')
+                        ->whereHas('order', fn ($order) => $order->whereIn('payment_status', ['paid', 'covered', 'waived', 'not_required'])));
+            });
+    }
+
+    public function isFinanciallyCleared(): bool
+    {
+        return static::query()->whereKey($this->id)->financiallyCleared()->exists();
+    }
+
     public function order(): BelongsTo
     {
         return $this->belongsTo(LaboratoryOrder::class, 'laboratory_order_id');

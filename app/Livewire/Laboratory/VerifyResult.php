@@ -27,6 +27,7 @@ class VerifyResult extends Component
             Gate::authorize('verify', $laboratoryResult);
         }
 
+        abort_unless($laboratoryResult->orderItem->isFinanciallyCleared(), 422, 'Awaiting Payment');
         $this->laboratoryResult = $laboratoryResult;
         $this->reloadResult();
     }
@@ -50,7 +51,7 @@ class VerifyResult extends Component
 
     public function release(LaboratoryResultReleaseService $service): void
     {
-        $verifiedResults = $this->laboratoryResult->order->items()
+        $verifiedResults = $this->laboratoryResult->order->items()->financiallyCleared()
             ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])
             ->with(['results' => fn ($query) => $query->latest('result_version')])
             ->get()

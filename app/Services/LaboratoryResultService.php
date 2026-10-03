@@ -99,7 +99,7 @@ class LaboratoryResultService
             403,
             'Order hii ni ya facility nyingine.',
         );
-        $this->paymentGuard->ensureProcessable($item->order, $actor, $submit ? 'submit_results' : 'result_entry');
+        $this->paymentGuard->ensureItemProcessable($item, $actor, $submit ? 'submit_results' : 'result_entry');
 
         if (! $item->laboratory_test_id) {
             throw ValidationException::withMessages(['laboratory_test_id' => 'Order item haina configured laboratory test.']);

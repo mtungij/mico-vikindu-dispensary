@@ -22,27 +22,33 @@ class LaboratoryPaymentReleaseService
         DB::transaction(function () use ($invoice, $actor): void {
             $invoice = Invoice::query()->lockForUpdate()->findOrFail($invoice->id);
 
-            if ((float) $invoice->balance_amount > 0 || $invoice->payment_status !== 'paid') {
-                throw ValidationException::withMessages([
-                    'invoice' => 'Laboratory orders require full payment before release.',
-                ]);
-            }
-
             $orders = LaboratoryOrder::query()
                 ->where('facility_id', $invoice->facility_id)
                 ->whereHas('items.invoiceItem', fn ($query) => $query->where('invoice_id', $invoice->id))
-                ->where('payment_status', ClinicalPaymentStatus::Pending->value)
                 ->whereNotIn('status', [ClinicalOrderStatus::Completed->value, ClinicalOrderStatus::Cancelled->value])
                 ->lockForUpdate()
                 ->get();
 
             foreach ($orders as $order) {
+                $items = $order->items()->lockForUpdate()->get();
+                $ready = $order->items()->financiallyCleared()->pluck('id');
+                $newlyReady = $items->whereIn('id', $ready)->whereNull('sample_id')
+                    ->whereIn('status', ['ordered', 'awaiting_payment', 'pending_collection']);
+                $active = $items->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error']);
+                $allCleared = $active->isNotEmpty() && $active->every(fn ($item) => $ready->contains($item->id));
                 $order->update([
-                    'payment_status' => ClinicalPaymentStatus::Paid,
-                    'status' => ClinicalOrderStatus::Ordered,
+                    'payment_status' => $allCleared
+                        ? (in_array($order->payment_status, [ClinicalPaymentStatus::Covered, ClinicalPaymentStatus::Waived, ClinicalPaymentStatus::NotRequired], true)
+                            ? $order->payment_status : ClinicalPaymentStatus::Paid)
+                        : ClinicalPaymentStatus::Pending,
+                    'status' => $ready->isNotEmpty() && $order->status === ClinicalOrderStatus::AwaitingPayment
+                        ? ClinicalOrderStatus::Ordered : $order->status,
                     'updated_by' => $actor->id,
                 ]);
-                $order->items()->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error', 'completed'])->update(['status' => 'ready_for_collection']);
+                if ($newlyReady->isEmpty()) {
+                    continue;
+                }
+                $order->items()->whereIn('id', $newlyReady->pluck('id'))->update(['status' => 'ready_for_collection']);
                 $laboratory = Department::query()
                     ->where('facility_id', $order->facility_id)
                     ->where('code', 'LAB')
@@ -79,7 +85,7 @@ class LaboratoryPaymentReleaseService
                 'visit_id' => $order->visit_id,
                 'invoice_id' => $invoice->id,
                 'laboratory_order_id' => $order->id,
-                'payment_status' => ClinicalPaymentStatus::Paid->value,
+                'payment_status' => $order->payment_status->value,
                 'status' => ClinicalOrderStatus::Ordered->value,
             ],
             'ip_address' => request()?->ip(),

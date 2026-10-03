@@ -35,7 +35,7 @@
                 @foreach($order->items as $item)
                     <div class="rounded-md border border-slate-200 p-3 dark:border-slate-700">
                         <strong>{{ $item->test_name_snapshot }}</strong>
-                        <p class="text-sm text-slate-500">Status: {{ $item->status }} · Payment: {{ $item->invoiceItem?->paid_amount > 0 ? 'Paid/partial' : ($item->invoiceItem?->status ?? 'No charge') }} · Result: {{ $item->result_status ?? 'Pending' }}</p>
+                        <p class="text-sm text-slate-500">Status: {{ $item->status }} · Payment: {{ $item->isFinanciallyCleared() ? 'Ready / Cleared' : 'Awaiting Payment' }} · Result: {{ $item->result_status ?? 'Pending' }}</p>
                         @if($item->terminal_decided_at)
                             <p class="mt-1 text-xs text-slate-500">{{ \App\Services\LaboratoryOrderItemDecisionService::REASONS[$item->terminal_reason_code] ?? $item->terminal_reason_code }}{{ $item->terminal_reason ? ': '.$item->terminal_reason : '' }} · {{ $item->terminalDecider?->name }} · {{ $item->terminal_decided_at->format('d/m/Y H:i') }}</p>
                         @elseif(! in_array($item->status, ['completed', 'cancelled', 'not_performed', 'entered_in_error'], true) && ! in_array($item->result_status, ['pending_verification', 'verified', 'released'], true) && $item->results->isEmpty())
@@ -77,9 +77,9 @@
                 @foreach($order->results as $result)
                     <div class="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 p-3 dark:border-slate-700">
                         <a href="{{ route('laboratory.results.print', $result) }}" class="block">{{ $result->test?->name }} · {{ $result->result_status->value }} · {{ $result->abnormal_flag?->value }}</a>
-                        @if($result->result_status->value === 'pending_verification' && auth()->user()->can('laboratory-results.verify'))
+                        @if($result->orderItem->isFinanciallyCleared() && $result->result_status->value === 'pending_verification' && auth()->user()->can('laboratory-results.verify'))
                             <a href="{{ route('laboratory.results.verify', $result) }}" class="text-sm font-semibold text-primary">Verify Results</a>
-                        @elseif($result->result_status->value === 'verified' && auth()->user()->can('laboratory-results.release'))
+                        @elseif($result->orderItem->isFinanciallyCleared() && $result->result_status->value === 'verified' && auth()->user()->can('laboratory-results.release'))
                             <a href="{{ route('laboratory.results.verify', $result) }}" class="rounded-md bg-amber-100 px-3 py-2 text-sm font-semibold text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">Release Results</a>
                         @endif
                     </div>

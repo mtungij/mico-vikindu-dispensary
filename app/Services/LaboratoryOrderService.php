@@ -63,6 +63,7 @@ class LaboratoryOrderService
             $invoice = $this->resolveInvoice($order, $actor);
             $this->addItems($order, $invoice, $services, $actor);
             $invoice = $this->invoiceStatuses->recalculate($invoice);
+            app(LaboratoryPaymentReleaseService::class)->releaseForInvoice($invoice, $actor);
             if ((float) $invoice->balance_amount <= 0) {
                 $this->activateLaboratoryQueue($order, $actor);
             } else {
@@ -165,6 +166,7 @@ class LaboratoryOrderService
             ]);
             $this->addItems($order, $invoice, $services, $actor);
             $invoice = $this->invoiceStatuses->recalculate($invoice);
+            app(LaboratoryPaymentReleaseService::class)->releaseForInvoice($invoice, $actor);
 
             $this->audit($actor, 'direct_laboratory_order_created', $order, [
                 'facility_id' => $order->facility_id,
@@ -200,7 +202,7 @@ class LaboratoryOrderService
                 'insurance_amount' => $item->insurance_amount,
                 'patient_amount' => $item->patient_amount,
                 'priority' => $order->priority,
-                'status' => $order->payment_status === ClinicalPaymentStatus::Pending ? 'awaiting_payment' : 'ready_for_collection',
+                'status' => 'awaiting_payment',
                 'invoice_item_id' => $item->id,
                 'created_by' => $actor->id,
             ]);

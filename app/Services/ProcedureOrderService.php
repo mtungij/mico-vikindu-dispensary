@@ -149,17 +149,18 @@ class ProcedureOrderService
     {
         DB::transaction(function () use ($invoice, $actor): void {
             $invoice = $this->invoices->calculateTotals($invoice);
-            if ((float) $invoice->balance_amount > 0 || $invoice->payment_status !== 'paid') {
-                return;
-            }
-            ClinicalProcedureOrder::query()->where('facility_id', $invoice->facility_id)->where('visit_id', $invoice->visit_id)->where('status', ProcedureOrderStatus::AwaitingPayment)->with(['service', 'visit'])->lockForUpdate()->get()->each(function ($order) use ($actor, $invoice): void {
-                $order->update(['status' => ProcedureOrderStatus::Ordered, 'updated_by' => $actor->id]);
-                ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_payment_confirmed', 'subject_type' => $order::class, 'subject_id' => $order->id, 'new_values' => ['invoice_id' => $invoice->id]]);
-                if ($order->service?->department && $order->service->department->queue_enabled) {
-                    $this->workflow->createQueue($order->visit, $order->service->department, $actor, VisitStatus::AwaitingDepartment, 'Procedure released after full payment', true, false);
-                }
-                ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_released', 'subject_type' => $order::class, 'subject_id' => $order->id]);
-            });
+            ClinicalProcedureOrder::query()->where('facility_id', $invoice->facility_id)->where('visit_id', $invoice->visit_id)->where('status', ProcedureOrderStatus::AwaitingPayment)
+                ->whereHas('invoiceItem', fn ($charge) => $charge->where('invoice_id', $invoice->id)
+                    ->whereNotIn('status', ['cancelled', 'reversed', 'non_billable'])
+                    ->whereColumn('paid_amount', '>=', 'patient_amount'))
+                ->with(['service', 'visit'])->lockForUpdate()->get()->each(function ($order) use ($actor, $invoice): void {
+                    $order->update(['status' => ProcedureOrderStatus::Ordered, 'updated_by' => $actor->id]);
+                    ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_payment_confirmed', 'subject_type' => $order::class, 'subject_id' => $order->id, 'new_values' => ['invoice_id' => $invoice->id]]);
+                    if ($order->service?->department && $order->service->department->queue_enabled) {
+                        $this->workflow->createQueue($order->visit, $order->service->department, $actor, VisitStatus::AwaitingDepartment, 'Procedure item payment cleared', true, false);
+                    }
+                    ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_released', 'subject_type' => $order::class, 'subject_id' => $order->id]);
+                });
         });
     }
 

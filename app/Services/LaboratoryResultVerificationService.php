@@ -14,6 +14,7 @@ class LaboratoryResultVerificationService
     {
         return DB::transaction(function () use ($result, $actor) {
             $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
+            app(LaboratoryPaymentGuard::class)->ensureItemProcessable($result->orderItem, $actor, 'verify_result');
             if (in_array($result->result_status, [LaboratoryResultStatus::Verified, LaboratoryResultStatus::Released], true)) {
                 return $result->refresh();
             }

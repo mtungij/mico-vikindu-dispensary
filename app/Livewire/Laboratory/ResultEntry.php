@@ -135,7 +135,8 @@ class ResultEntry extends Component
 
     public function eligibleForEntry(LaboratoryOrderItem $item): bool
     {
-        return $item->laboratory_test_id !== null
+        return $item->isFinanciallyCleared()
+            && $item->laboratory_test_id !== null
             && $item->sample?->sample_status === LaboratorySampleStatus::Accepted
             && in_array($item->status, ['sample_accepted', 'processing'], true)
             && ($item->result_status === null || in_array($item->result_status, ['draft', 'entered'], true));

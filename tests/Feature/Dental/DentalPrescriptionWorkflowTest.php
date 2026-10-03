@@ -6,6 +6,7 @@ use App\Enums\FacilityType;
 use App\Enums\OwnershipType;
 use App\Enums\ServiceType;
 use App\Enums\VisitStatus;
+use App\Livewire\Billing\Invoices\Show;
 use App\Livewire\Dental\Consultation as DentalConsultation;
 use App\Livewire\Pharmacy\Queue as PharmacyQueue;
 use App\Models\Department;
@@ -46,6 +47,7 @@ use Database\Seeders\PermissionSeeder;
 use Database\Seeders\ServiceCategorySeeder;
 use Database\Seeders\StockLocationSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Livewire\Livewire;
 use Tests\TestCase;
@@ -263,6 +265,83 @@ class DentalPrescriptionWorkflowTest extends TestCase
         $this->assertSame($membership->id, $invoiceItem->patient_insurance_membership_id);
         $this->assertSame('prescribed', $prescription->refresh()->status->value);
         $this->assertSame(1, $this->activePharmacyQueues($visit));
+    }
+
+    public function test_production_selective_medicine_payment_clears_only_chosen_lines_and_stock_changes_only_on_dispense(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $encounter = $this->preparedEncounter($visit, $admin);
+        $medicines = collect([
+            $this->medicine($admin, 'Amoxicillin', 'SELECT-AMOX', 3000),
+            $this->medicine($admin, 'Metronidazole', 'SELECT-MET', 2000),
+            $this->medicine($admin, 'Paracetamol', 'SELECT-PARA', 1000),
+            $this->medicine($admin, 'Diclofenac', 'SELECT-DICLO', 4000),
+        ]);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter->clinicalEncounter, [
+            'items' => $medicines->map(fn ($medicine) => $this->itemData($medicine, 1))->all(),
+        ], $admin);
+        app(DentalEncounterService::class)->complete($encounter, $admin);
+        $items = $prescription->items()->orderBy('id')->get();
+        $location = StockLocation::query()->forCurrentFacility()->where('is_dispensing_location', true)->where('is_receiving_location', true)->firstOrFail();
+        $supplier = Supplier::query()->create(['facility_id' => currentFacility()->id, 'name' => 'Selective Supplier', 'code' => 'SELECT-SUP', 'phone_primary' => '0712000000', 'supplier_type' => 'pharmaceutical_wholesaler', 'is_active' => true]);
+        foreach ($medicines as $index => $medicine) {
+            $this->receive($admin, $medicine, $supplier, $location, 'SELECT-'.$index, today()->addMonths(6)->toDateString(), 10);
+        }
+        $invoice = $visit->invoice->refresh();
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        $data = ['allocations' => [$items[3]->invoice_item_id => 4000, $items[2]->invoice_item_id => 1000], 'idempotency_key' => (string) Str::uuid()];
+        $payment = app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 5000, $admin, $data);
+        $retry = app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 5000, $admin, $data);
+        $this->assertSame($payment->id, $retry->id);
+        $this->assertSame(2, $payment->allocations()->count());
+        foreach ($items as $index => $item) {
+            $this->assertSame($index >= 2 ? '1.000' : '0.000', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['remaining_paid_quantity']);
+        }
+        $this->assertSame(0, StockMovement::query()->where('movement_type', 'dispensing')->count());
+        $this->assertSame(40.0, (float) MedicineBatch::query()->sum('available_quantity'));
+        try {
+            app(PharmacyDispensingService::class)->dispense($prescription, [['prescription_item_id' => $items[0]->id, 'quantity' => 1]], $location, $admin);
+            $this->fail('Unselected medicine was dispensed.');
+        } catch (ValidationException $exception) {
+            $this->assertArrayHasKey('quantity', $exception->errors());
+        }
+        app(PharmacyDispensingService::class)->dispense($prescription, [
+            ['prescription_item_id' => $items[3]->id, 'quantity' => 1],
+            ['prescription_item_id' => $items[2]->id, 'quantity' => 1],
+        ], $location, $admin);
+        $this->assertSame(38.0, (float) MedicineBatch::query()->sum('available_quantity'));
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 3000, $admin, ['allocations' => [$items[0]->invoice_item_id => 3000]]);
+        $this->assertSame('1.000', app(MedicineFinancialClearanceService::class)->forItem($items[0]->refresh())['remaining_paid_quantity']);
+        $this->assertSame('0.000', app(MedicineFinancialClearanceService::class)->forItem($items[1]->refresh())['remaining_paid_quantity']);
+        $this->assertSame('0.000', app(MedicineFinancialClearanceService::class)->forItem($items[3]->refresh())['remaining_paid_quantity']);
+        app(PharmacyDispensingService::class)->dispense($prescription, [['prescription_item_id' => $items[0]->id, 'quantity' => 1]], $location, $admin);
+        $this->assertSame(37.0, (float) MedicineBatch::query()->sum('available_quantity'));
+        $this->assertSame(3.0, (float) StockMovement::query()->where('movement_type', 'dispensing')->sum('quantity'));
+        $this->assertSame('2000.00', $invoice->refresh()->balance_amount);
+        $this->assertSame(1, $this->activePharmacyQueues($visit));
+        $this->assertDatabaseCount('prescriptions', 1);
+        $this->assertDatabaseCount('invoice_items', 4);
+    }
+
+    public function test_cashier_can_pay_for_ten_of_thirty_tablets_without_rewriting_billed_quantity(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $visit = $this->visit($admin);
+        $encounter = $this->preparedEncounter($visit, $admin);
+        $medicine = $this->medicine($admin, 'Amoxicillin quantity', 'SELECT-QTY', 100);
+        $prescription = app(ClinicalEncounterService::class)->addPrescription($encounter->clinicalEncounter, ['items' => [$this->itemData($medicine, 30)]], $admin);
+        app(DentalEncounterService::class)->complete($encounter, $admin);
+        $item = $prescription->items()->sole();
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        Livewire::test(Show::class, ['invoice' => $visit->invoice])
+            ->call('openPaymentModal')->set('medicineQuantities.'.$item->invoice_item_id, '10')
+            ->assertSet('amount', '1000.00')->set('payment_method_id', $cash->id)
+            ->call('confirmPayment')->assertHasNoErrors();
+        $this->assertSame('10.000', app(MedicineFinancialClearanceService::class)->forItem($item->refresh())['remaining_paid_quantity']);
+        $this->assertSame('30.000', $item->invoiceItem->quantity);
+        $this->assertSame('3000.00', $item->invoiceItem->patient_amount);
+        $this->assertSame('1000.00', $item->invoiceItem->paid_amount);
     }
 
     private function bootstrappedFacility(): User

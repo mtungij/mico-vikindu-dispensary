@@ -567,6 +567,55 @@ class LaboratoryPaymentWorkflowTest extends TestCase
         $this->assertDatabaseCount('payments', 0);
     }
 
+    public function test_legacy_paid_lab_without_item_allocations_keeps_clearance_without_backfill_or_clearing_new_tests(): void
+    {
+        [$admin, $facility] = $this->bootstrap();
+        $doctor = $this->staffUser('doctor', $facility);
+        $cashier = $this->staffUser('cashier', $facility);
+        $encounter = $this->encounter($doctor, 'cash');
+        $service = $this->laboratoryService('Historical paid test', 'LEGACY-PAID', 'cash', 5000, $admin);
+        $this->actingAs($doctor);
+        $order = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => [$service->id]], $doctor);
+        $item = $order->items()->sole();
+        $invoice = $item->invoiceItem->invoice;
+        $cash = PaymentMethod::query()->where('code', 'CASH')->firstOrFail();
+        // Reproduce a legacy record, not a new payment through the new allocation service.
+        $legacy = Payment::query()->create([
+            'facility_id' => $facility->id, 'patient_id' => $invoice->patient_id,
+            'visit_id' => $invoice->visit_id, 'invoice_id' => $invoice->id,
+            'payment_number' => 'LEGACY-001', 'payment_method_id' => $cash->id,
+            'amount' => 5000, 'currency' => 'TZS', 'payment_date' => now(),
+            'status' => 'confirmed', 'received_by' => $cashier->id,
+            'confirmed_by' => $cashier->id, 'confirmed_at' => now(),
+        ]);
+        $order->update(['payment_status' => 'paid', 'status' => 'ordered']);
+        $item->update(['status' => 'ready_for_collection']);
+        $originalPayment = $legacy->fresh()->getAttributes();
+        $this->assertTrue($item->isFinanciallyCleared());
+        $laterServices = collect([
+            $this->laboratoryService('New selected test', 'LEGACY-NEW-1', 'cash', 1000, $admin),
+            $this->laboratoryService('New unpaid test', 'LEGACY-NEW-2', 'cash', 1000, $admin),
+        ]);
+        $laterOrder = app(ClinicalEncounterService::class)->addLabOrder($encounter, ['service_ids' => $laterServices->pluck('id')->all()], $doctor);
+        $laterItems = $laterOrder->items()->orderBy('id')->get();
+        $this->assertFalse($laterItems[0]->isFinanciallyCleared());
+        $this->assertFalse($laterItems[1]->isFinanciallyCleared());
+        $this->actingAs($cashier);
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $cash, 1000, $cashier, [
+            'allocations' => [$laterItems[0]->invoice_item_id => 1000],
+        ]);
+        $this->assertTrue($item->isFinanciallyCleared());
+        $this->assertTrue($laterItems[0]->isFinanciallyCleared());
+        $this->assertFalse($laterItems[1]->isFinanciallyCleared());
+        $this->assertSame('awaiting_payment', $laterItems[1]->refresh()->status);
+        $this->assertSame($originalPayment, $legacy->fresh()->getAttributes());
+        $this->assertSame(0, $legacy->allocations()->count());
+        $this->assertSame('0.00', $item->invoiceItem->refresh()->paid_amount);
+        $this->assertSame('6000.00', $invoice->refresh()->paid_amount);
+        $this->assertSame('1000.00', $invoice->balance_amount);
+        $this->assertDatabaseCount('payment_allocations', 1);
+    }
+
     /** @return array{User, Facility} */
     private function bootstrap(): array
     {

@@ -30,6 +30,17 @@ class LaboratoryOrderItem extends Model
                         ->whereNull('coverage_snapshot->requires_pre_authorization')
                         ->orWhere('coverage_snapshot->requires_pre_authorization', false)
                         ->orWhereNotNull('insurance_pre_authorization_id')))
+                    // Preserve an already-paid legacy order backed by a confirmed payment with no item allocations.
+                    // New payment confirmations always identify their allocation mode; new orders remain pending.
+                    ->orWhere(fn ($legacy) => $legacy
+                        ->whereHas('order', fn ($order) => $order->where('payment_status', 'paid'))
+                        ->whereHas('invoiceItem', fn ($charge) => $charge
+                            ->whereNotIn('status', ['cancelled', 'reversed', 'non_billable'])
+                            ->whereHas('invoice.payments', fn ($payment) => $payment
+                                ->where('status', 'confirmed')
+                                ->whereNull('metadata->allocation_mode')
+                                ->whereColumn('payments.payment_date', '>=', 'invoice_items.created_at')
+                                ->whereDoesntHave('allocations', fn ($allocation) => $allocation->whereNotNull('invoice_item_id')))))
                     // Preserve legacy orders without a linked charge; never infer cash clearance from a partial invoice.
                     ->orWhere(fn ($legacy) => $legacy->whereNull('invoice_item_id')
                         ->whereHas('order', fn ($order) => $order->whereIn('payment_status', ['paid', 'covered', 'waived', 'not_required'])));

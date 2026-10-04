@@ -776,8 +776,14 @@ class Step7LaboratoryManagementTest extends TestCase
             ['service_ids' => [$firstTest->service_id, $secondTest->service_id]],
             $admin,
         );
-        $order->update(['status' => 'ordered', 'payment_status' => 'paid']);
-        $order->items()->update(['status' => 'ready_for_collection']);
+        $invoice = $order->visit->invoice;
+        $method = PaymentMethod::query()->create([
+            'facility_id' => currentFacility()->id, 'name' => 'Collection cash', 'code' => 'COLLECT-CASH',
+            'type' => 'cash', 'is_cash' => true, 'is_active' => true,
+        ]);
+        app(PaymentConfirmationService::class)->confirmPayment($invoice, $method, (float) $invoice->balance_amount, $admin, [
+            'allocations' => $invoice->items->mapWithKeys(fn ($item) => [$item->id => $item->patient_amount])->all(),
+        ]);
         $firstItem = $order->items()->where('laboratory_test_id', $firstTest->id)->firstOrFail();
         $secondItem = $order->items()->where('laboratory_test_id', $secondTest->id)->firstOrFail();
 

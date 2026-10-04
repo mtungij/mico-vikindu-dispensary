@@ -3371,8 +3371,10 @@ class Step6ClinicalWorkflowTest extends TestCase
             'medicine_id' => $medicine->id, 'medication_name' => $medicine->name,
             'dose' => '1 tablet', 'frequency' => 'TDS', 'duration_value' => 3, 'duration_unit' => 'days', 'quantity' => 3,
         ]]], $admin);
+        $procedureService = $this->service('Mixed procedure', 'MIX-PROC', 'procedure', $admin);
+        $procedureService->update(['department_id' => $encounter->department_id]);
         $procedure = app(ProcedureOrderService::class)->createOrder($encounter, [
-            'service_id' => $this->service('Mixed procedure', 'MIX-PROC', 'procedure', $admin)->id,
+            'service_id' => $procedureService->id,
         ], $admin);
         $clinical->partialCompleteEncounter($encounter, $admin, ['clinical_summary' => 'Initial treatment; remaining tests pending.']);
         $invoice = $visit->invoice->refresh();

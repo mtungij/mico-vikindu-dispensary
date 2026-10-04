@@ -203,8 +203,12 @@ class PaymentConfirmationService
         if ($total !== (int) round($amount * 100)) {
             throw ValidationException::withMessages(['allocations' => 'Selected total must equal the amount received.']);
         }
-        $items = $invoice->items()->where('facility_id', $invoice->facility_id)
-            ->whereIn('id', array_keys($allocations))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        $items = $invoice->items()
+            ->whereIn('id', array_keys($allocations))
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy('id');
         if ($items->count() !== count($allocations)) {
             throw ValidationException::withMessages(['allocations' => 'Every selected item must belong to this invoice and facility.']);
         }

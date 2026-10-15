@@ -50,7 +50,7 @@
                             $medicineFinancial = $item->prescriptionItem ? app(\App\Services\MedicineFinancialClearanceService::class)->forItem($item->prescriptionItem) : null;
                         @endphp
                         <tr class="border-t border-slate-100 dark:border-slate-800">
-                            <td class="px-3 py-2">{{ $item->description_snapshot ?? $item->description }}@if($medicineFinancial)<div class="text-xs text-slate-500">Unit price: {{ number_format((float) $medicineFinancial['billed_unit_price'], 2) }}</div>@endif</td>
+                            <td class="px-3 py-2">{{ $item->description_snapshot ?? $item->description }}@if($medicineFinancial)<div class="text-xs text-slate-500">Unit price: {{ number_format((float) $medicineFinancial['billed_unit_price'], 2) }}</div>@endif@if($item->prescriptionItem)<x-medication-directions :item="$item->prescriptionItem" />@endif</td>
                             <td class="px-3 py-2">{{ $item->quantity }}</td>
                             <td class="px-3 py-2">{{ number_format($item->gross_amount ?: $item->total_amount, 2) }}</td>
                             <td class="px-3 py-2">{{ number_format($item->patient_amount, 2) }}</td>
@@ -116,7 +116,7 @@
                                         $selected = in_array((string) $item->id, array_map('strval', $selectedItems), true);
                                     @endphp
                                     <tr wire:key="payment-item-{{ $item->id }}" class="border-b border-slate-200">
-                                        <td class="py-2"><label class="flex items-center gap-2"><input type="checkbox" wire:model.live="selectedItems" value="{{ $item->id }}" @disabled($inactive || $outstanding <= 0)><span>{{ $item->description }}<span class="block text-xs text-slate-500">{{ $inactive ? ucfirst($item->status) : ($outstanding <= 0 ? 'PAID / CLEARED' : ((float) $item->paid_amount > 0 ? 'PARTIALLY PAID' : 'UNPAID')) }}</span></span></label></td>
+                                        <td class="py-2"><label class="flex items-center gap-2"><input type="checkbox" wire:model.live="selectedItems" value="{{ $item->id }}" @disabled($inactive || $outstanding <= 0)><span>{{ $item->description }}<span class="block text-xs text-slate-500">{{ $inactive ? ucfirst($item->status) : ($outstanding <= 0 ? 'PAID / CLEARED' : ((float) $item->paid_amount > 0 ? 'PARTIALLY PAID' : 'UNPAID')) }}</span></span></label>@if($item->prescriptionItem)<x-medication-directions :item="$item->prescriptionItem" />@endif</td>
                                         <td>{{ number_format($item->patient_amount, 2) }}</td>
                                         <td>{{ number_format($item->paid_amount, 2) }}</td>
                                         <td>{{ number_format($outstanding, 2) }}</td>

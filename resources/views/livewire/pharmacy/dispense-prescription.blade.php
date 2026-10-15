@@ -2,7 +2,7 @@
     <x-card>
         <div class="overflow-x-auto">
             <table class="min-w-full text-sm">
-                <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Medicine</th><th>Prescribed</th><th>Paid / Cleared</th><th>Dispensed</th><th>Can Dispense</th><th>Awaiting Payment</th><th>Stock</th><th>Quantity</th><th>Unavailable / Declined</th></tr></thead>
+                <thead><tr class="text-left text-xs uppercase text-slate-500"><th class="py-3">Medicine</th><th>Prescribed</th><th>Paid / Cleared</th><th>Dispensed</th><th>Remaining Dispensable</th><th>Awaiting Payment</th><th>Stock</th><th>Quantity</th><th>Unavailable / Declined</th></tr></thead>
                 <tbody>
                 @foreach($form->lines as $i => $line)
                     @php
@@ -20,12 +20,13 @@
                                     <option value="{{ $medicine->id }}">{{ $medicine->name }}</option>
                                 @endforeach
                             </select>
+                            <x-medication-directions :item="$item" />
                             <div class="mt-1 text-xs text-slate-500">Billed unit: {{ number_format((float) $financial['billed_unit_price'], 2) }}</div>
                         </td>
                         <td>{{ rtrim(rtrim($financial['prescribed_quantity'], '0'), '.') }}</td>
                         <td>{{ rtrim(rtrim($financial['paid_quantity'], '0'), '.') }}</td>
                         <td>{{ rtrim(rtrim($financial['dispensed_quantity'], '0'), '.') }}</td>
-                        <td class="font-semibold text-emerald-700">{{ rtrim(rtrim(number_format($maximum, 3, '.', ''), '0'), '.') }}</td>
+                        <td class="font-semibold text-emerald-700 dark:text-emerald-400">{{ rtrim(rtrim(number_format($maximum, 3, '.', ''), '0'), '.') }}</td>
                         <td>{{ rtrim(rtrim($financial['unpaid_quantity'], '0'), '.') }}</td>
                         <td>{{ rtrim(rtrim(number_format($stock, 3, '.', ''), '0'), '.') }}</td>
                         <td><input type="number" min="0" max="{{ $maximum }}" step="{{ $item?->medicine?->dispensingUnit?->decimal_allowed ? '0.001' : '1' }}" wire:model="form.lines.{{ $i }}.quantity" class="w-24 rounded-md border-slate-300 dark:border-slate-700 dark:bg-slate-900"></td>

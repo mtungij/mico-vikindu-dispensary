@@ -5,6 +5,8 @@ namespace Tests\Feature\Pharmacy;
 use App\Enums\FacilityType;
 use App\Enums\OwnershipType;
 use App\Enums\ServiceType;
+use App\Livewire\Billing\Invoices\Show;
+use App\Livewire\Observation\AdmissionShow;
 use App\Livewire\Pharmacy\DispensePrescription as DispensePrescriptionComponent;
 use App\Livewire\Pharmacy\Medicines\Index as MedicineIndex;
 use App\Livewire\Pharmacy\OpeningStock;
@@ -18,6 +20,7 @@ use App\Models\Invoice;
 use App\Models\Medicine;
 use App\Models\MedicineBatch;
 use App\Models\MedicineUnit;
+use App\Models\ObservationAdmission;
 use App\Models\Patient;
 use App\Models\PatientQueue;
 use App\Models\PaymentMethod;
@@ -798,6 +801,88 @@ class Step8PharmacyInventoryTest extends TestCase
         $this->artisan('pharmacy:refresh-expiry-statuses')->assertSuccessful();
 
         $this->assertSame('expired', $batch->refresh()->status->value);
+    }
+
+    public function test_doctor_directions_are_consistent_in_billing_dispensing_and_nursing_without_writes(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+        [$medicine, $supplier, $location] = $this->catalog();
+        $batch = $this->receiveBatch($admin, $medicine, $supplier, $location, 'DIRECTIONS', today()->addYear()->toDateString(), 20);
+        $prescription = $this->prescription($admin, $medicine, 10);
+        $item = $prescription->items()->sole();
+        $invoice = $prescription->visit->invoice;
+        $admission = ObservationAdmission::factory()->create([
+            'facility_id' => $prescription->facility_id, 'patient_id' => $prescription->patient_id,
+            'visit_id' => $prescription->visit_id, 'admitted_by' => $admin->id, 'created_by' => $admin->id,
+        ]);
+        $nurse = User::factory()->create();
+        $nurse->givePermissionTo('observation.view-admission');
+        $movementCount = StockMovement::count();
+
+        foreach ([
+            ['strength' => '250 mg', 'dose' => '2 tablets', 'route' => 'PO', 'frequency' => 'PRN', 'duration_value' => 5, 'duration_unit' => 'days', 'instructions' => 'Take after food. Maximum twice daily.', 'indication' => 'For severe pain'],
+            ['strength' => null, 'dose' => '', 'route' => null, 'frequency' => 'When symptoms recur', 'duration_value' => 0, 'duration_unit' => '', 'instructions' => 'Legacy directions: half a tablet at bedtime.', 'indication' => null],
+            ['strength' => null, 'dose' => '', 'route' => null, 'frequency' => '', 'duration_value' => 0, 'duration_unit' => '', 'instructions' => null, 'indication' => null],
+        ] as $directions) {
+            $item->update($directions);
+            $expected = [
+                'Doctor medication order: Test Medicine',
+                '<dt class="inline font-medium">Prescribed quantity:</dt> <dd class="inline">10.00</dd>',
+                '<dt class="inline font-medium">Dispensed quantity:</dt> <dd class="inline">0.000</dd>',
+                ...($directions['dose'] ? [
+                    '<dt class="inline font-medium">Dose:</dt> <dd class="inline">2 tablets</dd>',
+                    '250 mg', 'Oral', 'As needed / PRN', '5 days',
+                    'Take after food. Maximum twice daily.', 'For severe pain',
+                ] : [
+                    '<dt class="inline font-medium">Dose:</dt> <dd class="inline">Not specified</dd>',
+                    '<dt class="inline font-medium">Route:</dt> <dd class="inline">Not specified</dd>',
+                    $directions['instructions'] ?? '<dd class="whitespace-pre-wrap">Not specified</dd>',
+                    $directions['frequency'] ?: '<dt class="inline font-medium">Frequency:</dt> <dd class="inline">Not specified</dd>',
+                ]),
+            ];
+            $before = $item->getAttributes();
+            Livewire::actingAs($admin)->test(Show::class, ['invoice' => $invoice])
+                ->assertSeeHtml($expected)->call('openPaymentModal')->assertSeeHtml($expected);
+            Livewire::actingAs($admin)->test(DispensePrescriptionComponent::class, ['prescription' => $prescription])
+                ->set('form.stock_location_id', $location->id)
+                ->assertSeeHtml($expected)->assertSee('Prescribed')->assertSee('Paid / Cleared')
+                ->assertSee('Dispensed')->assertSee('Remaining Dispensable')->assertSeeHtml('max="10"');
+            Livewire::actingAs($nurse)->test(AdmissionShow::class, ['observationAdmission' => $admission])
+                ->set('tab', 'medication')->assertSeeHtml($expected);
+            $this->assertSame($before, $item->refresh()->getAttributes());
+        }
+
+        $this->assertSame($movementCount, StockMovement::count());
+        $this->assertSame(20.0, (float) $batch->refresh()->available_quantity);
+        $this->assertDatabaseCount('dispensings', 0);
+        $this->assertDatabaseCount('medication_administrations', 0);
+        $this->assertDatabaseCount('payments', 0);
+    }
+
+    public function test_medication_directions_screens_deny_cross_facility_and_unauthorized_access(): void
+    {
+        $admin = $this->bootstrappedFacility();
+        $this->actingAs($admin);
+        [$medicine] = $this->catalog();
+        $prescription = $this->prescription($admin, $medicine, 10);
+        $invoice = $prescription->visit->invoice;
+        $admission = ObservationAdmission::factory()->create([
+            'facility_id' => $prescription->facility_id, 'patient_id' => $prescription->patient_id,
+            'visit_id' => $prescription->visit_id, 'admitted_by' => $admin->id, 'created_by' => $admin->id,
+        ]);
+        $user = User::factory()->create();
+        Livewire::actingAs($user)->test(Show::class, ['invoice' => $invoice])->assertForbidden();
+        Livewire::actingAs($user)->test(DispensePrescriptionComponent::class, ['prescription' => $prescription])->assertForbidden();
+        Livewire::actingAs($user)->test(AdmissionShow::class, ['observationAdmission' => $admission])->assertForbidden();
+
+        $otherFacility = Facility::factory()->create();
+        $prescription->update(['facility_id' => $otherFacility->id]);
+        $invoice->update(['facility_id' => $otherFacility->id]);
+        $admission->update(['facility_id' => $otherFacility->id]);
+        Livewire::actingAs($admin)->test(Show::class, ['invoice' => $invoice])->assertNotFound();
+        Livewire::actingAs($admin)->test(DispensePrescriptionComponent::class, ['prescription' => $prescription])->assertNotFound();
+        Livewire::actingAs($admin)->test(AdmissionShow::class, ['observationAdmission' => $admission])->assertNotFound();
     }
 
     private function bootstrappedFacility(): User

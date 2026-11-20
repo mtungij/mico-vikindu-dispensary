@@ -352,6 +352,8 @@ class RchWorkflowTest extends TestCase
             ->call('orderUltrasound')->assertHasNoErrors()
             ->call('orderUltrasound')->assertHasNoErrors();
         $order = RchEncounter::query()->sole()->clinicalEncounter->procedureOrders()->sole();
+        $this->assertSame($this->service(RchService::Ultrasound)->id, $order->service_id);
+        $this->assertSame('RCH Ultrasound', $order->procedure_name_snapshot);
         $this->assertSame($order->invoice_item_id, $visit->invoice->items()->sole()->id);
         $this->assertSame('ordered', $order->status->value);
         $screen->call('complete')->assertHasErrors('encounter')
@@ -363,18 +365,23 @@ class RchWorkflowTest extends TestCase
 
     public function test_ultrasound_ordered_in_rch_requires_its_own_payment_and_does_not_repeat_triage(): void
     {
+        $ultrasound = $this->service(RchService::Ultrasound);
+        $ultrasound->prices()->sole()->update(['amount' => 18250]);
+        $this->seed(RchWorkflowServiceSeeder::class);
+
         $visit = $this->triagedVisit(RchService::Anc);
         $doctor = $this->staff('doctor');
         $doctor->givePermissionTo('rch.complete-ultrasound');
         $screen = Livewire::actingAs($doctor)->test(Encounter::class, ['visit' => $visit])
             ->call('orderUltrasound')->assertHasNoErrors();
         $order = $visit->clinicalEncounters()->sole()->procedureOrders()->sole();
-        $this->assertSame('15000.00', $order->invoiceItem->patient_amount);
+        $this->assertSame($ultrasound->id, $order->service_id);
+        $this->assertSame('18250.00', $order->invoiceItem->patient_amount);
         $this->assertSame('awaiting_payment', $order->status->value);
 
         $screen->set('ultrasoundFindings', 'Clinical scan findings')
             ->call('completeUltrasound', $order->id)->assertHasErrors('procedure');
-        $this->pay($visit->invoice, 15000, [$order->invoice_item_id => 15000]);
+        $this->pay($visit->invoice, 18250, [$order->invoice_item_id => 18250]);
         $this->assertSame('ordered', $order->refresh()->status->value);
         $this->assertSame('RCH', $visit->refresh()->currentDepartment->code);
         $this->assertSame(1, $visit->queues()->where('department_id', $this->department('TRI')->id)->count());

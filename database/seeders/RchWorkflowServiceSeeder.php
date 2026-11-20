@@ -28,7 +28,7 @@ class RchWorkflowServiceSeeder extends Seeder
                         [
                             'department_id' => $department->id,
                             'service_category_id' => $category->id,
-                            'name' => $definition->label(),
+                            'name' => $definition->catalogueName(),
                             'service_type' => $definition->serviceType(),
                             'requires_payment' => true,
                             'is_active' => true,

@@ -19,6 +19,11 @@ enum RchService: string
         };
     }
 
+    public function catalogueName(): string
+    {
+        return $this === self::Ultrasound ? 'RCH Ultrasound' : $this->label();
+    }
+
     public function defaultPrice(): int
     {
         return match ($this) {

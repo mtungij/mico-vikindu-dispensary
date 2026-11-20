@@ -7,6 +7,7 @@ use App\Models\ActivityLog;
 use App\Models\Department;
 use App\Models\Facility;
 use App\Models\LaboratoryOrder;
+use App\Models\Patient;
 use App\Models\Visit;
 use App\Models\VisitMovement;
 use App\Models\WorkflowSetting;
@@ -21,6 +22,7 @@ class ReceptionWorkflowService
         private readonly VisitService $visits,
         private readonly InvoiceService $invoices,
         private readonly QueueService $queues,
+        private readonly WorkflowService $workflow,
         private readonly ReceptionChargeService $charges,
         private readonly LaboratoryOrderService $laboratoryOrders,
         private readonly PatientDuplicateDetectionService $duplicates,
@@ -37,6 +39,9 @@ class ReceptionWorkflowService
 
         return DB::transaction(function () use ($patientData, $payerData, $visitData, $serviceIds, $actor, $duplicateReview): array {
             Facility::query()->whereKey(currentFacility()?->id)->lockForUpdate()->firstOrFail();
+            if ($existing = $this->existingRegistration($visitData)) {
+                return $existing;
+            }
             $duplicateMatch = ($visitData['visit_type'] ?? 'new_patient') === 'emergency'
                 ? $this->duplicates->detect([])
                 : $this->validateDuplicateReview($patientData, $payerData, $actor, $duplicateReview);
@@ -66,6 +71,8 @@ class ReceptionWorkflowService
             if ($laboratoryOrder && (float) $invoice->balance_amount <= 0) {
                 $this->laboratoryOrders->activateLaboratoryQueue($laboratoryOrder, $actor);
                 $queue = $visit->queues()->where('department_id', $destination->id)->latest()->first();
+            } elseif ($destination->code === 'RCH') {
+                $queue = $this->workflow->createQueue($visit, $visit->currentDepartment, $actor, $visit->visit_status, 'RCH registration completed', true);
             } elseif (! $laboratoryOrder && $this->shouldCreateDestinationQueue($visit, $destination)) {
                 $queue = $this->queues->createQueue($visit->load('destinationDepartment'), $actor);
             }
@@ -108,29 +115,34 @@ class ReceptionWorkflowService
     {
         abort_unless($patient->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
         $visitData['visit_type'] = 'returning_patient';
-        if ($existing = $this->existingRegistration($visitData)) {
-            return $existing;
-        }
-        $activeVisit = $patient->activeVisit()->first();
-        if ($activeVisit) {
-            if (! $actor->can('reception.override-active-visit')) {
-                throw ValidationException::withMessages(['patient' => 'Mgonjwa tayari ana visit active '.$activeVisit->visit_number.'. Fungua visit hiyo au omba ruhusa ya kuunda nyingine.']);
-            }
-            if (mb_strlen(trim((string) $activeVisitOverrideReason)) < 10) {
-                throw ValidationException::withMessages(['activeVisitOverrideReason' => 'Eleza sababu ya kuunda visit nyingine kwa angalau herufi 10.']);
-            }
-        }
 
-        $payerProfile = $patient->primaryPayerProfile ?? $this->payers->createProfile($patient, $payerData, $actor);
-        $visitData['patient_payer_profile_id'] = $payerProfile->id;
-        $visitData['payer_type'] = $payerProfile->payer_type->value;
+        return DB::transaction(function () use ($patient, $payerData, $visitData, $serviceIds, $actor, $activeVisitOverrideReason): array {
+            $patient = Patient::query()->lockForUpdate()->findOrFail($patient->id);
+            if ($existing = $this->existingRegistration($visitData)) {
+                abort_unless($existing['patient']->id === $patient->id, 403);
 
-        return DB::transaction(function () use ($patient, $payerProfile, $visitData, $serviceIds, $actor, $activeVisit, $activeVisitOverrideReason): array {
+                return $existing;
+            }
+
             $destination = $this->charges->destination($patient->facility, (int) $visitData['destination_department_id']);
+            $activeVisit = $patient->activeVisit()->first();
+            $canOverride = $destination->code !== 'RCH' && $actor->can('reception.override-active-visit');
+            if ($activeVisit) {
+                if (! $canOverride) {
+                    throw ValidationException::withMessages(['patient' => 'Mgonjwa tayari ana visit active '.$activeVisit->visit_number.'. Fungua visit hiyo au omba ruhusa ya kuunda nyingine.']);
+                }
+                if (mb_strlen(trim((string) $activeVisitOverrideReason)) < 10) {
+                    throw ValidationException::withMessages(['activeVisitOverrideReason' => 'Eleza sababu ya kuunda visit nyingine kwa angalau herufi 10.']);
+                }
+            }
+
+            $payerProfile = $patient->primaryPayerProfile ?? $this->payers->createProfile($patient, $payerData, $actor);
+            $visitData['patient_payer_profile_id'] = $payerProfile->id;
+            $visitData['payer_type'] = $payerProfile->payer_type->value;
             $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null, $visitData['visit_type'] ?? 'returning_patient');
             $visitData['consultation_service_id'] = $consultation?->id;
             [$registration] = $this->charges->validateChargeConfiguration($patient->facility, false, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id, $visitData['visit_type'] ?? 'returning_patient');
-            $visit = $this->visits->createVisit($patient, $visitData, $actor, $actor->can('reception.override-active-visit'));
+            $visit = $this->visits->createVisit($patient, $visitData, $actor, $canOverride);
             $invoice = $this->invoices->createVisitInvoice($visit, [], $actor);
             $invoice = $this->charges->createInitialInvoiceItems($invoice, $registration, $consultation, false, $destination, $actor);
             $laboratoryOrder = null;
@@ -148,6 +160,8 @@ class ReceptionWorkflowService
             if ($laboratoryOrder && (float) $invoice->balance_amount <= 0) {
                 $this->laboratoryOrders->activateLaboratoryQueue($laboratoryOrder, $actor);
                 $queue = $visit->queues()->where('department_id', $destination->id)->latest()->first();
+            } elseif ($destination->code === 'RCH') {
+                $queue = $this->workflow->createQueue($visit, $visit->currentDepartment, $actor, $visit->visit_status, 'RCH registration completed', true);
             } elseif (! $laboratoryOrder && $this->shouldCreateDestinationQueue($visit, $destination)) {
                 $queue = $this->queues->createQueue($visit->load('destinationDepartment'), $actor);
             }
@@ -245,12 +259,18 @@ class ReceptionWorkflowService
     private function applyPostChargeStatus(Visit $visit, Department $destination, float $patientAmount, bool $paymentFirst, $actor): Visit
     {
         $billing = Department::query()->where('facility_id', $visit->facility_id)->where('code', 'BIL')->first();
-        $status = $paymentFirst && $patientAmount > 0
+        $rch = $destination->code === 'RCH';
+        $status = ($paymentFirst || $rch) && $patientAmount > 0
             ? VisitStatus::AwaitingPayment
-            : ($destination->requires_triage ? VisitStatus::AwaitingTriage : VisitStatus::AwaitingDepartment);
+            : (($destination->requires_triage || $rch) ? VisitStatus::AwaitingTriage : VisitStatus::AwaitingDepartment);
         $triage = $status === VisitStatus::AwaitingTriage
             ? Department::query()->where('facility_id', $visit->facility_id)->where('code', 'TRI')->first()
             : null;
+        if ($rch && (($status === VisitStatus::AwaitingPayment && ! $billing?->queue_enabled)
+            || ($status === VisitStatus::AwaitingTriage && ! $triage?->queue_enabled))) {
+            throw ValidationException::withMessages(['destination_department_id' => 'Configure the Billing and Triage queues before registering RCH visits.']);
+        }
+
         $toDepartment = match ($status) {
             VisitStatus::AwaitingPayment => $billing ?? $destination,
             VisitStatus::AwaitingTriage => $triage ?? $destination,

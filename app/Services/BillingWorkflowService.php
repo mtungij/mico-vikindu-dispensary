@@ -37,11 +37,17 @@ class BillingWorkflowService
     {
         DB::transaction(function () use ($handoff, $actor): void {
             $handoff = VisitPaymentHandoff::query()->lockForUpdate()->findOrFail($handoff->id);
-            if ($handoff->status === 'released') throw ValidationException::withMessages(['handoff' => 'Handoff imeshatumika.']);
+            if ($handoff->status === 'released') {
+                throw ValidationException::withMessages(['handoff' => 'Handoff imeshatumika.']);
+            }
             $invoice = app(InvoiceStatusService::class)->recalculate($handoff->invoice);
-            if ((float) $invoice->balance_amount > 0) throw ValidationException::withMessages(['invoice' => 'Invoice bado ina salio.']);
+            if ((float) $invoice->balance_amount > 0) {
+                throw ValidationException::withMessages(['invoice' => 'Invoice bado ina salio.']);
+            }
             $destination = $handoff->destinationDepartment;
-            if (! $destination) throw ValidationException::withMessages(['destination' => 'Destination haijasanidiwa.']);
+            if (! $destination) {
+                throw ValidationException::withMessages(['destination' => 'Destination haijasanidiwa.']);
+            }
             [$target, $status] = $this->paymentReleaseTarget($destination, $invoice->facility_id);
             $this->workflow->transferPatient($handoff->visit, $target, $handoff->reason ?: 'Released after payment', $actor, $status, false, null, true);
             $handoff->update(['status' => 'released', 'released_by' => $actor->id, 'released_at' => now()]);
@@ -88,16 +94,21 @@ class BillingWorkflowService
      */
     private function paymentReleaseTarget(Department $destination, int $facilityId): array
     {
-        if ($destination->requires_triage) {
+        if ($destination->requires_triage || $destination->code === 'RCH') {
             $triage = Department::query()
                 ->where('facility_id', $facilityId)
                 ->where('code', 'TRI')
                 ->where('queue_enabled', true)
+                ->when($destination->code === 'RCH', fn ($query) => $query->where('is_active', true))
                 ->first();
 
             if ($triage) {
                 return [$triage, VisitStatus::InProgress];
             }
+        }
+
+        if ($destination->code === 'RCH') {
+            throw ValidationException::withMessages(['destination' => 'An active Triage queue is required for RCH.']);
         }
 
         return [$destination, VisitStatus::InProgress];
@@ -108,6 +119,11 @@ class BillingWorkflowService
         $status = $visit->visit_status?->value ?? $visit->visit_status;
 
         if (! in_array($status, [VisitStatus::AwaitingPayment->value, VisitStatus::Waiting->value], true)) {
+            return false;
+        }
+
+        if ($visit->destinationDepartment?->code === 'RCH'
+            && $visit->clinicalEncounters()->where('encounter_type', 'rch')->exists()) {
             return false;
         }
 

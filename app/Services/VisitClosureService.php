@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\ClinicalEncounterType;
 use App\Enums\PrescriptionStatus;
 use App\Enums\ProcedureOrderStatus;
 use App\Enums\QueueStatus;
@@ -41,6 +42,17 @@ class VisitClosureService
                 ->whereIn('status', ['waiting', 'in_progress', 'signed_off', 'paused'])
                 ->latest('id')->first();
             if ($activeEncounter && ! $activeEncounter->partial_completed_at) {
+                if ($activeEncounter->encounter_type === ClinicalEncounterType::Rch
+                    && $activeEncounter->department_id === $visit->destination_department_id
+                    && $activeEncounter->department?->code === 'RCH'
+                    && $visit->current_department_id !== $activeEncounter->department_id
+                    && ! $visit->queues()->where('department_id', $visit->current_department_id)
+                        ->whereIn('queue_status', [QueueStatus::Waiting, QueueStatus::Called, QueueStatus::Serving])->exists()) {
+                    $this->workflow->createQueue($visit, $activeEncounter->department, $actor, VisitStatus::InConsultation, 'Return to RCH after downstream service', true);
+
+                    return $visit->refresh();
+                }
+
                 return $visit;
             }
 

@@ -2,14 +2,17 @@
 
 namespace App\Services;
 
+use App\Enums\ClinicalEncounterType;
 use App\Enums\PayerType;
 use App\Enums\ProcedureOrderStatus;
+use App\Enums\RchService;
 use App\Enums\ServiceType;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\ClinicalEncounter;
 use App\Models\ClinicalProcedureOrder;
 use App\Models\Invoice;
+use App\Models\InvoiceItem;
 use App\Models\Service;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
@@ -24,13 +27,25 @@ class ProcedureOrderService
         private readonly WorkflowService $workflow,
     ) {}
 
-    public function createOrder(ClinicalEncounter $encounter, array $data, $actor): ClinicalProcedureOrder
+    public function createOrder(ClinicalEncounter $encounter, array $data, $actor, ?InvoiceItem $receptionCharge = null): ClinicalProcedureOrder
     {
-        return DB::transaction(function () use ($encounter, $data, $actor) {
+        return DB::transaction(function () use ($encounter, $data, $actor, $receptionCharge) {
             $encounter = ClinicalEncounter::query()->with('visit')->lockForUpdate()->findOrFail($encounter->id);
             Gate::forUser($actor)->authorize('create', ClinicalProcedureOrder::class);
             $this->ensureEncounterMutable($encounter, $actor);
             $service = $this->validatedService($encounter, $data);
+            if ($receptionCharge) {
+                $receptionCharge = $encounter->visit->invoice->items()->lockForUpdate()->findOrFail($receptionCharge->id);
+                abort_unless($encounter->encounter_type === ClinicalEncounterType::Rch
+                    && $receptionCharge->service_id === $service?->id
+                    && ($receptionCharge->metadata['charge_source'] ?? null) === 'reception_rch_service'
+                    && $receptionCharge->reference_id === null
+                    && ! in_array($receptionCharge->status, ['cancelled', 'reversed', 'non_billable'], true)
+                    && (float) $receptionCharge->paid_amount >= (float) $receptionCharge->patient_amount, 409);
+            }
+
+            $billable = $service?->requires_payment || ($encounter->encounter_type === ClinicalEncounterType::Rch
+                && $service?->code === RchService::Ultrasound->value);
             $order = ClinicalProcedureOrder::query()->create([
                 'facility_id' => $encounter->facility_id,
                 'patient_id' => $encounter->patient_id,
@@ -41,14 +56,17 @@ class ProcedureOrderService
                 'procedure_name_snapshot' => $service?->name ?? $data['procedure_name_snapshot'],
                 'instructions' => $data['instructions'] ?? null,
                 'priority' => $data['priority'] ?? 'normal',
-                'status' => $encounter->visit->payer_type === PayerType::Cash && $service?->requires_payment ? ProcedureOrderStatus::AwaitingPayment : ProcedureOrderStatus::Ordered,
+                'status' => ! $receptionCharge && $encounter->visit->payer_type === PayerType::Cash && $billable ? ProcedureOrderStatus::AwaitingPayment : ProcedureOrderStatus::Ordered,
                 'scheduled_at' => $data['scheduled_at'] ?? null,
                 'notes' => $data['notes'] ?? null,
                 'created_by' => $actor->id,
             ]);
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_order_created', 'subject_type' => $order::class, 'subject_id' => $order->id]);
 
-            if ($service?->requires_payment) {
+            if ($receptionCharge) {
+                $receptionCharge->update(['reference_type' => ClinicalProcedureOrder::class, 'reference_id' => $order->id]);
+                $order->update(['invoice_item_id' => $receptionCharge->id]);
+            } elseif ($billable) {
                 $invoice = $encounter->visit->invoice ?: $this->invoices->createVisitInvoice($encounter->visit, [], $actor);
                 $invoiceItem = $invoice->items()->where('reference_type', ClinicalProcedureOrder::class)->where('reference_id', $order->id)->first();
                 if (! $invoiceItem) {
@@ -254,6 +272,14 @@ class ProcedureOrderService
             if (! $actor->can('procedure-orders.view')) {
                 abort(403);
             }
+            if ($order->encounter?->encounter_type === ClinicalEncounterType::Rch && $order->invoice_item_id) {
+                $charge = $order->invoiceItem;
+                if (! $charge || (float) $charge->paid_amount < (float) $charge->patient_amount
+                    || in_array($charge->status, ['cancelled', 'reversed', 'non_billable'], true)
+                    || in_array($charge->invoice?->status, ['cancelled', 'void', 'voided', 'refunded', 'reversed', 'replaced'], true)) {
+                    throw ValidationException::withMessages(['procedure' => 'Clear the ultrasound charge before recording the procedure.']);
+                }
+            }
             if ($order->status === ProcedureOrderStatus::AwaitingPayment && ! $actor->can('procedure-orders.override-payment')) {
                 throw ValidationException::withMessages(['procedure' => 'Procedure haiwezi kufanywa kabla ya malipo kamili bila ruhusa ya override.']);
             }
@@ -286,7 +312,7 @@ class ProcedureOrderService
             ->with('service:id,department_id')
             ->get()
             ->pluck('service.department_id')
-            ->filter()
+            ->filter(fn ($id) => $id && ($order->encounter?->encounter_type !== ClinicalEncounterType::Rch || $id !== $order->encounter->department_id))
             ->unique()
             ->values()
             ->all();

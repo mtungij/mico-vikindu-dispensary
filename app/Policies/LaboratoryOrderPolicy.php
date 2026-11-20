@@ -33,14 +33,21 @@ class LaboratoryOrderPolicy
     {
         $encounter->loadMissing(['department', 'visit']);
 
+        $rch = $encounter->encounter_type === ClinicalEncounterType::Rch
+            && $encounter->department?->code === 'RCH'
+            && $encounter->visit?->destination_department_id === $encounter->department_id
+            && $user->can('rch.start-encounter');
+        $opd = $encounter->encounter_type === ClinicalEncounterType::Opd
+            && $encounter->department?->code === 'OPD'
+            && $encounter->visit?->current_department_id === $encounter->department_id
+            && $user->can('opd.consult');
+
         return $user->can('laboratory-orders.create')
-            && $user->can('opd.consult')
+            && ($rch || $opd)
             && $this->sameFacility($user, $encounter)
             && $encounter->facility_id === currentFacility()?->id
             && $encounter->visit?->facility_id === $encounter->facility_id
-            && $encounter->department?->code === 'OPD'
-            && $encounter->encounter_type === ClinicalEncounterType::Opd
-            && $encounter->visit?->current_department_id === $encounter->department_id
+            && $encounter->visit?->patient_id === $encounter->patient_id
             && $encounter->started_at !== null
             && ! in_array($encounter->status, [ClinicalEncounterStatus::Completed, ClinicalEncounterStatus::Cancelled, ClinicalEncounterStatus::Referred], true)
             && ! in_array($encounter->visit?->visit_status, [VisitStatus::Completed, VisitStatus::Cancelled, VisitStatus::Referred, VisitStatus::Discharged], true);
@@ -63,7 +70,11 @@ class LaboratoryOrderPolicy
 
     public function decideItem(User $user, LaboratoryOrder $model): bool
     {
-        return $this->can($user, 'laboratory-results.enter', $model);
+        return $this->can($user, 'laboratory-results.enter', $model)
+            || ($model->source === LaboratoryOrder::SOURCE_RCH
+                && $model->encounter?->encounter_type === ClinicalEncounterType::Rch
+                && $user->can('rch.start-encounter')
+                && $this->can($user, 'laboratory-orders.cancel', $model));
     }
 
     public function cancel(User $user, LaboratoryOrder $model): bool

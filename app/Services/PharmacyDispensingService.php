@@ -8,8 +8,10 @@ use App\Enums\StockMovementType;
 use App\Models\ActivityLog;
 use App\Models\Dispensing;
 use App\Models\InvoiceItem;
+use App\Models\MedicationAdministration;
 use App\Models\Medicine;
 use App\Models\Prescription;
+use App\Models\PrescriptionItem;
 use App\Models\StockLocation;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -197,6 +199,7 @@ class PharmacyDispensingService
                 throw ValidationException::withMessages(['reason' => 'Sababu inahitajika.']);
             }
             $dispensing = Dispensing::query()->with('items.allocations.batch')->lockForUpdate()->findOrFail($dispensing->id);
+            abort_unless($dispensing->facility_id === currentFacility()?->id, 404);
             if ($dispensing->status === DispensingStatus::Reversed) {
                 throw ValidationException::withMessages(['dispensing' => 'Dispensing tayari imereversed.']);
             }
@@ -204,8 +207,14 @@ class PharmacyDispensingService
                 foreach ($item->allocations as $allocation) {
                     $this->movements->stockIn($allocation->batch, StockMovementType::CancellationReversal, (string) $allocation->quantity, $actor, $dispensing, $reason);
                 }
-                $rxItem = $item->prescriptionItem;
+                $rxItem = PrescriptionItem::query()->lockForUpdate()->findOrFail($item->prescription_item_id);
                 $newDispensed = max(0, (float) $rxItem->dispensed_quantity - (float) $item->dispensed_quantity);
+                $administered = MedicationAdministration::query()->where('prescription_item_id', $rxItem->id)
+                    ->where('facility_id', $dispensing->facility_id)->whereNull('observation_admission_id')
+                    ->where('administration_status', 'administered')->sum('quantity_administered');
+                if ($newDispensed < (float) $administered) {
+                    throw ValidationException::withMessages(['dispensing' => 'The reversal would remove medicine already recorded as administered.']);
+                }
                 $newRemaining = max(0, (float) $rxItem->quantity - $newDispensed);
                 $itemStatus = $newRemaining <= 0 ? 'dispensed' : ($newDispensed > 0 ? 'partially_dispensed' : 'prescribed');
                 $rxItem->update([
@@ -245,7 +254,7 @@ class PharmacyDispensingService
         if (! in_array($prescription->status, [PrescriptionStatus::Prescribed, PrescriptionStatus::AwaitingPayment, PrescriptionStatus::PartiallyDispensed], true)) {
             throw ValidationException::withMessages(['prescription' => 'Prescription haiwezi kudispense kwenye status hii.']);
         }
-        if (! $prescription->encounter || ! $prescription->encounter->completed_at) {
+        if (! Prescription::query()->whereKey($prescription->id)->withDispensingHandoff()->exists()) {
             throw ValidationException::withMessages(['prescription' => 'Consultation must be completed before medicines can be dispensed.']);
         }
         if (! $this->billing->hasFinanciallyDispensableItems($prescription)) {

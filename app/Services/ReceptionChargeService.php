@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Enums\PayerType;
+use App\Enums\RchService;
 use App\Enums\ServiceType;
 use App\Models\ActivityLog;
 use App\Models\Department;
@@ -13,6 +14,7 @@ use App\Models\Patient;
 use App\Models\Service;
 use App\Models\ServicePrice;
 use App\Models\WorkflowSetting;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -55,8 +57,26 @@ class ReceptionChargeService
         return $service;
     }
 
+    public function rchServices(Department $department): Builder
+    {
+        return Service::query()->where('facility_id', $department->facility_id)->where('is_active', true)
+            ->where(function (Builder $query) use ($department): void {
+                foreach (RchService::cases() as $service) {
+                    $query->orWhere(fn (Builder $candidate) => $candidate
+                        ->where('code', $service->value)
+                        ->where('service_type', $service->serviceType())
+                        ->when($service !== RchService::Ultrasound, fn (Builder $candidate) => $candidate->where('department_id', $department->id)));
+                }
+            });
+    }
+
     public function resolveConsultationService(Facility $facility, Department $destination, ?int $consultationServiceId, string $visitType = 'new_patient'): ?Service
     {
+        if ($destination->code === 'RCH') {
+            return $this->rchServices($destination)->find($consultationServiceId)
+                ?? throw ValidationException::withMessages(['consultation_service_id' => 'Select an active RCH service for this facility.']);
+        }
+
         if (! $this->bool($facility, 'auto_add_consultation_fee', true) || ! $this->bool($facility, 'require_consultation_service', true) || ! $destination->requires_consultation) {
             return null;
         }
@@ -166,7 +186,7 @@ class ReceptionChargeService
 
         return [
             'registration' => collect($lines)->firstWhere('item_type', ServiceType::Registration->value),
-            'consultation' => collect($lines)->firstWhere('item_type', ServiceType::Consultation->value),
+            'consultation' => collect($lines)->firstWhere('kind', 'consultation'),
             'lines' => $lines,
             'total' => $totals['total'],
             'patient_amount' => $totals['patient_amount'],
@@ -188,7 +208,7 @@ class ReceptionChargeService
             $this->resolveRegistrationPrice($registration, $payerType, $insuranceProviderId, $corporateAccountId);
         }
 
-        if ($destination->requires_consultation) {
+        if ($destination->requires_consultation || $destination->code === 'RCH') {
             if (! $consultationService && $visitType !== 'emergency') {
                 throw ValidationException::withMessages(['consultation_service_id' => 'Chagua consultation service kwa destination hii.']);
             }
@@ -205,7 +225,7 @@ class ReceptionChargeService
         if ($visitType === 'emergency') {
             return false;
         }
-        if (in_array(strtoupper((string) $destination->code), ['LAB', 'PHA', 'PHARM', 'PRC', 'PRO'], true)) {
+        if (in_array(strtoupper((string) $destination->code), ['LAB', 'PHA', 'PHARM', 'PRC', 'PRO', 'RCH'], true)) {
             return false;
         }
 
@@ -241,7 +261,7 @@ class ReceptionChargeService
         if ($consultationService) {
             $this->createLine($invoice, $consultationService, [
                 'auto_added' => true,
-                'charge_source' => 'reception_consultation',
+                'charge_source' => $destination?->code === 'RCH' ? 'reception_rch_service' : 'reception_consultation',
                 'destination_department_id' => $destination?->id,
             ], $actor, 'consultation_charge_auto_added');
         }
@@ -312,7 +332,21 @@ class ReceptionChargeService
         $total = (float) $price->amount * $quantity;
         $split = $this->calculatePayerSplit($invoice->payer_type, $total);
 
+        $rchSnapshot = ($metadata['charge_source'] ?? null) === 'reception_rch_service' ? [
+            'facility_id' => $invoice->facility_id,
+            'patient_id' => $invoice->patient_id,
+            'visit_id' => $invoice->visit_id,
+            'code_snapshot' => $service->code,
+            'department_id' => $service->department_id,
+            'description_snapshot' => $service->name,
+            'gross_amount' => $total,
+            'net_amount' => $split['patient_amount'] + $split['insurance_amount'] + ($split['corporate_amount'] ?? 0),
+            'corporate_amount' => $split['corporate_amount'] ?? 0,
+            'service_date' => today(),
+        ] : [];
+
         $invoice->items()->create([
+            ...$rchSnapshot,
             'service_id' => $service->id,
             'item_type' => $service->service_type->value,
             'description' => $service->name,
@@ -341,7 +375,7 @@ class ReceptionChargeService
     private function requiredPrice(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): ServicePrice
     {
         $price = $this->pricing->getCurrentPrice($service, $payerType, $insuranceProviderId, $corporateAccountId);
-        if ($service->requires_payment && ! $price) {
+        if (($service->requires_payment || RchService::tryFrom($service->code)) && ! $price) {
             ActivityLog::query()->create([
                 'user_id' => auth()->id(),
                 'event' => 'missing_service_price_blocked_registration',
@@ -428,11 +462,11 @@ class ReceptionChargeService
 
     private function nextStepLabel(PayerType $payerType, float $patientAmount, bool $paymentFirst, ?Department $destination): string
     {
-        if ($paymentFirst && $patientAmount > 0) {
+        if (($paymentFirst || $destination?->code === 'RCH') && $patientAmount > 0) {
             return 'Cashier/Billing';
         }
 
-        if ($destination?->requires_triage) {
+        if ($destination?->requires_triage || $destination?->code === 'RCH') {
             return 'Triage';
         }
 

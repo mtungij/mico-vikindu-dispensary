@@ -449,14 +449,18 @@ class Index extends Component
             ->when($this->payerType, fn ($q) => $q->whereHas('primaryPayerProfile', fn ($q) => $q->where('payer_type', $this->payerType)))
             ->latest()->paginate(10);
         $departments = Department::query()->forCurrentFacility()->where('is_active', true)->where('can_receive_patients', true)->orderBy('sort_order')->get();
-        $consultationServices = Service::query()->forCurrentFacility()->where('is_active', true)->where('service_type', 'consultation')->when($this->visit->destination_department_id, fn ($q) => $q->where('department_id', $this->visit->destination_department_id))->orderBy('name')->get();
+        $rchDepartment = $departments->firstWhere('id', $this->visit->destination_department_id);
+        $rchDestination = $rchDepartment?->code === 'RCH';
+        $consultationServices = $rchDestination
+            ? app(ReceptionChargeService::class)->rchServices($rchDepartment)->orderBy('name')->get()
+            : Service::query()->forCurrentFacility()->where('is_active', true)->where('service_type', 'consultation')->when($this->visit->destination_department_id, fn ($q) => $q->where('department_id', $this->visit->destination_department_id))->orderBy('name')->get();
         $laboratoryTests = LaboratoryTest::query()->forCurrentFacility()->with(['service', 'specimenType'])->where('is_active', true)->whereHas('service', fn ($query) => $query->where('is_active', true))->orderBy('name')->get();
 
         $selectedPatient = $this->selectedPatientId
             ? Patient::query()->forCurrentFacility()->with(['latestVisit', 'activeVisit.currentDepartment', 'activeVisit.invoice', 'activeVisit.laboratoryOrders'])->find($this->selectedPatientId)
             : null;
 
-        return view('livewire.patients.index', ['patients' => $patients, 'selectedPatient' => $selectedPatient, 'genders' => Gender::cases(), 'statuses' => PatientStatus::cases(), 'payerTypes' => PayerType::cases(), 'departments' => $departments, 'services' => $consultationServices, 'laboratoryTests' => $laboratoryTests, 'providers' => InsuranceProvider::query()->forCurrentFacility()->where('is_active', true)->get(), 'corporates' => CorporateAccount::query()->forCurrentFacility()->where('is_active', true)->get()])
+        return view('livewire.patients.index', ['patients' => $patients, 'selectedPatient' => $selectedPatient, 'genders' => Gender::cases(), 'statuses' => PatientStatus::cases(), 'payerTypes' => PayerType::cases(), 'departments' => $departments, 'services' => $consultationServices, 'rchDestination' => $rchDestination, 'laboratoryTests' => $laboratoryTests, 'providers' => InsuranceProvider::query()->forCurrentFacility()->where('is_active', true)->get(), 'corporates' => CorporateAccount::query()->forCurrentFacility()->where('is_active', true)->get()])
             ->layout('components.layouts.app', ['title' => 'Wagonjwa', 'description' => 'Sajili wagonjwa na fungua visits.']);
     }
 

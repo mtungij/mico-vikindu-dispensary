@@ -2,12 +2,10 @@
 
 namespace App\Livewire\Clinical;
 
-use App\Models\ActivityLog;
 use App\Models\LaboratoryResult;
-use App\Models\Visit;
+use App\Services\LaboratoryResultReleaseService;
 use App\Support\Notifier;
 use Illuminate\Contracts\View\View;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Component;
 
@@ -18,29 +16,9 @@ class LaboratoryResults extends Component
         Gate::authorize('laboratory-results.view');
     }
 
-    public function markReviewed(LaboratoryResult $result): void
+    public function markReviewed(LaboratoryResult $result, LaboratoryResultReleaseService $release): void
     {
-        Gate::authorize('view', $result);
-        abort_unless($result->result_status->value === 'released', 404);
-
-        DB::transaction(function () use ($result): void {
-            Visit::query()->lockForUpdate()->findOrFail($result->order->visit_id);
-            $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
-            if ($result->reviewed_at) {
-                return;
-            }
-            abort_unless($result->result_status->value === 'released', 409);
-            $result->update([
-                'reviewed_by_clinician' => auth()->id(),
-                'reviewed_at' => now(),
-            ]);
-            ActivityLog::query()->create([
-                'user_id' => auth()->id(),
-                'event' => 'clinician_reviewed_result',
-                'subject_type' => $result::class,
-                'subject_id' => $result->id,
-            ]);
-        });
+        $release->markReviewed($result, auth()->user());
 
         Notifier::success('laboratory_results.reviewed');
     }

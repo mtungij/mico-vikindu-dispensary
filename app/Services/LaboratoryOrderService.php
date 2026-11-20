@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\ClinicalEncounterType;
 use App\Enums\ClinicalOrderStatus;
 use App\Enums\ClinicalPaymentStatus;
 use App\Enums\PayerType;
@@ -49,7 +50,7 @@ class LaboratoryOrderService
                 'patient_id' => $encounter->patient_id,
                 'visit_id' => $encounter->visit_id,
                 'clinical_encounter_id' => $encounter->id,
-                'source' => LaboratoryOrder::SOURCE_OPD,
+                'source' => $encounter->encounter_type === ClinicalEncounterType::Rch ? LaboratoryOrder::SOURCE_RCH : LaboratoryOrder::SOURCE_OPD,
                 'ordered_by' => $actor->id,
                 'order_number' => $this->generateOrderNumber($encounter->facility_id),
                 'priority' => $data['priority'] ?? 'normal',

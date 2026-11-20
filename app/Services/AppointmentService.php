@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Enums\AppointmentStatus;
 use App\Enums\AppointmentType;
+use App\Enums\ClinicalEncounterType;
 use App\Enums\PayerType;
 use App\Enums\VisitPriority;
 use App\Enums\VisitStatus;
@@ -178,6 +179,23 @@ class AppointmentService
             }
 
             $visit = $appointment->visit;
+            if (! $visit && $appointment->encounter?->encounter_type === ClinicalEncounterType::Rch
+                && $appointment->department?->code === 'RCH') {
+                $visit = app(ReceptionWorkflowService::class)->openReturningPatientVisit(
+                    $appointment->patient,
+                    ['payer_type' => PayerType::Cash->value, 'is_primary' => true],
+                    [
+                        'destination_department_id' => $appointment->department_id,
+                        'consultation_service_id' => $appointment->service_id,
+                        'priority' => $appointment->priority ?? 'normal',
+                        'source' => 'appointment',
+                        'reason_for_visit' => $appointment->reason,
+                        'require_payment_before_service' => true,
+                    ],
+                    [],
+                    $actor,
+                )['visit'];
+            }
             if (! $visit) {
                 $visit = $this->visits->createVisit($appointment->patient, [
                     'visit_type' => $this->visitTypeFor($appointment)->value,

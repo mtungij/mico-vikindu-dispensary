@@ -45,6 +45,7 @@ class DatabaseSeeder extends Seeder
             ServiceCategorySeeder::class,
             ServiceSeeder::class,
             RchServiceSeeder::class,
+            RchWorkflowServiceSeeder::class,
             PregnancyRiskFactorSeeder::class,
             FamilyPlanningMethodSeeder::class,
             VaccineSeeder::class,

@@ -168,6 +168,13 @@ class TriageService
         if (in_array($visit->visit_status->value, ['completed', 'cancelled', 'discharged', 'referred'], true)) {
             throw ValidationException::withMessages(['visit' => 'Visit si active.']);
         }
+        if ($visit->destinationDepartment?->code === 'RCH'
+            && ($visit->currentDepartment?->code !== 'TRI'
+                || $visit->latestCompletedTriageAssessment()->exists()
+                || ! $visit->invoice
+                || (float) $visit->invoice->balance_amount > 0)) {
+            throw ValidationException::withMessages(['visit' => 'This RCH visit must be financially cleared and waiting in Triage.']);
+        }
         if ($visit->visit_status === VisitStatus::AwaitingPayment) {
             throw ValidationException::withMessages(['payment' => 'Mgonjwa anasubiri malipo kabla ya huduma.']);
         }

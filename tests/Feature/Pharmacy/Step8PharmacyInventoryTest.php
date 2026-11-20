@@ -828,17 +828,17 @@ class Step8PharmacyInventoryTest extends TestCase
             $item->update($directions);
             $expected = [
                 'Doctor medication order: Test Medicine',
-                '<dt class="inline font-medium">Prescribed quantity:</dt> <dd class="inline">10.00</dd>',
-                '<dt class="inline font-medium">Dispensed quantity:</dt> <dd class="inline">0.000</dd>',
+                '<dt class="font-medium">Prescribed quantity:</dt> <dd class="mt-1">10.00</dd>',
+                '<dt class="font-medium">Dispensed quantity:</dt> <dd class="mt-1">0.000</dd>',
                 ...($directions['dose'] ? [
-                    '<dt class="inline font-medium">Dose:</dt> <dd class="inline">2 tablets</dd>',
+                    '<dt class="font-medium">Dose:</dt> <dd class="mt-1">2 tablets</dd>',
                     '250 mg', 'Oral', 'As needed / PRN', '5 days',
                     'Take after food. Maximum twice daily.', 'For severe pain',
                 ] : [
-                    '<dt class="inline font-medium">Dose:</dt> <dd class="inline">Not specified</dd>',
-                    '<dt class="inline font-medium">Route:</dt> <dd class="inline">Not specified</dd>',
-                    $directions['instructions'] ?? '<dd class="whitespace-pre-wrap">Not specified</dd>',
-                    $directions['frequency'] ?: '<dt class="inline font-medium">Frequency:</dt> <dd class="inline">Not specified</dd>',
+                    '<dt class="font-medium">Dose:</dt> <dd class="mt-1">Not specified</dd>',
+                    '<dt class="font-medium">Route:</dt> <dd class="mt-1">Not specified</dd>',
+                    $directions['instructions'] ?? '<dd class="mt-1 whitespace-pre-wrap">Not specified</dd>',
+                    $directions['frequency'] ?: '<dt class="font-medium">Frequency:</dt> <dd class="mt-1">Not specified</dd>',
                 ]),
             ];
             $before = $item->getAttributes();

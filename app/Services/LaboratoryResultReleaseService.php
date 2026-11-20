@@ -10,6 +10,7 @@ use App\Models\LaboratoryOrder;
 use App\Models\LaboratoryResult;
 use App\Models\Visit;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
 
 class LaboratoryResultReleaseService
@@ -44,6 +45,30 @@ class LaboratoryResultReleaseService
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'result_released', 'subject_type' => $result::class, 'subject_id' => $result->id, 'new_values' => ['facility_id' => $result->facility_id, 'visit_id' => $result->order?->visit_id, 'laboratory_order_id' => $result->laboratory_order_id]]);
 
             return $result->refresh();
+        });
+    }
+
+    public function markReviewed(LaboratoryResult $result, $actor): void
+    {
+        Gate::forUser($actor)->authorize('view', $result);
+        abort_unless($result->facility_id === currentFacility()?->id && $actor->belongsToCurrentFacility(), 403);
+
+        DB::transaction(function () use ($result, $actor): void {
+            $visit = Visit::query()->lockForUpdate()->findOrFail($result->order->visit_id);
+            $result = LaboratoryResult::query()->lockForUpdate()->findOrFail($result->id);
+            abort_unless($visit->facility_id === $result->facility_id && $visit->patient_id === $result->order->patient_id
+                && $result->result_status === LaboratoryResultStatus::Released, 404);
+            if ($result->reviewed_at) {
+                return;
+            }
+
+            $result->update(['reviewed_by_clinician' => $actor->id, 'reviewed_at' => now(), 'updated_by' => $actor->id]);
+            ActivityLog::query()->create([
+                'user_id' => $actor->id,
+                'event' => 'clinician_reviewed_result',
+                'subject_type' => $result::class,
+                'subject_id' => $result->id,
+            ]);
         });
     }
 

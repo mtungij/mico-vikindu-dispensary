@@ -264,6 +264,8 @@ return [
         'rch.view-queue' => 'Kuangalia RCH queue',
         'rch.assign-provider' => 'Kumpangia provider RCH',
         'rch.start-encounter' => 'Kuanza RCH encounter',
+        'rch.administer-medication' => 'Record medication administered in RCH',
+        'rch.complete-ultrasound' => 'Record an ultrasound performed for an RCH patient',
         'rch.complete-encounter' => 'Kukamilisha RCH encounter',
         'rch.view-history' => 'Kuangalia RCH history',
         'rch.override-payment' => 'Kupita payment block RCH',

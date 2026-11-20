@@ -1,4 +1,4 @@
-<div class="space-y-4">
+<div class="min-w-0 space-y-4">
     <div class="grid gap-4 lg:grid-cols-4">
         <x-card>
             <p class="text-sm text-slate-500">Patient</p>
@@ -18,10 +18,10 @@
         </x-card>
     </div>
 
-    <x-card>
-        <div class="flex items-center justify-between gap-3">
+    <x-card class="min-w-0">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <h3 class="font-semibold">Invoice Items</h3>
-            <div class="flex gap-2">
+            <div class="flex flex-wrap gap-2">
                 <a href="{{ route('billing.invoices.print', $invoice) }}" class="rounded-md border border-slate-300 px-3 py-2 text-sm dark:border-slate-700">Print</a>
                 @can('create', \App\Models\Payment::class)
                     <button type="button" wire:click="openPaymentModal" class="rounded-md bg-primary px-3 py-2 text-sm font-semibold text-white">Receive Payment</button>
@@ -29,7 +29,49 @@
             </div>
         </div>
 
-        <div class="mt-3 overflow-x-auto">
+        @php
+            $medicineFinancials = $invoice->items->mapWithKeys(fn ($item) => [
+                $item->id => $item->prescriptionItem
+                    ? app(\App\Services\MedicineFinancialClearanceService::class)->forItem($item->prescriptionItem)
+                    : null,
+            ]);
+        @endphp
+
+        <div class="mt-3 min-w-0 space-y-3 lg:hidden" data-invoice-item-cards>
+            @foreach($invoice->items as $item)
+                @php
+                    $medicineFinancial = $medicineFinancials[$item->id];
+                @endphp
+                <article wire:key="invoice-item-card-{{ $item->id }}" class="min-w-0 rounded-lg border border-slate-200 p-3 text-sm text-slate-900 [overflow-wrap:anywhere] dark:border-slate-700 dark:text-slate-100">
+                    <h4 class="font-semibold">{{ $item->description_snapshot ?? $item->description }}</h4>
+                    <dl class="mt-3 grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
+                        @foreach([
+                            'Quantity' => $item->quantity,
+                            'Unit price' => number_format((float) ($medicineFinancial['billed_unit_price'] ?? $item->unit_price), 2),
+                            'Gross' => number_format($item->gross_amount ?: $item->total_amount, 2),
+                            'Patient amount' => number_format($item->patient_amount, 2),
+                            'Paid amount' => number_format($item->paid_amount, 2),
+                            'Balance' => number_format(max(0, (float) $item->patient_amount - (float) $item->paid_amount), 2),
+                            'Covered quantity' => $medicineFinancial
+                                ? rtrim(rtrim($medicineFinancial['paid_quantity'], '0'), '.').' / '.rtrim(rtrim($medicineFinancial['prescribed_quantity'], '0'), '.')
+                                : '—',
+                            'Insurance' => number_format($item->insurance_amount, 2),
+                            'Financial status' => $medicineFinancial && (float) $medicineFinancial['paid_quantity'] > 0 && ! $medicineFinancial['financially_cleared'] ? 'Partially Paid' : $item->status,
+                        ] as $label => $value)
+                            <div class="min-w-0">
+                                <dt class="text-xs font-medium text-slate-600 dark:text-slate-300">{{ $label }}</dt>
+                                <dd class="mt-1">{{ $value }}</dd>
+                            </div>
+                        @endforeach
+                    </dl>
+                    @if($item->prescriptionItem)
+                        <x-medication-directions :item="$item->prescriptionItem" />
+                    @endif
+                </article>
+            @endforeach
+        </div>
+
+        <div class="mt-3 hidden overflow-x-auto lg:block" data-invoice-item-table>
             <table class="min-w-full text-sm">
                 <thead class="text-left text-xs uppercase text-slate-500">
                     <tr>
@@ -47,7 +89,7 @@
                 <tbody>
                     @foreach($invoice->items as $item)
                         @php
-                            $medicineFinancial = $item->prescriptionItem ? app(\App\Services\MedicineFinancialClearanceService::class)->forItem($item->prescriptionItem) : null;
+                            $medicineFinancial = $medicineFinancials[$item->id];
                         @endphp
                         <tr class="border-t border-slate-100 dark:border-slate-800">
                             <td class="px-3 py-2">{{ $item->description_snapshot ?? $item->description }}@if($medicineFinancial)<div class="text-xs text-slate-500">Unit price: {{ number_format((float) $medicineFinancial['billed_unit_price'], 2) }}</div>@endif@if($item->prescriptionItem)<x-medication-directions :item="$item->prescriptionItem" />@endif</td>

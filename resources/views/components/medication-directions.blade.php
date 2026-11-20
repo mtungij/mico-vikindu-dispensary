@@ -10,9 +10,9 @@
             : 'Not specified',
     };
 @endphp
-<div {{ $attributes->class(['mt-2 max-w-xl space-y-2 break-words rounded-md bg-slate-50 p-3 text-sm text-slate-800 dark:bg-slate-900 dark:text-slate-200']) }}>
+<div {{ $attributes->class(['mt-2 w-full min-w-0 max-w-xl space-y-3 [overflow-wrap:anywhere] rounded-md bg-slate-50 p-3 text-sm text-slate-800 dark:bg-slate-900 dark:text-slate-200']) }}>
     <p class="font-semibold">Doctor medication order: {{ $specified($item->medication_name) }}</p>
-    <dl class="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
+    <dl class="grid min-w-0 grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
         @foreach([
             'Strength' => $specified($item->strength),
             'Dose' => $specified($item->dose),
@@ -22,9 +22,9 @@
             'Prescribed quantity' => $specified($item->quantity),
             'Dispensed quantity' => $specified($item->dispensed_quantity),
         ] as $label => $value)
-            <div><dt class="inline font-medium">{{ $label }}:</dt> <dd class="inline">{{ $value }}</dd></div>
+            <div class="min-w-0"><dt class="font-medium">{{ $label }}:</dt> <dd class="mt-1">{{ $value }}</dd></div>
         @endforeach
-        <div class="sm:col-span-2"><dt class="font-medium">Special / PRN instructions:</dt><dd class="whitespace-pre-wrap">{{ $specified($item->instructions) }}</dd></div>
-        <div class="sm:col-span-2"><dt class="inline font-medium">Indication / reason for PRN:</dt> <dd class="inline whitespace-pre-wrap">{{ $specified($item->indication) }}</dd></div>
+        <div class="min-w-0 sm:col-span-2"><dt class="font-medium">Special / PRN instructions:</dt><dd class="mt-1 whitespace-pre-wrap">{{ $specified($item->instructions) }}</dd></div>
+        <div class="min-w-0 sm:col-span-2"><dt class="font-medium">Indication / reason for PRN:</dt> <dd class="mt-1 whitespace-pre-wrap">{{ $specified($item->indication) }}</dd></div>
     </dl>
 </div>

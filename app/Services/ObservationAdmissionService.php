@@ -8,6 +8,11 @@ use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\Bed;
 use App\Models\BedReservation;
+use App\Models\ClinicalEncounter;
+use App\Models\Department;
+use App\Enums\ObservationAdmissionType;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\Rule;
 use App\Models\ObservationAdmission;
 use App\Models\Patient;
 use App\Models\Service;
@@ -22,21 +27,39 @@ class ObservationAdmissionService
     public function admit(Patient $patient, Visit $visit, array $data, $actor): ObservationAdmission
     {
         return DB::transaction(function () use ($patient, $visit, $data, $actor): ObservationAdmission {
+            Gate::forUser($actor)->authorize('create', ObservationAdmission::class);
+            abort_unless($actor->belongsToCurrentFacility(), 403);
+            $patient = Patient::query()->forCurrentFacility()->lockForUpdate()->findOrFail($patient->id);
+            $visit = Visit::query()->forCurrentFacility()->lockForUpdate()->findOrFail($visit->id);
+            validator($data, [
+                'admission_type' => ['required', Rule::enum(ObservationAdmissionType::class)],
+                'reason_for_admission' => ['nullable', 'string', 'max:5000'],
+                'notes' => ['nullable', 'string', 'max:10000'],
+            ])->validate();
             $this->validateActiveAdmission($patient);
+            if (! empty($data['clinical_encounter_id'])) {
+                ClinicalEncounter::query()->where('facility_id', $visit->facility_id)
+                    ->where('patient_id', $patient->id)->where('visit_id', $visit->id)
+                    ->findOrFail($data['clinical_encounter_id']);
+            }
+            $department = Department::query()->where('facility_id', $visit->facility_id)
+                ->where('code', 'BED')->where('is_active', true)->where('queue_enabled', true)->first();
+            if (! $department) throw ValidationException::withMessages(['admission' => 'Enable the BED department and its queue before admission.']);
             if ($visit->facility_id !== currentFacility()->id || $visit->patient_id !== $patient->id) throw ValidationException::withMessages(['visit_id'=>'Visit na patient haviendani.']);
             if (in_array($visit->visit_status?->value ?? $visit->visit_status, ['completed','cancelled','discharged','referred'], true)) throw ValidationException::withMessages(['visit_id'=>'Visit si active.']);
-            $this->validatePayment($visit, $actor, $data['override_reason'] ?? null);
+            // Clinical placement is independent of clearance of individual billable services.
             $bed = ! empty($data['bed_id']) ? Bed::query()->where('facility_id', currentFacility()->id)->findOrFail($data['bed_id']) : null;
             $reservation = $bed ? BedReservation::query()->where('bed_id',$bed->id)->where('patient_id',$patient->id)->where('status', BedReservationStatus::Active)->first() : null;
             $status = $bed ? ObservationAdmissionStatus::Admitted : ObservationAdmissionStatus::AwaitingBed;
             $admission = ObservationAdmission::query()->create([
-                'facility_id'=>currentFacility()->id,'patient_id'=>$patient->id,'visit_id'=>$visit->id,'clinical_encounter_id'=>$data['clinical_encounter_id'] ?? null,'admission_number'=>$this->numbers->next(currentFacility()->id),'admission_type'=>$data['admission_type'],'reason_for_admission'=>$data['reason_for_admission'],'provisional_diagnosis'=>$data['provisional_diagnosis'] ?? null,'admitted_by'=>$actor->id,'admitted_at'=>$data['admitted_at'] ?? now(),'expected_discharge_at'=>$data['expected_discharge_at'] ?? null,'payer_type'=>$visit->payer_type,'patient_payer_profile_id'=>$visit->patient_payer_profile_id,'status'=>$status,'acuity_level'=>$data['acuity_level'] ?? null,'isolation_required'=>(bool)($data['isolation_required'] ?? false),'guardian_required'=>(bool)($data['guardian_required'] ?? false),'guardian_name'=>$data['guardian_name'] ?? null,'guardian_phone'=>$data['guardian_phone'] ?? null,'diet_instruction'=>$data['diet_instruction'] ?? null,'mobility_status'=>$data['mobility_status'] ?? null,'fall_risk'=>$data['fall_risk'] ?? null,'infection_risk'=>$data['infection_risk'] ?? null,'allergies_snapshot'=>$data['allergies_snapshot'] ?? null,'chronic_conditions_snapshot'=>$data['chronic_conditions_snapshot'] ?? null,'notes'=>$data['notes'] ?? null,'created_by'=>$actor->id,
+                'facility_id'=>currentFacility()->id,'patient_id'=>$patient->id,'visit_id'=>$visit->id,'clinical_encounter_id'=>$data['clinical_encounter_id'] ?? null,'admission_number'=>$this->numbers->next(currentFacility()->id),'admission_type'=>$data['admission_type'],'reason_for_admission'=>$data['reason_for_admission'] ?? '','provisional_diagnosis'=>$data['provisional_diagnosis'] ?? null,'admitted_by'=>$actor->id,'admitted_at'=>$data['admitted_at'] ?? now(),'expected_discharge_at'=>$data['expected_discharge_at'] ?? null,'payer_type'=>$visit->payer_type,'patient_payer_profile_id'=>$visit->patient_payer_profile_id,'status'=>$status,'acuity_level'=>$data['acuity_level'] ?? null,'isolation_required'=>(bool)($data['isolation_required'] ?? false),'guardian_required'=>(bool)($data['guardian_required'] ?? false),'guardian_name'=>$data['guardian_name'] ?? null,'guardian_phone'=>$data['guardian_phone'] ?? null,'diet_instruction'=>$data['diet_instruction'] ?? null,'mobility_status'=>$data['mobility_status'] ?? null,'fall_risk'=>$data['fall_risk'] ?? null,'infection_risk'=>$data['infection_risk'] ?? null,'allergies_snapshot'=>$data['allergies_snapshot'] ?? null,'chronic_conditions_snapshot'=>$data['chronic_conditions_snapshot'] ?? null,'notes'=>$data['notes'] ?? null,'created_by'=>$actor->id,
             ]);
+            app(WorkflowService::class)->createQueue($visit, $department, $actor, VisitStatus::AwaitingBed, 'Admission requested', true, false);
             if ($bed) $this->beds->assignBed($admission, $bed, $actor, $reservation);
             $visit->update(['visit_status' => $bed ? VisitStatus::AwaitingBed : VisitStatus::AwaitingBed, 'updated_by'=>$actor->id]);
             $this->createInitialMovement($admission, $actor);
-            if (! empty($data['service_id'])) $this->billing->createAdmissionCharges($admission, Service::query()->where('facility_id', currentFacility()->id)->find($data['service_id']), $actor);
-            ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'observation_admitted','subject_type'=>$admission::class,'subject_id'=>$admission->id]);
+            if (! empty($data['service_id'])) $this->billing->createAdmissionCharges($admission, Service::query()->forCurrentFacility()->where('is_active', true)->where('department_id', $department->id)->findOrFail($data['service_id']), $actor);
+            ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'observation_admitted','subject_type'=>$admission::class,'subject_id'=>$admission->id,'new_values'=>['facility_id'=>$admission->facility_id,'patient_id'=>$patient->id,'visit_id'=>$visit->id,'bed_id'=>$bed?->id,'type'=>$admission->admission_type->value,'reason'=>$admission->reason_for_admission]]);
             if ($bed) $this->visitClosure->completeDepartmentQueues($visit, 'BED', $actor);
             $this->visitClosure->evaluate($visit->refresh(), $actor);
             return $admission->refresh();
@@ -45,6 +68,27 @@ class ObservationAdmissionService
     public function validateActiveAdmission(Patient $patient): void { if (ObservationAdmission::query()->where('facility_id', $patient->facility_id)->where('patient_id',$patient->id)->whereIn('status',['awaiting_payment','awaiting_bed','admitted','under_observation','ready_for_discharge'])->exists()) throw ValidationException::withMessages(['patient_id'=>'Patient ana active observation admission.']); }
     public function validatePayment(Visit $visit, $actor, ?string $reason): void { $invoice = $visit->invoice; if (($visit->payer_type?->value ?? $visit->payer_type) === 'cash' && $invoice && $invoice->balance_amount > 0 && ! $actor->can('observation.override-payment')) throw ValidationException::withMessages(['payment'=>'Malipo hayajakamilika.']); if (($visit->payer_type?->value ?? $visit->payer_type) === 'cash' && $invoice && $invoice->balance_amount > 0 && $actor->can('observation.override-payment') && blank($reason)) throw ValidationException::withMessages(['override_reason'=>'Sababu ya override inahitajika.']); if ($reason) ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'payment_override_used','subject_type'=>$visit::class,'subject_id'=>$visit->id]); }
     public function createInitialMovement(ObservationAdmission $admission, $actor): void { VisitMovement::query()->create(['facility_id'=>$admission->facility_id,'visit_id'=>$admission->visit_id,'patient_id'=>$admission->patient_id,'from_department_id'=>$admission->visit->current_department_id,'to_department_id'=>$admission->visit->current_department_id,'movement_type'=>'observation_admission','status'=>'completed','reason'=>$admission->reason_for_admission,'moved_by'=>$actor->id,'moved_at'=>now()]); }
-    public function updateStatus(ObservationAdmission $a, string $status, $actor): ObservationAdmission { $a->update(['status'=>$status,'updated_by'=>$actor->id]); return $a->refresh(); }
-    public function cancelAdmission(ObservationAdmission $a, $actor, string $reason): ObservationAdmission { if (! $a->isActive()) throw ValidationException::withMessages(['admission'=>'Admission haiwezi kufutwa.']); $a->update(['status'=>ObservationAdmissionStatus::Cancelled,'notes'=>trim(($a->notes ? $a->notes."\n" : '').'Cancelled: '.$reason),'updated_by'=>$actor->id]); ActivityLog::query()->create(['user_id'=>$actor->id,'event'=>'observation_cancelled','subject_type'=>$a::class,'subject_id'=>$a->id]); $this->visitClosure->cancelDepartmentQueues($a->visit, 'BED', $actor, $reason); $this->visitClosure->evaluate($a->visit->refresh(), $actor); return $a->refresh(); }
+    public function cancelAdmission(ObservationAdmission $a, $actor, string $reason): ObservationAdmission
+    {
+        return DB::transaction(function () use ($a, $actor, $reason): ObservationAdmission {
+            $a = ObservationAdmission::query()->forCurrentFacility()->lockForUpdate()->findOrFail($a->id);
+            Gate::forUser($actor)->authorize('cancel', $a);
+            abort_unless($actor->belongsToCurrentFacility(), 403);
+            if (blank($reason)) throw ValidationException::withMessages(['reason' => 'Enter a cancellation reason.']);
+            if ($a->status === ObservationAdmissionStatus::Cancelled) return $a;
+            if (! $a->isActive()) throw ValidationException::withMessages(['admission' => 'Admission is no longer active.']);
+            if ($a->observations()->exists() || $a->medicationAdministrations()->exists() || $a->ivFluids()->exists()
+                || $a->orders()->where('status', 'completed')->exists()) {
+                throw ValidationException::withMessages(['admission' => 'Care has been recorded. Use clinical discharge to end this admission.']);
+            }
+            $old = $a->status->value;
+            $a->update(['status' => ObservationAdmissionStatus::Cancelled, 'actual_discharge_at' => now(), 'updated_by' => $actor->id]);
+            $this->beds->releaseBed($a, $actor);
+            ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'observation_cancelled', 'subject_type' => $a::class, 'subject_id' => $a->id,
+                'old_values' => ['status' => $old], 'new_values' => ['status' => 'cancelled', 'reason' => $reason, 'facility_id' => $a->facility_id, 'patient_id' => $a->patient_id, 'visit_id' => $a->visit_id, 'bed_id' => $a->current_bed_id]]);
+            $this->visitClosure->cancelDepartmentQueues($a->visit, 'BED', $actor, $reason);
+            $this->visitClosure->evaluate($a->visit->refresh(), $actor);
+            return $a->refresh();
+        });
+    }
 }

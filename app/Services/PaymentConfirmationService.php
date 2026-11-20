@@ -30,7 +30,11 @@ class PaymentConfirmationService
                 $actor->can('billing.receive-payment') && $actor->can('billing.confirm-payment'),
                 403
             );
-            $invoice->items()->orderBy('id')->lockForUpdate()->get();
+            $items = $invoice->items()->orderBy('id')->lockForUpdate()->get();
+            if ($items->contains(fn ($item) => $item->facility_id !== null && $item->facility_id !== $invoice->facility_id)) {
+                throw ValidationException::withMessages(['allocations' => 'Every selected item must belong to this invoice and facility.']);
+            }
+
             $this->statuses->recalculate($invoice);
             $invoice = $invoice->refresh();
 

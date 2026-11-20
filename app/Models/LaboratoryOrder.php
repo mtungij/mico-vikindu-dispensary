@@ -19,6 +19,8 @@ class LaboratoryOrder extends Model
 
     public const SOURCE_OPD = 'opd';
 
+    public const SOURCE_RCH = 'rch';
+
     public const SOURCE_RECEPTION_DIRECT = 'reception_direct';
 
     protected function casts(): array

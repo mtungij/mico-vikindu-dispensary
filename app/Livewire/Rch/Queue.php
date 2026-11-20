@@ -2,15 +2,13 @@
 
 namespace App\Livewire\Rch;
 
-use App\Enums\VisitStatus;
-use App\Models\Department;
+use App\Enums\QueueStatus;
 use App\Models\PatientQueue;
 use App\Models\User;
 use App\Models\Visit;
-use App\Services\RchWorkflowService;
 use App\Services\WorkflowService;
-use App\Support\Notifier;
 use Illuminate\Contracts\View\View;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Gate;
 use Livewire\Component;
 use Livewire\WithPagination;
@@ -19,25 +17,96 @@ class Queue extends Component
 {
     use WithPagination;
 
-    public string $search = ''; public string $status = ''; public string $payer = ''; public string $priority = ''; public ?int $provider = null;
-    public function mount(): void { Gate::authorize('rch.view-queue'); }
-    public function call(int $queueId, WorkflowService $workflow): void { Gate::authorize('rch.view-queue'); $workflow->callQueue(PatientQueue::query()->forCurrentFacility()->findOrFail($queueId), auth()->user()); Notifier::success('Patient called.'); }
-    public function start(int $visitId, RchWorkflowService $workflow): mixed { Gate::authorize('rch.start-encounter'); $encounter = $workflow->startEncounter(Visit::query()->forCurrentFacility()->findOrFail($visitId), 'rch_general', auth()->user()); Notifier::success('RCH encounter imeanza.'); return redirect()->route('rch.encounter', $encounter->visit_id); }
-    public function skip(int $queueId, WorkflowService $workflow): void { $workflow->skipQueue(PatientQueue::query()->forCurrentFacility()->findOrFail($queueId), auth()->user(), 'Skipped from RCH queue'); }
-    public function cancel(int $queueId, WorkflowService $workflow): void { $workflow->cancelQueue(PatientQueue::query()->forCurrentFacility()->findOrFail($queueId), auth()->user(), 'Cancelled from RCH queue'); }
-    public function assignProvider(int $visitId): void { Gate::authorize('rch.assign-provider'); Visit::query()->forCurrentFacility()->findOrFail($visitId)->update(['current_assigned_user_id' => $this->provider, 'updated_by' => auth()->id()]); }
+    public string $search = '';
+
+    public string $status = '';
+
+    public string $payer = '';
+
+    public string $priority = '';
+
+    public ?int $provider = null;
+
+    public function mount(): void
+    {
+        Gate::authorize('rch.view-queue');
+    }
+
+    public function call(int $queueId, WorkflowService $workflow): void
+    {
+        $workflow->callQueue($this->rchQueue($queueId), auth()->user());
+    }
+
+    public function start(int $visitId): mixed
+    {
+        Gate::authorize('rch.start-encounter');
+
+        return redirect()->route('rch.encounter', $this->triagedVisits()->findOrFail($visitId));
+    }
+
+    public function skip(int $queueId, WorkflowService $workflow): void
+    {
+        $workflow->skipQueue($this->rchQueue($queueId), auth()->user(), 'Skipped from RCH queue');
+    }
+
+    public function cancel(int $queueId, WorkflowService $workflow): void
+    {
+        $workflow->cancelQueue($this->rchQueue($queueId), auth()->user(), 'Cancelled from RCH queue');
+    }
+
+    public function assignProvider(int $visitId): void
+    {
+        Gate::authorize('rch.assign-provider');
+        abort_unless(auth()->user()->belongsToCurrentFacility(), 403);
+        $provider = $this->providers()->findOrFail($this->provider);
+        $this->triagedVisits()->whereNull('completed_at')->findOrFail($visitId)
+            ->update(['current_assigned_user_id' => $provider->id, 'updated_by' => auth()->id()]);
+    }
+
+    private function rchQueue(int $queueId): PatientQueue
+    {
+        Gate::authorize('workflow.manage-rch-queue');
+        abort_unless(auth()->user()->belongsToCurrentFacility(), 403);
+
+        return PatientQueue::query()->forCurrentFacility()
+            ->whereHas('department', fn ($query) => $query->where('facility_id', currentFacility()?->id)->where('code', 'RCH'))
+            ->whereHas('visit', fn ($query) => $query
+                ->whereIn('visits.id', $this->triagedVisits()->select('visits.id'))
+                ->whereIn('visit_status', ['in_queue', 'in_progress', 'waiting', 'called', 'serving', 'awaiting_department'])
+                ->whereDoesntHave('clinicalEncounters', fn ($clinical) => $clinical->where('encounter_type', 'rch')))
+            ->whereIn('queue_status', [QueueStatus::Waiting, QueueStatus::Called, QueueStatus::Serving])
+            ->findOrFail($queueId);
+    }
+
+    private function triagedVisits(): Builder
+    {
+        return Visit::query()->forCurrentFacility()
+            ->whereHas('destinationDepartment', fn ($query) => $query->where('code', 'RCH')->where('facility_id', currentFacility()?->id))
+            ->whereHas('triageAssessments', fn ($query) => $query->where('status', 'completed')->where('facility_id', currentFacility()?->id))
+            ->whereNotIn('visit_status', ['cancelled', 'discharged', 'referred']);
+    }
+
+    private function providers(): Builder
+    {
+        return User::query()->whereHas('staffProfile', fn ($query) => $query->where('facility_id', currentFacility()?->id));
+    }
 
     public function render(): View
     {
-        $visits = Visit::query()->forCurrentFacility()->with(['patient','destinationDepartment','currentQueue','invoice','currentAssignedUser'])
-            ->whereHas('destinationDepartment', fn($q) => $q->where('code', 'RCH'))
-            ->when($this->status, fn($q) => $q->where('visit_status', $this->status))
-            ->when(! $this->status, fn($q) => $q->whereIn('visit_status', [VisitStatus::AwaitingPayment->value, VisitStatus::AwaitingDepartment->value, VisitStatus::InQueue->value, VisitStatus::InProgress->value, VisitStatus::Waiting->value, VisitStatus::InConsultation->value, VisitStatus::AwaitingLab->value, VisitStatus::AwaitingPharmacy->value, VisitStatus::Completed->value, VisitStatus::Referred->value]))
-            ->when($this->payer, fn($q) => $q->where('payer_type', $this->payer))
-            ->when($this->priority, fn($q) => $q->where('priority', $this->priority))
-            ->when($this->search, fn($q) => $q->whereHas('patient', fn($p) => $p->where('first_name','like',"%{$this->search}%")->orWhere('last_name','like',"%{$this->search}%")->orWhere('patient_number','like',"%{$this->search}%")))
+        Gate::authorize('rch.view-queue');
+        abort_unless(auth()->user()->belongsToCurrentFacility(), 403);
+        $visits = $this->triagedVisits()->with(['patient', 'consultationService', 'currentQueue.department', 'invoice', 'currentAssignedUser'])
+            ->when($this->status, fn ($query) => $query->where('visit_status', $this->status))
+            ->when($this->payer, fn ($query) => $query->where('payer_type', $this->payer))
+            ->when($this->priority, fn ($query) => $query->where('priority', $this->priority))
+            ->when($this->search, fn ($query) => $query->whereHas('patient', fn ($patient) => $patient
+                ->where('first_name', 'like', "%{$this->search}%")->orWhere('last_name', 'like', "%{$this->search}%")
+                ->orWhere('patient_number', 'like', "%{$this->search}%")))
             ->latest('registered_at')->paginate(12);
-        return view('livewire.rch.queue', ['visits' => $visits, 'providers' => User::query()->orderBy('name')->limit(100)->get(), 'rchDepartment' => Department::query()->where('facility_id', currentFacility()?->id)->where('code','RCH')->first()])
-            ->layout('components.layouts.app', ['title' => 'RCH Queue', 'description' => 'RCH patient flow, payments, encounters and handoffs.']);
+
+        return view('livewire.rch.queue', [
+            'visits' => $visits,
+            'providers' => auth()->user()->can('rch.assign-provider') ? $this->providers()->orderBy('name')->get() : collect(),
+        ])->layout('components.layouts.app', ['title' => 'RCH Queue', 'description' => 'Patients who have completed Triage.']);
     }
 }

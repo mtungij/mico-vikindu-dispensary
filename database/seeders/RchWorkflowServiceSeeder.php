@@ -30,7 +30,7 @@ class RchWorkflowServiceSeeder extends Seeder
                             'service_category_id' => $category->id,
                             'name' => $definition->catalogueName(),
                             'service_type' => $definition->serviceType(),
-                            'requires_payment' => true,
+                            'requires_payment' => $definition->defaultPrice() !== null,
                             'is_active' => true,
                         ],
                     );
@@ -43,7 +43,7 @@ class RchWorkflowServiceSeeder extends Seeder
                         $service->update(['department_id' => $department->id]);
                     }
 
-                    if (! $service->prices()->withTrashed()->where('payer_type', 'cash')->exists()) {
+                    if ($definition->defaultPrice() !== null && ! $service->prices()->withTrashed()->where('payer_type', 'cash')->exists()) {
                         $service->prices()->create([
                             'facility_id' => $department->facility_id,
                             'payer_type' => 'cash',

@@ -81,7 +81,7 @@ class RchWorkflowServiceSeederTest extends TestCase
         $this->seed(RchWorkflowServiceSeeder::class);
 
         $catalogue = app(ReceptionChargeService::class)->rchServices($rch)->pluck('code')->all();
-        $this->assertEqualsCanonicalizing(['CGM', 'RCH-ANC', 'RCH-PNC', 'RCH-US'], $catalogue);
+        $this->assertEqualsCanonicalizing(['CGM', 'FPCON', 'RCH-ANC', 'RCH-PNC', 'RCH-US'], $catalogue);
         $ultrasound = Service::query()->where('facility_id', $facility->id)->where('code', 'RCH-US')->sole();
         $this->assertSame('RCH Ultrasound', $ultrasound->name);
         $this->assertSame('procedure', $ultrasound->service_type->value);

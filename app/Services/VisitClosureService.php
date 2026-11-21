@@ -8,6 +8,7 @@ use App\Enums\ProcedureOrderStatus;
 use App\Enums\QueueStatus;
 use App\Enums\VisitStatus;
 use App\Models\ClinicalEncounter;
+use App\Models\ClinicalProcedureOrder;
 use App\Models\Department;
 use App\Models\Invoice;
 use App\Models\LaboratoryOrder;
@@ -189,8 +190,18 @@ class VisitClosureService
         });
     }
 
+    private function isRchClinicalVisit(Visit $visit): bool
+    {
+        return $visit->destinationDepartment?->code === 'RCH'
+            && $visit->clinicalEncounters()->where('encounter_type', ClinicalEncounterType::Rch)->exists();
+    }
+
     public function requiresDoctorReview(Visit $visit): bool
     {
+        if ($this->isRchClinicalVisit($visit)) {
+            return true;
+        }
+
         $hasDirectLaboratoryOrder = LaboratoryOrder::query()
             ->where('visit_id', $visit->id)
             ->where('facility_id', $visit->facility_id)
@@ -331,15 +342,16 @@ class VisitClosureService
     /** @param array<int, string> $blockers */
     private function legacyStatusAndQueue(Visit $visit, array $blockers): array
     {
+        $rch = $this->isRchClinicalVisit($visit);
         $priority = [
             'payment' => [VisitStatus::AwaitingPayment, ['BIL']],
             'admission' => [$this->admissionVisitStatus($visit), ['BED']],
             'laboratory' => [VisitStatus::AwaitingLab, ['LAB']],
             'doctor_review' => [
                 $this->hasReleasedUnreviewedResult($visit) ? VisitStatus::AwaitingDoctorReview : VisitStatus::AwaitingResults,
-                ['OPD'],
+                $rch ? ['RCH'] : ['OPD'],
             ],
-            'procedure' => [VisitStatus::AwaitingPayment, ['PRC', 'PRO']],
+            'procedure' => [$rch ? VisitStatus::AwaitingDepartment : VisitStatus::AwaitingPayment, ['PRC', 'PRO']],
             'pharmacy' => [VisitStatus::AwaitingPharmacy, ['PHA']],
         ];
 
@@ -351,7 +363,14 @@ class VisitClosureService
                 ->where('visit_id', $visit->id)
                 ->where('facility_id', $visit->facility_id)
                 ->whereIn('queue_status', ['waiting', 'called', 'serving'])
-                ->whereHas('department', fn ($query) => $query->whereIn('code', $codes))
+                ->when($rch && $blocker === 'procedure',
+                    fn ($query) => $query->whereIn('department_id', ClinicalProcedureOrder::query()
+                        ->join('services', 'services.id', '=', 'clinical_procedure_orders.service_id')
+                        ->where('clinical_procedure_orders.visit_id', $visit->id)
+                        ->where('clinical_procedure_orders.facility_id', $visit->facility_id)
+                        ->whereIn('clinical_procedure_orders.status', ['ordered', 'scheduled', 'in_progress'])
+                        ->select('services.department_id')),
+                    fn ($query) => $query->whereHas('department', fn ($department) => $department->whereIn('code', $codes)))
                 ->latest()
                 ->first();
 
@@ -371,6 +390,8 @@ class VisitClosureService
                 ->where('visit_id', $visit->id)
                 ->where('source', '!=', LaboratoryOrder::SOURCE_RECEPTION_DIRECT))
             ->where('result_status', 'released')
+            ->when($this->isRchClinicalVisit($visit), fn ($query) => $query->whereHas('orderItem', fn ($item) => $item
+                ->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error'])))
             ->whereNull('reviewed_at');
     }
 
@@ -393,8 +414,13 @@ class VisitClosureService
     }
 
     // Caller holds the visit lock, shared by release, opening and completion.
-    public function ensureDoctorReviewQueue(Visit $visit, $actor): PatientQueue
+    public function ensureDoctorReviewQueue(Visit $visit, $actor): ?PatientQueue
     {
+        if ($this->isRchClinicalVisit($visit)) {
+            return $this->workflow->createQueue($visit, $visit->destinationDepartment, $actor,
+                VisitStatus::AwaitingDoctorReview, 'Laboratory results require RCH review', true);
+        }
+
         $parent = $this->doctorReviewParent($visit);
         $department = Department::query()
             ->where('facility_id', $visit->facility_id)->where('code', 'OPD')

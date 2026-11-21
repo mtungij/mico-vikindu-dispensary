@@ -605,7 +605,7 @@ class ClinicalEncounterService
     /**
      * @param  array<string, mixed>  $overrides
      */
-    private function clinicalContentHash(ClinicalEncounter $encounter, array $overrides = []): string
+    public function clinicalContentHash(ClinicalEncounter $encounter, array $overrides = []): string
     {
         $content = [];
         foreach ($this->clinicalFieldNames() as $field) {
@@ -658,7 +658,13 @@ class ClinicalEncounterService
         ];
     }
 
-    private function validateClinicalContentForFinalization(ClinicalEncounter $encounter, array $data = []): void
+    public function validateRchSignOff(ClinicalEncounter $encounter): void
+    {
+        $this->validateClinicalContentForFinalization($encounter, allowPendingLaboratory: true);
+        $this->validateClinicalContentFacility($encounter);
+    }
+
+    private function validateClinicalContentForFinalization(ClinicalEncounter $encounter, array $data = [], bool $allowPendingLaboratory = false): void
     {
         $errors = [];
         if (! $encounter->started_at || ! $encounter->provider_user_id) {
@@ -672,7 +678,8 @@ class ClinicalEncounterService
             || $encounter->laboratoryOrders()->where('status', '!=', 'cancelled')->exists()
             || $encounter->procedureOrders()->where('status', '!=', 'cancelled')->exists();
         if (! $hasClinicalContent) {
-            $errors['clinical_content'] = 'Add a diagnosis, treatment plan, prescription, laboratory order, or clinical summary before completing.';
+            $errors['clinical_content'] = $allowPendingLaboratory ? __('rch.clinical_content_required')
+                : 'Add a diagnosis, treatment plan, prescription, laboratory order, or clinical summary before completing.';
         }
         if (! $encounter->outcome || $encounter->outcome === ClinicalOutcome::Ongoing) {
             $errors['form.outcome'] = 'Select a final consultation outcome.';
@@ -695,7 +702,7 @@ class ClinicalEncounterService
             }
         }
 
-        if ($encounter->laboratoryOrders()
+        if (! $allowPendingLaboratory && $encounter->laboratoryOrders()
             ->where('status', '!=', 'cancelled')
             ->where(fn ($orders) => $orders
                 ->where('payment_status', 'pending')->whereHas('items', fn ($query) => $query->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error']))

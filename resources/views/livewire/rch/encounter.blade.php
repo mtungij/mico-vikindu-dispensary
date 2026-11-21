@@ -2,7 +2,12 @@
     <x-card>
         <h2 class="text-lg font-semibold">{{ $visit->patient->fullName() }}</h2>
         <p class="text-sm text-slate-500">{{ $visit->patient->patient_number }} · {{ $visit->patient->ageLabel() }} · {{ $visit->visit_number }}</p>
-        <p class="mt-2">{{ $rchService?->label() ?? $visit->consultationService?->name ?? 'RCH' }} · {{ $encounter->encounter_number }} · {{ str($encounter->status)->headline() }}</p>
+        <p class="mt-2">{{ $rchService?->label() ?? $visit->consultationService?->name ?? 'RCH' }} · {{ $encounter->encounter_number }}</p>
+        <p class="text-sm">Consultation status · {{ str($encounter->status)->headline() }}</p>
+        <p class="text-sm">Visit status · {{ str($visit->visit_status->value)->headline() }}</p>
+        @if ($rchService?->visitRoute() && auth()->user()->can($rchService->visitPermission()))
+            <a class="text-sm text-primary" href="{{ route($rchService->visitRoute(), $visit) }}">Open {{ $rchService->label() }} visit</a>
+        @endif
         @if ($visit->invoice && auth()->user()->can('billing.view-invoice'))
             <a class="text-sm text-primary" href="{{ route('billing.invoices.show', $visit->invoice) }}">{{ $visit->invoice->invoice_number }}</a>
         @endif
@@ -53,7 +58,7 @@
             @if ($open)
                 <x-primary-button wire:loading.attr="disabled">Save notes</x-primary-button>
                 @can('rch.complete-encounter')
-                    <x-secondary-button type="button" wire:click="complete" wire:loading.attr="disabled">Complete encounter</x-secondary-button>
+                    <x-secondary-button type="button" wire:click="complete" wire:loading.attr="disabled">{{ __('rch.complete_consultation') }}</x-secondary-button>
                 @endcan
             @endif
         </form>
@@ -87,7 +92,7 @@
                         @foreach ($order->items as $item)
                             <li class="mt-2">
                                 {{ $item->test_name_snapshot }} · {{ str($item->status)->headline() }} @if($item->terminal_reason) · {{ $item->terminal_reason }} @endif
-                                @if ($open && auth()->user()->can('decideItem', $order)
+                                @if ($visitActive && auth()->user()->can('decideItem', $order)
                                     && ! in_array($item->status, ['completed', 'cancelled', 'not_performed', 'entered_in_error'], true)
                                     && ! in_array($item->result_status, ['pending_verification', 'verified', 'released'], true))
                                     <form wire:submit="cancelTest({{ $item->id }})" class="mt-1 flex flex-wrap items-end gap-2">
@@ -113,7 +118,7 @@
                         @if ($result->comments)<p>{{ $result->comments }}</p>@endif
                         @if ($result->reviewed_at)
                             <p class="mt-2 text-slate-500">Reviewed {{ $result->reviewed_at->format('d M Y H:i') }}</p>
-                        @elseif ($open)
+                        @elseif ($visitActive)
                             <x-secondary-button class="mt-2" type="button" wire:click="reviewResult({{ $result->id }})" wire:loading.attr="disabled">Mark reviewed</x-secondary-button>
                         @endif
                     </div>
@@ -124,32 +129,52 @@
         </x-card>
     @endif
 
-    @if ($ultrasound || ($open && $ultrasoundAvailable && auth()->user()->can('procedure-orders.create')))
+    @if ($procedureOrders->isNotEmpty() || ($open && auth()->user()->can('procedure-orders.create')))
         <x-card>
-            <h3 class="mb-3 font-semibold">Ultrasound</h3>
-            @if ($ultrasound)
-                <p>{{ str($ultrasound->status->value)->headline() }} @if($ultrasound->instructions) · {{ $ultrasound->instructions }} @endif</p>
-                @if ($ultrasound->notes)<p class="mt-2 whitespace-pre-wrap">{{ $ultrasound->notes }}</p>@endif
-                @if ($open && ! in_array($ultrasound->status->value, ['completed', 'cancelled'], true))
-                    @if ($ultrasound->status->value !== 'awaiting_payment' && auth()->user()->can('rch.complete-ultrasound'))
-                        <form wire:submit="completeUltrasound({{ $ultrasound->id }})" class="mt-3 space-y-2">
-                            <label>Ultrasound findings <x-textarea class="w-full" wire:model="ultrasoundFindings" required /></label>
-                            <x-primary-button wire:loading.attr="disabled">Record performed ultrasound</x-primary-button>
-                        </form>
+            <h3 class="mb-3 font-semibold">Procedures</h3>
+            @if ($open && auth()->user()->can('procedure-orders.create'))
+                <form wire:submit="orderProcedures" class="space-y-3">
+                    <fieldset class="grid max-h-64 gap-2 overflow-auto sm:grid-cols-2">
+                        <legend>Select procedures</legend>
+                        @forelse ($procedureOptions as $id => $option)
+                            <label class="flex items-center gap-2" wire:key="procedure-option-{{ $id }}">
+                                <x-checkbox wire:model="procedureIds" value="{{ $id }}" />
+                                <span>{{ $option['name'] }} · {{ $option['price'] !== null ? 'TZS '.number_format($option['price'], 2) : ($option['exempt'] ? 'Exempt' : ($option['billable'] ? 'Price unavailable for payer' : 'No charge required')) }}</span>
+                            </label>
+                        @empty
+                            <p>No additional procedures available.</p>
+                        @endforelse
+                    </fieldset>
+                    @if ($procedureOptions->isNotEmpty())
+                        <label>Instructions <x-textarea class="w-full" wire:model="procedureInstructions" /></label>
+                        <x-primary-button wire:loading.attr="disabled">Order selected procedures</x-primary-button>
                     @endif
-                    @can('cancel', $ultrasound)
-                        <form wire:submit="cancelUltrasound({{ $ultrasound->id }})" class="mt-3 space-y-2">
-                            <label>Cancellation reason <x-textarea class="w-full" wire:model="cancellationReason" required /></label>
-                            <x-secondary-button type="submit" wire:loading.attr="disabled">Cancel ultrasound</x-secondary-button>
-                        </form>
-                    @endcan
-                @endif
-            @else
-                <form wire:submit="orderUltrasound" class="space-y-2">
-                    <label>Scan instructions <x-textarea class="w-full" wire:model="ultrasoundInstructions" /></label>
-                    <x-primary-button wire:loading.attr="disabled">Order ultrasound</x-primary-button>
                 </form>
             @endif
+            @foreach ($procedureOrders as $order)
+                <div class="mt-4 space-y-2 border-t pt-3" wire:key="procedure-{{ $order->id }}">
+                    <p class="font-medium">{{ $order->procedure_name_snapshot }} · {{ str($order->status->value)->headline() }}</p>
+                    @if ($order->invoiceItem)
+                        <p class="text-sm">TZS {{ number_format($order->invoiceItem->total_amount, 2) }} · Patient balance TZS {{ number_format(max(0, $order->invoiceItem->patient_amount - $order->invoiceItem->paid_amount), 2) }}</p>
+                    @endif
+                    @if ($order->instructions)<p>{{ $order->instructions }}</p>@endif
+                    @if ($order->notes)<p class="whitespace-pre-wrap">{{ $order->notes }}</p>@endif
+                    @if ($visitActive && ! in_array($order->status->value, ['completed', 'cancelled'], true))
+                        @if ($order->status->value !== 'awaiting_payment' && auth()->user()->can($order->service?->code === \App\Enums\RchService::Ultrasound->value ? 'rch.complete-ultrasound' : 'rch.complete-procedure'))
+                            <form wire:submit="completeProcedure({{ $order->id }})" class="space-y-2">
+                                <label>Procedure findings <x-textarea class="w-full" wire:model="procedureFindings.{{ $order->id }}" required /></label>
+                                <x-primary-button wire:loading.attr="disabled">Record performed procedure</x-primary-button>
+                            </form>
+                        @endif
+                        @can('cancel', $order)
+                            <form wire:submit="cancelProcedure({{ $order->id }})" class="space-y-2">
+                                <label>Cancellation reason <x-textarea class="w-full" wire:model="procedureCancellationReasons.{{ $order->id }}" required /></label>
+                                <x-secondary-button type="submit" wire:loading.attr="disabled">Cancel procedure</x-secondary-button>
+                            </form>
+                        @endcan
+                    @endif
+                </div>
+            @endforeach
         </x-card>
     @endif
 
@@ -215,7 +240,7 @@
                     @if ($open && $prescription->status->value === 'draft' && $prescription->items->isNotEmpty() && auth()->user()->can('prescriptions.update'))
                         <x-secondary-button class="mt-2" type="button" wire:click="sendPrescription({{ $prescription->id }})" wire:loading.attr="disabled">Send prescription for billing and dispensing</x-secondary-button>
                     @endif
-                    @if ($open && auth()->user()->can('cancel', $prescription)
+                    @if ($visitActive && auth()->user()->can('cancel', $prescription)
                         && in_array($prescription->status->value, ['draft', 'awaiting_payment', 'prescribed'], true)
                         && $prescription->items->every(fn ($item) => (float) $item->dispensed_quantity === 0.0))
                         <form wire:submit="cancelPrescription({{ $prescription->id }})" class="mt-2 flex flex-wrap items-end gap-2">
@@ -228,10 +253,10 @@
         </x-card>
     @endif
 
-    @if ($administrations->isNotEmpty() || ($open && $injectables->isNotEmpty() && auth()->user()->can('rch.administer-medication')))
+    @if ($administrations->isNotEmpty() || ($canRecordInjection && $injectables->isNotEmpty() && auth()->user()->can('rch.administer-medication')))
         <x-card>
             <h3 class="mb-3 font-semibold">Injection administration</h3>
-            @if ($open && $injectables->isNotEmpty())
+            @if ($canRecordInjection && $injectables->isNotEmpty())
                 @can('rch.administer-medication')
                     <form wire:submit="recordInjection" class="grid gap-3 sm:grid-cols-2">
                         <label>Dispensed medicine

@@ -3,6 +3,7 @@
 namespace App\Livewire\Rch;
 
 use App\Enums\QueueStatus;
+use App\Enums\RchService;
 use App\Models\PatientQueue;
 use App\Models\User;
 use App\Models\Visit;
@@ -10,12 +11,16 @@ use App\Services\WorkflowService;
 use Illuminate\Contracts\View\View;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Gate;
+use Livewire\Attributes\Url;
 use Livewire\Component;
 use Livewire\WithPagination;
 
 class Queue extends Component
 {
     use WithPagination;
+
+    #[Url]
+    public string $programme = '';
 
     public string $search = '';
 
@@ -30,6 +35,11 @@ class Queue extends Component
     public function mount(): void
     {
         Gate::authorize('rch.view-queue');
+    }
+
+    public function updatedProgramme(): void
+    {
+        $this->resetPage();
     }
 
     public function call(int $queueId, WorkflowService $workflow): void
@@ -95,7 +105,10 @@ class Queue extends Component
     {
         Gate::authorize('rch.view-queue');
         abort_unless(auth()->user()->belongsToCurrentFacility(), 403);
+        $programme = RchService::tryFrom($this->programme);
         $visits = $this->triagedVisits()->with(['patient', 'consultationService', 'currentQueue.department', 'invoice', 'currentAssignedUser'])
+            ->when($programme, fn ($query) => $query->whereHas('consultationService', fn ($service) => $service
+                ->where('facility_id', currentFacility()?->id)->where('code', $programme->value)))
             ->when($this->status, fn ($query) => $query->where('visit_status', $this->status))
             ->when($this->payer, fn ($query) => $query->where('payer_type', $this->payer))
             ->when($this->priority, fn ($query) => $query->where('priority', $this->priority))

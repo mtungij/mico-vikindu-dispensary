@@ -178,6 +178,9 @@ class ProcedureOrderService
                         $this->workflow->createQueue($order->visit, $order->service->department, $actor, VisitStatus::AwaitingDepartment, 'Procedure item payment cleared', true, false);
                     }
                     ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'procedure_released', 'subject_type' => $order::class, 'subject_id' => $order->id]);
+                    if ($order->encounter?->encounter_type === ClinicalEncounterType::Rch) {
+                        $this->visitClosure->evaluate($order->visit, $actor);
+                    }
                 });
         });
     }
@@ -262,6 +265,9 @@ class ProcedureOrderService
     public function completeOrder(ClinicalProcedureOrder $order, $actor, ?string $notes = null): ClinicalProcedureOrder
     {
         return DB::transaction(function () use ($order, $actor, $notes): ClinicalProcedureOrder {
+            if ($order->encounter?->encounter_type === ClinicalEncounterType::Rch) {
+                $this->lockInvoiceForOrder($order->id);
+            }
             $order = ClinicalProcedureOrder::query()->lockForUpdate()->findOrFail($order->id);
             if (in_array($order->status, [ProcedureOrderStatus::Completed, ProcedureOrderStatus::Cancelled], true)) {
                 throw ValidationException::withMessages(['procedure' => 'Procedure order tayari imefungwa.']);
@@ -272,12 +278,14 @@ class ProcedureOrderService
             if (! $actor->can('procedure-orders.view')) {
                 abort(403);
             }
-            if ($order->encounter?->encounter_type === ClinicalEncounterType::Rch && $order->invoice_item_id) {
-                $charge = $order->invoiceItem;
-                if (! $charge || (float) $charge->paid_amount < (float) $charge->patient_amount
+            if ($order->encounter?->encounter_type === ClinicalEncounterType::Rch
+                && ($order->invoice_item_id || $order->service?->requires_payment || $order->service?->code === RchService::Ultrasound->value)) {
+                $charge = $order->invoiceItem()->lockForUpdate()->first();
+                if (! $charge || $charge->facility_id !== $order->facility_id || $charge->visit_id !== $order->visit_id
+                    || $charge->patient_id !== $order->patient_id || (float) $charge->paid_amount < (float) $charge->patient_amount
                     || in_array($charge->status, ['cancelled', 'reversed', 'non_billable'], true)
                     || in_array($charge->invoice?->status, ['cancelled', 'void', 'voided', 'refunded', 'reversed', 'replaced'], true)) {
-                    throw ValidationException::withMessages(['procedure' => 'Clear the ultrasound charge before recording the procedure.']);
+                    throw ValidationException::withMessages(['procedure' => 'Clear the procedure charge before recording the procedure.']);
                 }
             }
             if ($order->status === ProcedureOrderStatus::AwaitingPayment && ! $actor->can('procedure-orders.override-payment')) {

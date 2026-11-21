@@ -5,10 +5,20 @@ namespace Tests\Feature\Rch;
 use App\Enums\RchService;
 use App\Livewire\Patients\Index as Reception;
 use App\Livewire\Pharmacy\Queue as PharmacyQueue;
+use App\Livewire\Rch\Children\GrowthMeasurement;
 use App\Livewire\Rch\Encounter;
+use App\Livewire\Rch\FamilyPlanning\Visit as FamilyPlanningScreen;
+use App\Livewire\Rch\Immunization\Administer;
+use App\Livewire\Rch\Postnatal\Visit as PncScreen;
+use App\Livewire\Rch\Pregnancies\AncVisit as AncScreen;
 use App\Livewire\Rch\Queue;
+use App\Models\ActivityLog;
+use App\Models\AncVisit;
+use App\Models\ChildGrowthMeasurement;
 use App\Models\Department;
 use App\Models\Facility;
+use App\Models\FamilyPlanningVisit;
+use App\Models\ImmunizationAdministration;
 use App\Models\InsuranceProvider;
 use App\Models\Invoice;
 use App\Models\LaboratoryTest;
@@ -18,6 +28,8 @@ use App\Models\MedicineBatch;
 use App\Models\MedicineUnit;
 use App\Models\Patient;
 use App\Models\PaymentMethod;
+use App\Models\PncVisit;
+use App\Models\Pregnancy;
 use App\Models\RchEncounter;
 use App\Models\Service;
 use App\Models\ServiceCategory;
@@ -26,6 +38,7 @@ use App\Models\StaffProfile;
 use App\Models\StockLocation;
 use App\Models\Supplier;
 use App\Models\User;
+use App\Models\Vaccine;
 use App\Models\Visit;
 use App\Services\AppointmentService;
 use App\Services\LaboratoryOrderItemDecisionService;
@@ -35,6 +48,7 @@ use App\Services\LaboratoryResultVerificationService;
 use App\Services\LaboratorySampleService;
 use App\Services\PaymentConfirmationService;
 use App\Services\PharmacyDispensingService;
+use App\Services\PregnancyService;
 use App\Services\ReceptionWorkflowService;
 use App\Services\StockReceivingService;
 use App\Services\TriageService;
@@ -49,6 +63,7 @@ use Database\Seeders\ServiceCategorySeeder;
 use Database\Seeders\ServicePriceSeeder;
 use Database\Seeders\ServiceSeeder;
 use Database\Seeders\StockLocationSeeder;
+use Database\Seeders\VaccineSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
@@ -211,7 +226,18 @@ class RchWorkflowTest extends TestCase
         $this->assertSame('1000.00', $visit->invoice->insurance_amount);
         $this->assertSame('TRI', $visit->currentDepartment->code);
         $this->triage($visit);
-        Livewire::actingAs($this->staff('doctor'))->test(Encounter::class, ['visit' => $visit])->assertSee('ANC Consultation');
+        $procedure = $this->pricedService('Covered procedure', 'PRINS', 'RCH', 'procedure', 5000);
+        $procedure->prices()->create([
+            'facility_id' => $this->facility->id, 'payer_type' => 'insurance', 'insurance_provider_id' => $insurance->id,
+            'amount' => 3500, 'currency' => 'TZS', 'is_active' => true,
+        ]);
+        Livewire::actingAs($this->staff('doctor'))->test(Encounter::class, ['visit' => $visit])
+            ->assertSee('ANC Consultation')->assertSee('3,500.00')
+            ->set('procedureIds', [$procedure->id])->call('orderProcedures')->assertHasNoErrors();
+        $order = $visit->clinicalEncounters()->sole()->procedureOrders()->sole();
+        $this->assertSame('ordered', $order->status->value);
+        $this->assertSame('3500.00', $order->invoiceItem->insurance_amount);
+        $this->assertSame('0.00', $order->invoiceItem->patient_amount);
     }
 
     public function test_laboratory_selective_payment_and_released_result_review_are_independent_of_unperformed_tests(): void
@@ -237,6 +263,9 @@ class RchWorkflowTest extends TestCase
         $this->assertTrue($paid->isFinanciallyCleared());
         $this->assertTrue($freeItem->isFinanciallyCleared());
         $this->assertFalse($unpaid->isFinanciallyCleared());
+        $this->actingAs($doctor);
+        $screen->call('complete')->assertRedirect(route('rch.index'));
+        $this->assertNotSame('completed', $visit->refresh()->visit_status->value);
 
         $this->actingAs($tech);
         app(LaboratorySampleService::class)->collectSample($order, ['order_item_ids' => [$paid->id, $freeItem->id]], $tech, true);
@@ -249,9 +278,7 @@ class RchWorkflowTest extends TestCase
         $this->actingAs($this->admin);
         app(LaboratoryResultReleaseService::class)->release($result, $this->admin);
         $this->actingAs($doctor);
-        $screen->call('$refresh')->assertSee('12.75')->call('reviewResult', $result->id)->assertHasNoErrors();
-        $this->assertSame($doctor->id, $result->refresh()->reviewed_by_clinician);
-        $screen->call('complete')->assertHasErrors('encounter');
+        $screen->call('$refresh')->assertSee('12.75');
 
         $screen->set('testCancellationReasons.'.$unpaid->id, 'Test no longer required.')
             ->call('cancelTest', $unpaid->id)->assertHasNoErrors();
@@ -259,8 +286,11 @@ class RchWorkflowTest extends TestCase
         $this->actingAs($tech);
         app(LaboratoryOrderItemDecisionService::class)->decide($freeItem, 'not_performed', 'no_longer_required', 'Repeat testing not needed.', $tech);
         $this->assertSame('0.00', $visit->invoice->refresh()->balance_amount);
+        $this->assertSame('awaiting_doctor_review', $visit->refresh()->visit_status->value);
+        $this->assertSame('RCH', $visit->currentDepartment->code);
         $this->actingAs($doctor);
-        $screen->call('complete')->assertRedirect(route('rch.index'));
+        $screen->call('reviewResult', $result->id)->assertHasNoErrors();
+        $this->assertSame($doctor->id, $result->refresh()->reviewed_by_clinician);
         $this->assertSame('completed', $visit->refresh()->visit_status->value);
         $this->assertFalse($visit->queues()->where('department_id', $this->department('OPD')->id)->exists());
         $this->assertSame(4, $visit->invoice->items()->count());
@@ -322,7 +352,8 @@ class RchWorkflowTest extends TestCase
         }
         $this->assertDatabaseCount('medication_administrations', 1);
         $this->assertDatabaseHas('medication_administrations', ['prescription_item_id' => $injectionItem->id, 'administered_by' => $doctor->id]);
-        $screen->call('complete')->assertHasErrors('encounter');
+        $screen->call('complete')->assertRedirect(route('rch.index'));
+        $this->assertNotSame('completed', $visit->refresh()->visit_status->value);
 
         $this->actingAs($this->admin);
         try {
@@ -335,8 +366,7 @@ class RchWorkflowTest extends TestCase
         $this->actingAs($pharmacist);
         $dispensing->dispense($prescription, [[...$oralLine, 'quantity' => 3]], $location, $pharmacist);
         $this->assertSame('dispensed', $prescription->refresh()->status->value);
-        $this->assertSame('RCH', $visit->refresh()->currentDepartment->code);
-        $this->assertSame('in_consultation', $visit->visit_status->value);
+        $this->assertSame('completed', $visit->refresh()->visit_status->value);
         $this->assertSame('6.000', MedicineBatch::query()->where('batch_number', 'FOL-early')->sole()->available_quantity);
         $this->assertSame('10.000', MedicineBatch::query()->where('batch_number', 'FOL-late')->sole()->available_quantity);
         $this->actingAs($doctor);
@@ -349,16 +379,20 @@ class RchWorkflowTest extends TestCase
         $doctor = $this->staff('doctor');
         $doctor->givePermissionTo('rch.complete-ultrasound');
         $screen = Livewire::actingAs($doctor)->test(Encounter::class, ['visit' => $visit])
-            ->call('orderUltrasound')->assertHasNoErrors()
-            ->call('orderUltrasound')->assertHasNoErrors();
+            ->set('form.clinical_summary', 'Ultrasound consultation')
+            ->call('complete')->assertHasErrors('procedureIds')
+            ->set('procedureIds', [$this->service(RchService::Ultrasound)->id])->call('orderProcedures')->assertHasNoErrors()
+            ->set('procedureIds', [$this->service(RchService::Ultrasound)->id])->call('orderProcedures')->assertHasNoErrors();
         $order = RchEncounter::query()->sole()->clinicalEncounter->procedureOrders()->sole();
         $this->assertSame($this->service(RchService::Ultrasound)->id, $order->service_id);
         $this->assertSame('RCH Ultrasound', $order->procedure_name_snapshot);
         $this->assertSame($order->invoice_item_id, $visit->invoice->items()->sole()->id);
         $this->assertSame('ordered', $order->status->value);
-        $screen->call('complete')->assertHasErrors('encounter')
-            ->set('ultrasoundFindings', 'Ultrasound report recorded')
-            ->call('completeUltrasound', $order->id)->assertHasNoErrors()
+        $screen->call('complete')->assertRedirect(route('rch.index'));
+        $this->assertNotSame('completed', $visit->refresh()->visit_status->value);
+        $screen
+            ->set('procedureFindings.'.$order->id, 'Ultrasound report recorded')
+            ->call('completeProcedure', $order->id)->assertHasNoErrors()
             ->assertSee('Ultrasound report recorded')
             ->call('complete')->assertRedirect(route('rch.index'));
     }
@@ -373,21 +407,21 @@ class RchWorkflowTest extends TestCase
         $doctor = $this->staff('doctor');
         $doctor->givePermissionTo('rch.complete-ultrasound');
         $screen = Livewire::actingAs($doctor)->test(Encounter::class, ['visit' => $visit])
-            ->call('orderUltrasound')->assertHasNoErrors();
+            ->set('procedureIds', [$this->service(RchService::Ultrasound)->id])->call('orderProcedures')->assertHasNoErrors();
         $order = $visit->clinicalEncounters()->sole()->procedureOrders()->sole();
         $this->assertSame($ultrasound->id, $order->service_id);
         $this->assertSame('18250.00', $order->invoiceItem->patient_amount);
         $this->assertSame('awaiting_payment', $order->status->value);
 
-        $screen->set('ultrasoundFindings', 'Clinical scan findings')
-            ->call('completeUltrasound', $order->id)->assertHasErrors('procedure');
+        $screen->set('procedureFindings.'.$order->id, 'Clinical scan findings')
+            ->call('completeProcedure', $order->id)->assertHasErrors('procedure');
         $this->pay($visit->invoice, 18250, [$order->invoice_item_id => 18250]);
         $this->assertSame('ordered', $order->refresh()->status->value);
         $this->assertSame('RCH', $visit->refresh()->currentDepartment->code);
         $this->assertSame(1, $visit->queues()->where('department_id', $this->department('TRI')->id)->count());
 
         $this->actingAs($doctor);
-        $screen->call('completeUltrasound', $order->id)->assertHasNoErrors()
+        $screen->call('completeProcedure', $order->id)->assertHasNoErrors()
             ->call('complete')->assertRedirect(route('rch.index'));
     }
 
@@ -406,6 +440,209 @@ class RchWorkflowTest extends TestCase
             ->set('form.clinical_summary', 'Authorized clinical note')
             ->call('save')->assertHasNoErrors()
             ->call('addMedicine')->assertForbidden();
+    }
+
+    public function test_multiple_procedures_bill_separately_and_can_be_performed_after_consultation_sign_off(): void
+    {
+        $visit = $this->triagedVisit(RchService::Anc);
+        $first = $this->pricedService('Procedure A', 'PRA', 'RCH', 'procedure', 3500);
+        $second = $this->pricedService('Procedure B', 'PRB', 'RCH', 'procedure', 7000);
+        $foreign = Service::factory()->create(['service_type' => 'procedure']);
+        $doctor = $this->staff('doctor');
+        $doctor->givePermissionTo('rch.complete-procedure');
+        $screen = Livewire::actingAs($doctor)->test(Encounter::class, ['visit' => $visit])
+            ->assertSee('3,500.00')->assertSee('7,000.00')
+            ->call('complete')->assertHasErrors('clinical_content')
+            ->set('procedureIds', [$first->id, $foreign->id])->call('orderProcedures')->assertHasErrors('procedureIds')
+            ->set('procedureIds', [$first->id, $second->id])->call('orderProcedures')->assertHasNoErrors()
+            ->set('procedureIds', [$first->id, $second->id])->call('orderProcedures')->assertHasNoErrors();
+
+        $clinical = $visit->clinicalEncounters()->sole();
+        $this->assertSame(2, $clinical->procedureOrders()->count());
+        $this->assertSame(3, $visit->invoice->items()->count());
+        $orders = $clinical->procedureOrders()->with('invoiceItem')->get()->keyBy('service_id');
+        $firstOrder = $orders[$first->id];
+        $secondOrder = $orders[$second->id];
+        $this->assertSame('3500.00', $firstOrder->invoiceItem->patient_amount);
+        $this->assertSame('7000.00', $secondOrder->invoiceItem->patient_amount);
+        $screen->call('complete')->assertRedirect(route('rch.index'));
+        $screen->call('complete')->assertRedirect(route('rch.index'));
+        $this->assertSame($doctor->id, $clinical->refresh()->completed_by);
+        $this->assertNotNull($clinical->completed_at);
+        $this->assertSame(1, ActivityLog::query()->where('event', 'rch_encounter_completed')->count());
+        $this->assertNotSame('completed', $visit->refresh()->visit_status->value);
+        $this->assertSame('awaiting_payment', $firstOrder->refresh()->status->value);
+
+        $screen->set('procedureFindings.'.$firstOrder->id, 'Recorded findings')
+            ->call('completeProcedure', $firstOrder->id)->assertHasErrors('procedure');
+        $this->pay($visit->invoice, 3500, [$firstOrder->invoice_item_id => 3500]);
+        $this->actingAs($doctor);
+        $screen->call('completeProcedure', $firstOrder->id)->assertHasNoErrors();
+        $this->assertSame('completed', $firstOrder->refresh()->status->value);
+        $this->assertSame('awaiting_payment', $secondOrder->refresh()->status->value);
+        $this->assertNotSame('completed', $visit->refresh()->visit_status->value);
+
+        $this->pay($visit->invoice, 7000, [$secondOrder->invoice_item_id => 7000]);
+        $this->actingAs($doctor);
+        $screen->set('procedureFindings.'.$secondOrder->id, 'Second set of findings')
+            ->call('completeProcedure', $secondOrder->id)->assertHasNoErrors();
+        $this->assertSame('completed', $visit->refresh()->visit_status->value);
+        $screen->set('form.clinical_summary', 'Attempt to edit signed consultation')->call('save')->assertForbidden();
+    }
+
+    public static function linkedProgrammes(): array
+    {
+        return [
+            'ANC' => [RchService::Anc, AncScreen::class, AncVisit::class, 'assessment'],
+            'Family Planning' => [RchService::FamilyPlanning, FamilyPlanningScreen::class, FamilyPlanningVisit::class, 'notes'],
+            'Growth' => [RchService::ChildMonitoring, GrowthMeasurement::class, ChildGrowthMeasurement::class, 'notes'],
+        ];
+    }
+
+    #[DataProvider('linkedProgrammes')]
+    public function test_programme_worklist_opens_and_saves_one_record_against_the_existing_visit(RchService $programme, string $component, string $model, string $notesField): void
+    {
+        if ($programme === RchService::FamilyPlanning) {
+            $this->service($programme)->prices()->create([
+                'facility_id' => $this->facility->id, 'payer_type' => 'cash',
+                'amount' => 1200, 'currency' => 'TZS', 'is_active' => true,
+            ]);
+        }
+        $visit = $this->register($programme);
+        $nurse = $this->staff('rch-nurse');
+        $route = route($programme->visitRoute(), $visit);
+        $this->actingAs($nurse)->get(route('rch.index', ['programme' => $programme->value]))->assertDontSee($route, false);
+        $this->get($route)->assertStatus(409);
+        if ((float) $visit->invoice->balance_amount > 0) {
+            $this->pay($visit->invoice, (int) $visit->invoice->balance_amount);
+        }
+        $this->triage($visit);
+        $this->actingAs($nurse)->get(route('rch.index', ['programme' => $programme->value]))->assertSee($route, false);
+        $this->get($route)->assertOk()->assertSee($visit->patient->fullName());
+        $screen = Livewire::actingAs($nurse)->test($component, ['linkedVisit' => $visit->id])
+            ->set('form.'.$notesField, 'Notes from the linked visit')
+            ->call('save')->assertHasNoErrors();
+        $screen->call('save')->assertHasNoErrors();
+        $this->get($route)->assertOk();
+
+        $record = $model::query()->sole();
+        $encounter = RchEncounter::query()->sole();
+        $this->assertSame($visit->id, $record->visit_id);
+        $this->assertSame($encounter->id, $record->rch_encounter_id);
+        $this->assertSame($visit->patient_id, $record->patient_id ?? $record->child_patient_id);
+        $this->assertDatabaseCount('patients', 1);
+        $this->assertSame(1, $visit->invoice->items()->count());
+    }
+
+    public function test_linked_anc_reuses_existing_pregnancy_and_preserves_unlinked_history(): void
+    {
+        $visit = $this->triagedVisit(RchService::Anc);
+        $this->actingAs($this->admin);
+        $pregnancy = app(PregnancyService::class)->register($visit->patient, [], $this->admin);
+        $original = $pregnancy->ancVisits()->create([
+            'facility_id' => $visit->facility_id, 'patient_id' => $visit->patient_id,
+            'anc_visit_number' => 1, 'visit_date' => today()->subWeek()->toDateString(),
+            'gestational_age_weeks' => 12, 'assessment' => 'Existing ANC history',
+        ]);
+
+        $nurse = $this->staff('rch-nurse');
+        $this->actingAs($nurse)->get(route('rch.visits.pnc', $visit))->assertNotFound();
+        Livewire::actingAs($nurse)->test(AncScreen::class, ['linkedVisit' => $visit->id])
+            ->set('form.assessment', 'New ANC visit')->call('save')->assertHasNoErrors();
+        $this->assertSame(1, Pregnancy::query()->count());
+        $this->assertSame('Existing ANC history', $original->refresh()->assessment);
+        $this->assertNull($original->rch_encounter_id);
+        $linked = $pregnancy->ancVisits()->where('visit_id', $visit->id)->sole();
+        $this->assertSame(2, $linked->anc_visit_number);
+        $this->assertSame(RchEncounter::query()->sole()->id, $linked->rch_encounter_id);
+    }
+
+    public function test_linked_immunization_records_the_existing_patient_and_encounter_once(): void
+    {
+        $visit = $this->triagedVisit(RchService::ChildMonitoring);
+        $this->seed(VaccineSeeder::class);
+        $vaccine = Vaccine::query()->firstOrFail();
+        $nurse = $this->staff('rch-nurse');
+        $route = route('rch.visits.immunization', $visit);
+        $this->actingAs($nurse)->get($route)->assertOk()->assertSee($visit->patient->fullName());
+        $screen = Livewire::actingAs($nurse)->test(Administer::class, ['linkedVisit' => $visit->id])
+            ->set('form.vaccine_id', $vaccine->id)->set('form.status', 'not_given')
+            ->set('form.reason_not_given', 'Deferred at this visit')->call('save')->assertHasNoErrors();
+        $screen->call('save')->assertHasNoErrors();
+
+        $record = ImmunizationAdministration::query()->sole();
+        $this->assertSame($visit->patient_id, $record->patient_id);
+        $this->assertSame($visit->id, $record->visit_id);
+        $this->assertSame(RchEncounter::query()->sole()->id, $record->rch_encounter_id);
+        $this->assertDatabaseCount('patients', 1);
+        $this->assertSame(1, $visit->invoice->items()->count());
+    }
+
+    public function test_pnc_saves_versions_and_history_across_new_and_returning_encounters(): void
+    {
+        $visit = $this->triagedVisit(RchService::Pnc);
+        $nurse = $this->staff('rch-nurse');
+        $route = route('rch.visits.pnc', $visit);
+        $this->actingAs($nurse)->get($route)->assertOk()->assertSee($visit->patient->fullName());
+        $screen = Livewire::actingAs($nurse)->test(PncScreen::class, ['linkedVisit' => $visit->id])
+            ->set('form.delivery_date', today()->subDays(4)->toDateString())
+            ->set('form.clinical_notes', 'First PNC clinical notes')
+            ->set('form.newborn_condition', 'Newborn assessment documented')
+            ->call('save')->assertHasNoErrors()
+            ->set('form.breastfeeding_counselling', 'Counselling documented')
+            ->call('save')->assertHasNoErrors()->call('save')->assertHasNoErrors();
+        $record = PncVisit::query()->sole();
+        $this->assertSame($visit->patient_id, $record->patient_id);
+        $this->assertSame('Counselling documented', $record->breastfeeding_counselling);
+        $this->assertDatabaseHas('activity_logs', ['event' => 'pnc_visit_created', 'subject_id' => $record->id]);
+        $this->assertSame(1, ActivityLog::query()->where('event', 'pnc_visit_updated')->where('subject_id', $record->id)->count());
+        $this->assertDatabaseCount('anc_visits', 0);
+
+        Livewire::actingAs($nurse)->test(Encounter::class, ['visit' => $visit])->call('complete')->assertRedirect(route('rch.index'));
+        $this->assertSame('completed', $record->refresh()->status);
+        $screen->set('form.clinical_notes', 'Attempt to edit signed PNC')->call('save')->assertForbidden();
+
+        $this->actingAs($this->admin);
+        $return = app(ReceptionWorkflowService::class)->openReturningPatientVisit(
+            $visit->patient, ['payer_type' => 'cash', 'is_primary' => true], $this->visitData(RchService::Pnc), [], $this->admin,
+        )['visit'];
+        $this->pay($return->invoice, 1000);
+        $this->triage($return);
+        Livewire::actingAs($nurse)->test(PncScreen::class, ['linkedVisit' => $return->id])
+            ->assertSee('PNC history')->assertSee($route, false)
+            ->set('form.clinical_notes', 'Second PNC notes')->call('save')->assertHasNoErrors();
+        $this->assertSame(2, PncVisit::query()->where('patient_id', $visit->patient_id)->count());
+        $this->assertDatabaseCount('patients', 1);
+        $this->assertSame(1, $return->invoice->items()->count());
+
+        $other = Facility::factory()->create();
+        $this->actingAs($this->staff('rch-nurse', $other))->get($route)->assertNotFound();
+        $this->actingAs($this->staff('receptionist'))->get($route)->assertForbidden();
+    }
+
+    public function test_pnc_saves_and_reopens_without_maternal_vitals(): void
+    {
+        $visit = $this->register(RchService::Pnc);
+        $this->pay($visit->invoice, 1000);
+        $this->triage($visit, []);
+        $nurse = $this->staff('rch-nurse');
+        $screen = Livewire::actingAs($nurse)->test(PncScreen::class, ['linkedVisit' => $visit->id])
+            ->assertSet('form.maternal_vitals.temperature', null)
+            ->assertSet('form.maternal_vitals.weight_kg', null)
+            ->set('form.clinical_notes', 'Postnatal observations without recorded vitals')
+            ->call('save')->assertHasNoErrors();
+
+        $record = PncVisit::query()->sole();
+        $this->assertIsArray($record->maternal_vitals);
+        $this->assertSame([], array_filter($record->maternal_vitals, fn ($value) => $value !== null));
+        $screen->set('form.maternal_vitals', [])->call('save')->assertHasNoErrors();
+        $this->assertSame([], $record->refresh()->maternal_vitals);
+        $this->assertNotNull($record->getRawOriginal('maternal_vitals'));
+
+        Livewire::actingAs($nurse)->test(PncScreen::class, ['linkedVisit' => $visit->id])
+            ->assertSet('form.maternal_vitals', [])
+            ->assertSet('form.clinical_notes', 'Postnatal observations without recorded vitals');
+        $this->assertDatabaseCount('pnc_visits', 1);
     }
 
     private function register(RchService $programme, ?string $key = null, array $payer = []): Visit
@@ -431,19 +668,21 @@ class RchWorkflowTest extends TestCase
     private function triagedVisit(RchService $programme): Visit
     {
         $visit = $this->register($programme);
-        $this->pay($visit->invoice, $programme->defaultPrice());
+        if ((float) $visit->invoice->balance_amount > 0) {
+            $this->pay($visit->invoice, (int) $visit->invoice->balance_amount);
+        }
         $this->triage($visit);
 
         return $visit->refresh();
     }
 
-    private function triage(Visit $visit): void
+    private function triage(Visit $visit, array $vitals = ['temperature' => 36.5, 'weight_kg' => 50]): void
     {
         $nurse = $this->staff('nurse');
         $this->actingAs($nurse);
         $triage = app(TriageService::class);
         $assessment = $triage->startAssessment($visit->refresh(), $nurse);
-        $triage->completeAssessment($assessment, ['temperature' => 36.5, 'weight_kg' => 50], $nurse);
+        $triage->completeAssessment($assessment, $vitals, $nurse);
         $this->assertSame('RCH', $visit->refresh()->currentDepartment->code);
         $this->assertSame('RCH', $visit->currentQueue->department->code);
     }

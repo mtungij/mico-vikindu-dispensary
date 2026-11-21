@@ -69,6 +69,9 @@ class LaboratoryResultReleaseService
                 'subject_type' => $result::class,
                 'subject_id' => $result->id,
             ]);
+            if ($result->order->source === LaboratoryOrder::SOURCE_RCH) {
+                $this->visitClosure->evaluate($visit, $actor);
+            }
         });
     }
 

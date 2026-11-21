@@ -3,8 +3,10 @@
 namespace App\Livewire\Rch;
 
 use App\Enums\LaboratoryResultStatus;
+use App\Enums\PayerType;
 use App\Enums\PrescriptionStatus;
 use App\Enums\RchService;
+use App\Enums\ServiceType;
 use App\Livewire\Forms\PrescriptionItemForm;
 use App\Livewire\Forms\Rch\RchEncounterForm;
 use App\Models\ClinicalProcedureOrder;
@@ -16,6 +18,7 @@ use App\Models\MedicationAdministration;
 use App\Models\Medicine;
 use App\Models\PrescriptionItem;
 use App\Models\RchEncounter;
+use App\Models\Service;
 use App\Models\Visit;
 use App\Services\ClinicalEncounterService;
 use App\Services\LaboratoryOrderItemDecisionService;
@@ -25,6 +28,7 @@ use App\Services\PrescriptionService;
 use App\Services\ProcedureOrderService;
 use App\Services\RchWorkflowService;
 use App\Services\ReceptionChargeService;
+use App\Services\ServicePricingService;
 use App\Support\MedicationDirections;
 use App\Support\Notifier;
 use Illuminate\Contracts\View\View;
@@ -50,11 +54,13 @@ class Encounter extends Component
 
     public array $testCancellationReasons = [];
 
-    public ?string $ultrasoundInstructions = null;
+    public array $procedureIds = [];
 
-    public ?string $ultrasoundFindings = null;
+    public ?string $procedureInstructions = null;
 
-    public ?string $cancellationReason = null;
+    public array $procedureFindings = [];
+
+    public array $procedureCancellationReasons = [];
 
     public array $prescriptionCancellationReasons = [];
 
@@ -128,7 +134,7 @@ class Encounter extends Component
     public function cancelTest(int $itemId, RchWorkflowService $workflow, LaboratoryOrderItemDecisionService $decisions): void
     {
         $this->validate(["testCancellationReasons.$itemId" => ['required', 'string', 'max:2000']]);
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($itemId, $decisions): void {
+        $workflow->withEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($itemId, $decisions): void {
             $item = LaboratoryOrderItem::query()->whereHas('order', fn ($query) => $query
                 ->where('facility_id', $encounter->facility_id)
                 ->where('visit_id', $encounter->visit_id)
@@ -142,7 +148,7 @@ class Encounter extends Component
 
     public function reviewResult(int $resultId, RchWorkflowService $workflow, LaboratoryResultReleaseService $results): void
     {
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter, Visit $visit) use ($resultId, $results): void {
+        $workflow->withEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter, Visit $visit) use ($resultId, $results): void {
             $result = $this->releasedResults($encounter, $visit)->findOrFail($resultId);
             $results->markReviewed($result, auth()->user());
         });
@@ -188,7 +194,7 @@ class Encounter extends Component
     public function cancelPrescription(int $prescriptionId, RchWorkflowService $workflow, PrescriptionService $prescriptions): void
     {
         $this->validate(["prescriptionCancellationReasons.$prescriptionId" => ['required', 'string', 'max:2000']]);
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($prescriptionId, $prescriptions): void {
+        $workflow->withEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($prescriptionId, $prescriptions): void {
             $prescription = $encounter->clinicalEncounter->prescriptions()->lockForUpdate()->findOrFail($prescriptionId);
             Gate::authorize('cancel', $prescription);
             if ($prescription->status === PrescriptionStatus::Cancelled) {
@@ -200,32 +206,37 @@ class Encounter extends Component
         unset($this->prescriptionCancellationReasons[$prescriptionId]);
     }
 
-    public function orderUltrasound(RchWorkflowService $workflow): void
+    public function orderProcedures(RchWorkflowService $workflow): void
     {
-        $this->validate(['ultrasoundInstructions' => ['nullable', 'string', 'max:2000']]);
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter, Visit $visit) use ($workflow): void {
-            $workflow->orderUltrasound($encounter, $visit, auth()->user(), $this->ultrasoundInstructions);
+        $data = $this->validate([
+            'procedureIds' => ['required', 'array', 'min:1', 'max:40'],
+            'procedureIds.*' => ['integer', 'distinct'],
+            'procedureInstructions' => ['nullable', 'string', 'max:2000'],
+        ]);
+        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter, Visit $visit) use ($workflow, $data): void {
+            $workflow->orderProcedures($encounter, $visit, $data['procedureIds'], auth()->user(), $data['procedureInstructions']);
         });
-        $this->reset('ultrasoundInstructions');
+        $this->reset('procedureIds', 'procedureInstructions');
     }
 
-    public function completeUltrasound(int $orderId, RchWorkflowService $workflow, ProcedureOrderService $procedures): void
+    public function completeProcedure(int $orderId, RchWorkflowService $workflow, ProcedureOrderService $procedures): void
     {
-        Gate::authorize('rch.complete-ultrasound');
-        $this->validate(['ultrasoundFindings' => ['required', 'string', 'max:10000']]);
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($orderId, $procedures): void {
-            $procedures->completeOrder($this->ultrasoundOrder($encounter, $orderId), auth()->user(), $this->ultrasoundFindings);
+        $this->validate(["procedureFindings.$orderId" => ['required', 'string', 'max:10000']]);
+        $workflow->withEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($orderId, $procedures): void {
+            $order = $this->procedureOrder($encounter, $orderId);
+            Gate::authorize($order->service?->code === RchService::Ultrasound->value ? 'rch.complete-ultrasound' : 'rch.complete-procedure');
+            $procedures->completeOrder($order, auth()->user(), $this->procedureFindings[$orderId]);
         });
-        $this->reset('ultrasoundFindings');
+        unset($this->procedureFindings[$orderId]);
     }
 
-    public function cancelUltrasound(int $orderId, RchWorkflowService $workflow, ProcedureOrderService $procedures): void
+    public function cancelProcedure(int $orderId, RchWorkflowService $workflow, ProcedureOrderService $procedures): void
     {
-        $this->validate(['cancellationReason' => ['required', 'string', 'max:2000']]);
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($orderId, $procedures): void {
-            $procedures->cancelOrder($this->ultrasoundOrder($encounter, $orderId), $this->cancellationReason, auth()->user());
+        $this->validate(["procedureCancellationReasons.$orderId" => ['required', 'string', 'max:2000']]);
+        $workflow->withEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter) use ($orderId, $procedures): void {
+            $procedures->cancelOrder($this->procedureOrder($encounter, $orderId), $this->procedureCancellationReasons[$orderId], auth()->user());
         });
-        $this->reset('cancellationReason');
+        unset($this->procedureCancellationReasons[$orderId]);
     }
 
     public function recordInjection(RchWorkflowService $workflow, MedicationAdministrationService $administrations): void
@@ -238,7 +249,7 @@ class Encounter extends Component
             'injectionQuantity' => ['required', 'numeric', 'decimal:0,3', 'min:0.001'],
             'injectionNotes' => ['nullable', 'string', 'max:2000'],
         ]);
-        $workflow->withOpenEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter, Visit $visit) use ($administrations, $data): void {
+        $workflow->withEncounter($this->encounter, auth()->user(), function (RchEncounter $encounter, Visit $visit) use ($administrations, $data): void {
             $item = PrescriptionItem::query()->whereHas('prescription', fn ($query) => $query
                 ->where('clinical_encounter_id', $encounter->clinical_encounter_id))->findOrFail($data['injectionItem']);
             $administrations->recordRchInjection($visit, $item, [
@@ -247,7 +258,7 @@ class Encounter extends Component
                 'quantity' => $data['injectionQuantity'],
                 'notes' => $data['injectionNotes'],
             ], auth()->user());
-        });
+        }, allowCompleted: true);
         $this->reset('injectionItem', 'injectionTime', 'injectionDose', 'injectionQuantity', 'injectionNotes');
         Notifier::success('Injection administration recorded.');
     }
@@ -277,7 +288,7 @@ class Encounter extends Component
     {
         Gate::authorize('complete', $this->encounter);
         $workflow->completeEncounter($this->encounter, auth()->user(), $this->form->validate());
-        Notifier::success('RCH encounter completed.');
+        Notifier::success(__('rch.consultation_completed'));
 
         return redirect()->route('rch.index');
     }
@@ -291,10 +302,10 @@ class Encounter extends Component
             ->whereHas('orderItem', fn ($query) => $query->whereNotIn('status', ['cancelled', 'not_performed', 'entered_in_error']));
     }
 
-    private function ultrasoundOrder(RchEncounter $encounter, int $id): ClinicalProcedureOrder
+    private function procedureOrder(RchEncounter $encounter, int $id): ClinicalProcedureOrder
     {
-        return $encounter->clinicalEncounter->procedureOrders()->whereHas('service', fn ($query) => $query
-            ->where('facility_id', $encounter->facility_id)->where('code', RchService::Ultrasound->value))->findOrFail($id);
+        return $encounter->clinicalEncounter->procedureOrders()->forCurrentFacility()
+            ->where('visit_id', $encounter->visit_id)->where('patient_id', $encounter->patient_id)->findOrFail($id);
     }
 
     public function render(): View
@@ -320,6 +331,22 @@ class Encounter extends Component
 
         $rchCatalogue = app(ReceptionChargeService::class)->rchServices($visit->destinationDepartment)->orderBy('name')->get();
 
+        $procedureOrders = $clinical->procedureOrders()->forCurrentFacility()->with(['service', 'invoiceItem'])->get();
+        $payer = $visit->payerProfile;
+        $pricing = app(ServicePricingService::class);
+        $prepaidProcedure = $visit->invoice?->items()->where('metadata->charge_source', 'reception_rch_service')
+            ->whereNull('reference_id')->where('item_type', ServiceType::Procedure->value)->first();
+        $procedureOptions = auth()->user()->can('procedure-orders.create') ? Service::query()->forCurrentFacility()
+            ->where('service_type', ServiceType::Procedure)->where('is_active', true)
+            ->whereNotIn('id', $procedureOrders->pluck('service_id')->filter())->orderBy('name')->get()
+            ->mapWithKeys(fn (Service $service) => [$service->id => [
+                'name' => $service->name,
+                'price' => $service->id === $prepaidProcedure?->service_id ? $prepaidProcedure->unit_price
+                    : $pricing->getCurrentPrice($service, $visit->payer_type, $payer?->insurance_provider_id, $payer?->corporate_account_id)?->amount,
+                'exempt' => $visit->payer_type === PayerType::Exempted,
+                'billable' => $service->requires_payment || $service->code === RchService::Ultrasound->value,
+            ]]) : collect();
+
         return view('livewire.rch.encounter', [
             'triage' => $visit->latestCompletedTriageAssessment,
             'rchService' => RchService::tryFrom($visit->consultationService?->code ?? ''),
@@ -334,8 +361,10 @@ class Encounter extends Component
             'medicines' => $medicines,
             'prescriptions' => $prescriptions,
             'rchCatalogue' => $rchCatalogue,
-            'ultrasoundAvailable' => $rchCatalogue->contains('code', RchService::Ultrasound->value),
-            'ultrasound' => auth()->user()->can('procedure-orders.view') ? $clinical->procedureOrders()->whereHas('service', fn ($query) => $query->where('code', RchService::Ultrasound->value))->first() : null,
+            'procedureOptions' => $procedureOptions,
+            'procedureOrders' => auth()->user()->can('procedure-orders.view') ? $procedureOrders : collect(),
+            'canRecordInjection' => ! in_array($visit->visit_status->value, ['cancelled', 'discharged', 'referred'], true),
+            'visitActive' => ! in_array($visit->visit_status->value, ['completed', 'cancelled', 'discharged', 'referred'], true),
             'appointments' => $clinical->appointments()->orderBy('scheduled_start')->get(),
             'injectables' => $prescriptions->flatMap->items->filter(fn (PrescriptionItem $item) => (float) $item->dispensed_quantity > 0
                 && in_array(MedicationDirections::normalizeRoute($item->route), ['Intramuscular', 'Intravenous', 'Subcutaneous'], true)),

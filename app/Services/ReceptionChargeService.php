@@ -375,7 +375,7 @@ class ReceptionChargeService
     private function requiredPrice(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): ServicePrice
     {
         $price = $this->pricing->getCurrentPrice($service, $payerType, $insuranceProviderId, $corporateAccountId);
-        if (($service->requires_payment || RchService::tryFrom($service->code)) && ! $price) {
+        if (($service->requires_payment || RchService::tryFrom($service->code)?->defaultPrice() !== null) && ! $price) {
             ActivityLog::query()->create([
                 'user_id' => auth()->id(),
                 'event' => 'missing_service_price_blocked_registration',

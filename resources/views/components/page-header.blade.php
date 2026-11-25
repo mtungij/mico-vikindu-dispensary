@@ -4,7 +4,7 @@
         <x-breadcrumb :items="[['label' => 'Dashibodi', 'url' => route('dashboard')], ['label' => $title]]" />
         <h1 class="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">{{ $title }}</h1>
         @if ($description)
-            <p class="mt-1 max-w-3xl text-sm text-slate-500 dark:text-slate-400">{{ $description }}</p>
+            <p class="mt-1 max-w-3xl text-sm wrap-anywhere text-slate-500 dark:text-slate-400">{{ $description }}</p>
         @endif
     </div>
     @if (trim($slot) !== '')

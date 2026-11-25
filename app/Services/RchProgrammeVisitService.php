@@ -48,12 +48,9 @@ class RchProgrammeVisitService
 
     public function childProfile(Patient $patient, User $actor): RchChild
     {
-        $child = RchChild::query()->forCurrentFacility()->withTrashed()->where('child_patient_id', $patient->id)->first();
-        if ($child?->trashed() || (! $child && ! $patient->date_of_birth)) {
-            throw ValidationException::withMessages(['child' => 'Check the date of birth and child profile on the existing patient record.']);
-        }
+        $children = app(RchChildService::class);
 
-        return $child ?? app(RchChildService::class)->register($patient, [], $actor);
+        return $children->profileForProgramme($patient) ?? $children->register($patient, [], $actor);
     }
 
     public function save(RchEncounter $encounter, RchService $programme, User $actor, callable $write, ?string $permission = null): mixed

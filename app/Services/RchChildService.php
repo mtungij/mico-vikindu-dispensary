@@ -13,6 +13,20 @@ class RchChildService
 {
     public function __construct(private readonly RchEncounterNumberService $numbers) {}
 
+    public function profileForProgramme(Patient $patient): ?RchChild
+    {
+        $child = RchChild::withTrashed()->where('facility_id', $patient->facility_id)
+            ->where('child_patient_id', $patient->id)->first();
+
+        if ($child?->trashed() || (! $child && (! $patient->date_of_birth || $patient->date_of_birth->isFuture()))) {
+            throw ValidationException::withMessages([
+                'child' => 'Child Growth Monitoring requires a valid date of birth or an existing RCH child record. Please check the patient record.',
+            ]);
+        }
+
+        return $child;
+    }
+
     public function register(Patient $child, array $data, $actor): RchChild
     {
         return DB::transaction(function () use ($child, $data, $actor): RchChild {
@@ -54,6 +68,7 @@ class RchChildService
                 }
             }
             ActivityLog::query()->create(['user_id' => $actor->id, 'event' => 'rch_child_registered', 'subject_type' => RchChild::class, 'subject_id' => $rchChild->id]);
+
             return $rchChild;
         });
     }
@@ -63,6 +78,7 @@ class RchChildService
         if ($patientId === $relatedPatientId) {
             throw ValidationException::withMessages(['related_patient_id' => 'Patient hawezi kuwa na relationship na yeye mwenyewe.']);
         }
+
         return PatientRelationship::query()->firstOrCreate([
             'facility_id' => currentFacility()?->id,
             'patient_id' => $patientId,

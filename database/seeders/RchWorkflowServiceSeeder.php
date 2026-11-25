@@ -30,7 +30,7 @@ class RchWorkflowServiceSeeder extends Seeder
                             'service_category_id' => $category->id,
                             'name' => $definition->catalogueName(),
                             'service_type' => $definition->serviceType(),
-                            'requires_payment' => $definition->defaultPrice() !== null,
+                            'requires_payment' => $definition->defaultPrice() > 0,
                             'is_active' => true,
                         ],
                     );
@@ -40,10 +40,18 @@ class RchWorkflowServiceSeeder extends Seeder
                     }
 
                     if ($service->department_id === null) {
-                        $service->update(['department_id' => $department->id]);
+                        $service->department_id = $department->id;
                     }
 
-                    if ($definition->defaultPrice() !== null && ! $service->prices()->withTrashed()->where('payer_type', 'cash')->exists()) {
+                    if (in_array($definition, [RchService::ChildMonitoring, RchService::FamilyPlanning], true)) {
+                        $service->requires_payment = $definition->defaultPrice() > 0;
+                    }
+
+                    if ($service->isDirty()) {
+                        $service->save();
+                    }
+
+                    if (! $service->prices()->withTrashed()->where('payer_type', 'cash')->exists()) {
                         $service->prices()->create([
                             'facility_id' => $department->facility_id,
                             'payer_type' => 'cash',

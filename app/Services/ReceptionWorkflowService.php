@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\RchService;
 use App\Enums\VisitStatus;
 use App\Models\ActivityLog;
 use App\Models\Department;
@@ -26,6 +27,7 @@ class ReceptionWorkflowService
         private readonly ReceptionChargeService $charges,
         private readonly LaboratoryOrderService $laboratoryOrders,
         private readonly PatientDuplicateDetectionService $duplicates,
+        private readonly RchChildService $rchChildren,
     ) {}
 
     public function registerNewPatientAndVisit(array $patientData, array $payerData, array $visitData, array $serviceIds = [], $actor = null, array $duplicateReview = []): array
@@ -51,6 +53,9 @@ class ReceptionWorkflowService
             $visitData['payer_type'] = $payerProfile->payer_type->value;
             $destination = $this->charges->destination($patient->facility, (int) $visitData['destination_department_id']);
             $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null, $visitData['visit_type'] ?? 'new_patient');
+            if ($destination->code === 'RCH' && $consultation?->code === RchService::ChildMonitoring->value) {
+                $this->rchChildren->profileForProgramme($patient);
+            }
             $visitData['consultation_service_id'] = $consultation?->id;
             [$registration] = $this->charges->validateChargeConfiguration($patient->facility, true, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id, $visitData['visit_type'] ?? 'new_patient');
             $visit = $this->visits->createVisit($patient, $visitData, $actor);
@@ -140,6 +145,9 @@ class ReceptionWorkflowService
             $visitData['patient_payer_profile_id'] = $payerProfile->id;
             $visitData['payer_type'] = $payerProfile->payer_type->value;
             $consultation = $this->charges->resolveConsultationService($patient->facility, $destination, $visitData['consultation_service_id'] ?? null, $visitData['visit_type'] ?? 'returning_patient');
+            if ($destination->code === 'RCH' && $consultation?->code === RchService::ChildMonitoring->value) {
+                $this->rchChildren->profileForProgramme($patient);
+            }
             $visitData['consultation_service_id'] = $consultation?->id;
             [$registration] = $this->charges->validateChargeConfiguration($patient->facility, false, $destination, $consultation, $payerProfile->payer_type, $payerProfile->insurance_provider_id, $payerProfile->corporate_account_id, $visitData['visit_type'] ?? 'returning_patient');
             $visit = $this->visits->createVisit($patient, $visitData, $actor, $canOverride);

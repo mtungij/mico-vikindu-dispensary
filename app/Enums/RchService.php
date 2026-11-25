@@ -13,7 +13,7 @@ enum RchService: string
     public function label(): string
     {
         return match ($this) {
-            self::ChildMonitoring => 'Child Monitoring',
+            self::ChildMonitoring => 'Child Growth Monitoring',
             self::Anc => 'ANC Consultation',
             self::Pnc => 'PNC Consultation',
             self::FamilyPlanning => 'Family Planning',
@@ -26,12 +26,12 @@ enum RchService: string
         return $this === self::Ultrasound ? 'RCH Ultrasound' : $this->label();
     }
 
-    public function defaultPrice(): ?int
+    public function defaultPrice(): int
     {
         return match ($this) {
             self::ChildMonitoring => 500,
             self::Anc, self::Pnc => 1000,
-            self::FamilyPlanning => null,
+            self::FamilyPlanning => 0,
             self::Ultrasound => 15000,
         };
     }

@@ -317,6 +317,8 @@ class Encounter extends Component
         $prescriptions = auth()->user()->canAny(['prescriptions.view', 'prescriptions.create', 'rch.administer-medication'])
             ? $clinical->prescriptions()->with('items')->get() : collect();
         $canOrderTests = Gate::allows('create', [LaboratoryOrder::class, $clinical]);
+        $visitActive = ! in_array($visit->visit_status->value, ['completed', 'cancelled', 'discharged', 'referred'], true);
+        $open = $visitActive && ! $clinical->isReadOnly() && $this->encounter->status === 'in_progress';
         $results = auth()->user()->can('laboratory-results.view')
             ? $this->releasedResults($this->encounter, $visit)->with(['values', 'test'])->latest('released_at')->get() : collect();
         $medicines = [];
@@ -334,29 +336,59 @@ class Encounter extends Component
         $procedureOrders = $clinical->procedureOrders()->forCurrentFacility()->with(['service', 'invoiceItem'])->get();
         $payer = $visit->payerProfile;
         $pricing = app(ServicePricingService::class);
-        $prepaidProcedure = $visit->invoice?->items()->where('metadata->charge_source', 'reception_rch_service')
-            ->whereNull('reference_id')->where('item_type', ServiceType::Procedure->value)->first();
-        $procedureOptions = auth()->user()->can('procedure-orders.create') ? Service::query()->forCurrentFacility()
-            ->where('service_type', ServiceType::Procedure)->where('is_active', true)
-            ->whereNotIn('id', $procedureOrders->pluck('service_id')->filter())->orderBy('name')->get()
-            ->mapWithKeys(fn (Service $service) => [$service->id => [
-                'name' => $service->name,
-                'price' => $service->id === $prepaidProcedure?->service_id ? $prepaidProcedure->unit_price
-                    : $pricing->getCurrentPrice($service, $visit->payer_type, $payer?->insurance_provider_id, $payer?->corporate_account_id)?->amount,
-                'exempt' => $visit->payer_type === PayerType::Exempted,
-                'billable' => $service->requires_payment || $service->code === RchService::Ultrasound->value,
-            ]]) : collect();
+        $testOptions = collect();
+        if ($open && $canOrderTests) {
+            $invoice = $visit->invoice;
+            $labPayer = $invoice ? $invoice->patientPayerProfile : $payer;
+            $testOptions = LaboratoryTest::query()->forCurrentFacility()->where('is_active', true)
+                ->whereHas('service', fn ($query) => $query->where('is_active', true)->where('facility_id', $visit->facility_id))
+                ->with('service')->orderBy('name')->get()
+                ->mapWithKeys(function (LaboratoryTest $test) use ($pricing, $visit, $invoice, $labPayer): array {
+                    $price = $pricing->getCurrentPrice(
+                        $test->service,
+                        $invoice?->payer_type ?? $visit->payer_type,
+                        $invoice?->insurance_provider_id ?? $labPayer?->insurance_provider_id,
+                        $invoice?->corporate_account_id ?? $labPayer?->corporate_account_id,
+                    );
+
+                    return [$test->service_id => [
+                        'name' => $test->name,
+                        'price' => $price ? $pricing->formatMoney($price->amount, $price->currency)
+                            : ($test->service->requires_payment ? 'Price unavailable for payer' : 'No charge required'),
+                    ]];
+                });
+        }
+
+        $procedureOptions = collect();
+        if ($open && auth()->user()->can('procedure-orders.create')) {
+            $prepaidProcedures = $visit->invoice?->items()->where('metadata->charge_source', 'reception_rch_service')
+                ->whereNull('reference_id')->where('item_type', ServiceType::Procedure->value)->get()->keyBy('service_id');
+            $procedureOptions = Service::query()->forCurrentFacility()
+                ->where('service_type', ServiceType::Procedure)->where('is_active', true)
+                ->whereNotIn('id', $procedureOrders->pluck('service_id')->filter())->orderBy('name')->get()
+                ->mapWithKeys(function (Service $service) use ($pricing, $visit, $payer, $prepaidProcedures): array {
+                    $price = $prepaidProcedures?->get($service->id)?->unit_price
+                        ?? $pricing->getCurrentPrice($service, $visit->payer_type, $payer?->insurance_provider_id, $payer?->corporate_account_id)?->amount;
+                    $billable = $service->requires_payment || $service->code === RchService::Ultrasound->value;
+
+                    return [$service->id => [
+                        'name' => $service->name,
+                        'price' => $price !== null ? $pricing->formatMoney($price) : match (true) {
+                            $visit->payer_type === PayerType::Exempted => 'Exempt',
+                            $billable => 'Price unavailable for payer',
+                            default => 'No charge required',
+                        },
+                    ]];
+                });
+        }
 
         return view('livewire.rch.encounter', [
             'triage' => $visit->latestCompletedTriageAssessment,
             'rchService' => RchService::tryFrom($visit->consultationService?->code ?? ''),
-            'open' => ! $clinical->isReadOnly() && $this->encounter->status === 'in_progress'
-                && ! in_array($visit->visit_status->value, ['completed', 'cancelled', 'discharged', 'referred'], true),
+            'open' => $open,
             'laboratory' => $laboratory,
             'canOrderTests' => $canOrderTests,
-            'tests' => $canOrderTests ? LaboratoryTest::query()->forCurrentFacility()->where('is_active', true)
-                ->whereHas('service', fn ($query) => $query->where('is_active', true)->where('facility_id', $visit->facility_id))
-                ->orderBy('name')->get() : collect(),
+            'testOptions' => $testOptions,
             'results' => $results,
             'medicines' => $medicines,
             'prescriptions' => $prescriptions,
@@ -364,7 +396,7 @@ class Encounter extends Component
             'procedureOptions' => $procedureOptions,
             'procedureOrders' => auth()->user()->can('procedure-orders.view') ? $procedureOrders : collect(),
             'canRecordInjection' => ! in_array($visit->visit_status->value, ['cancelled', 'discharged', 'referred'], true),
-            'visitActive' => ! in_array($visit->visit_status->value, ['completed', 'cancelled', 'discharged', 'referred'], true),
+            'visitActive' => $visitActive,
             'appointments' => $clinical->appointments()->orderBy('scheduled_start')->get(),
             'injectables' => $prescriptions->flatMap->items->filter(fn (PrescriptionItem $item) => (float) $item->dispensed_quantity > 0
                 && in_array(MedicationDirections::normalizeRoute($item->route), ['Intramuscular', 'Intravenous', 'Subcutaneous'], true)),

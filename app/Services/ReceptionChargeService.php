@@ -117,6 +117,10 @@ class ReceptionChargeService
 
     public function resolveConsultationPrice(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): ?ServicePrice
     {
+        if ($this->isFreeRchConsultation($service)) {
+            return new ServicePrice(['amount' => RchService::FamilyPlanning->defaultPrice(), 'currency' => 'TZS']);
+        }
+
         return $this->requiredPrice($service, $payerType, $insuranceProviderId, $corporateAccountId);
     }
 
@@ -153,7 +157,11 @@ class ReceptionChargeService
                 $consultation = $this->resolveConsultationService($facility, $destination, $consultationServiceId, $visitType);
                 if ($consultation) {
                     $price = $this->resolveConsultationPrice($consultation, $payerType, $payerData['insurance_provider_id'] ?? null, $payerData['corporate_account_id'] ?? null);
-                    $lines[] = $this->line('consultation', $consultation, $price, $payerType, ['destination_department_id' => $destination->id]);
+                    $line = $this->line('consultation', $consultation, $price, $payerType, ['destination_department_id' => $destination->id]);
+                    if ($destination->code === 'RCH') {
+                        $line['service_name'] = RchService::from($consultation->code)->label();
+                    }
+                    $lines[] = $line;
                 } elseif (! $destination->requires_consultation) {
                     $warnings[] = 'Destination hii haihitaji consultation fee.';
                 }
@@ -263,7 +271,9 @@ class ReceptionChargeService
                 'auto_added' => true,
                 'charge_source' => $destination?->code === 'RCH' ? 'reception_rch_service' : 'reception_consultation',
                 'destination_department_id' => $destination?->id,
-            ], $actor, 'consultation_charge_auto_added');
+            ], $actor, 'consultation_charge_auto_added', price: $this->resolveConsultationPrice(
+                $consultationService, $invoice->payer_type, $invoice->patientPayerProfile?->insurance_provider_id, $invoice->patientPayerProfile?->corporate_account_id,
+            ));
         }
 
         return $this->invoices->calculateTotals($invoice);
@@ -319,7 +329,7 @@ class ReceptionChargeService
         return $department;
     }
 
-    private function createLine(Invoice $invoice, Service $service, array $metadata, $actor, string $auditEvent, float $quantity = 1): void
+    private function createLine(Invoice $invoice, Service $service, array $metadata, $actor, string $auditEvent, float $quantity = 1, ?ServicePrice $price = null): void
     {
         if ($invoice->items()
             ->where('service_id', $service->id)
@@ -328,7 +338,7 @@ class ReceptionChargeService
             return;
         }
 
-        $price = $this->requiredPrice($service, $invoice->payer_type, $invoice->patientPayerProfile?->insurance_provider_id, $invoice->patientPayerProfile?->corporate_account_id);
+        $price ??= $this->requiredPrice($service, $invoice->payer_type, $invoice->patientPayerProfile?->insurance_provider_id, $invoice->patientPayerProfile?->corporate_account_id);
         $total = (float) $price->amount * $quantity;
         $split = $this->calculatePayerSplit($invoice->payer_type, $total);
 
@@ -356,7 +366,7 @@ class ReceptionChargeService
             'payer_amount' => $split['payer_amount'],
             'insurance_amount' => $split['insurance_amount'],
             'patient_amount' => $split['patient_amount'],
-            'status' => $invoice->payer_type === PayerType::Cash ? 'pending' : 'covered',
+            'status' => $invoice->payer_type === PayerType::Cash && ! $this->isFreeRchConsultation($service) ? 'pending' : 'covered',
             'metadata' => array_merge($metadata, ['service_code' => $service->code]),
             'created_by' => $actor->id,
         ]);
@@ -372,10 +382,15 @@ class ReceptionChargeService
         ]);
     }
 
+    private function isFreeRchConsultation(Service $service): bool
+    {
+        return $service->code === RchService::FamilyPlanning->value && $service->service_type === ServiceType::RchService;
+    }
+
     private function requiredPrice(Service $service, PayerType $payerType, ?int $insuranceProviderId = null, ?int $corporateAccountId = null): ServicePrice
     {
         $price = $this->pricing->getCurrentPrice($service, $payerType, $insuranceProviderId, $corporateAccountId);
-        if (($service->requires_payment || RchService::tryFrom($service->code)?->defaultPrice() !== null) && ! $price) {
+        if (($service->requires_payment || (RchService::tryFrom($service->code)?->defaultPrice() ?? 0) > 0) && ! $price) {
             ActivityLog::query()->create([
                 'user_id' => auth()->id(),
                 'event' => 'missing_service_price_blocked_registration',

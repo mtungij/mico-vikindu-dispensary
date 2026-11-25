@@ -1,4 +1,4 @@
-<div class="space-y-5">
+<div class="min-w-0 space-y-5 wrap-anywhere">
     <x-card>
         <h2 class="text-lg font-semibold">{{ $visit->patient->fullName() }}</h2>
         <p class="text-sm text-slate-500">{{ $visit->patient->patient_number }} · {{ $visit->patient->ageLabel() }} · {{ $visit->visit_number }}</p>
@@ -50,35 +50,39 @@
     <x-card>
         <h3 class="mb-3 font-semibold">Clinical notes</h3>
         <form wire:submit="save" class="space-y-3">
-            <fieldset @disabled(!$open) class="grid gap-3">
-                <label>Chief complaint <x-textarea class="w-full" wire:model="form.chief_complaint" /></label>
-                <label>Findings and clinical summary <x-textarea class="w-full" wire:model="form.clinical_summary" rows="4" /></label>
-                <label>Treatment plan <x-textarea class="w-full" wire:model="form.treatment_plan" rows="3" /></label>
+            <fieldset @disabled(!$open) class="min-w-0">
+                <div class="grid gap-3">
+                    <label>Chief complaint <x-textarea class="w-full" wire:model="form.chief_complaint" /></label>
+                    <label>Findings and clinical summary <x-textarea class="w-full" wire:model="form.clinical_summary" rows="4" /></label>
+                    <label>Treatment plan <x-textarea class="w-full" wire:model="form.treatment_plan" rows="3" /></label>
+                </div>
             </fieldset>
             @if ($open)
-                <x-primary-button wire:loading.attr="disabled">Save notes</x-primary-button>
-                @can('rch.complete-encounter')
-                    <x-secondary-button type="button" wire:click="complete" wire:loading.attr="disabled">{{ __('rch.complete_consultation') }}</x-secondary-button>
-                @endcan
+                <div class="flex flex-wrap gap-2">
+                    <x-primary-button wire:loading.attr="disabled">Save notes</x-primary-button>
+                    @can('rch.complete-encounter')
+                        <x-secondary-button type="button" wire:click="complete" wire:loading.attr="disabled">{{ __('rch.complete_consultation') }}</x-secondary-button>
+                    @endcan
+                </div>
             @endif
         </form>
     </x-card>
 
     @if ($canOrderTests || $laboratory->isNotEmpty() || $results->isNotEmpty())
         <x-card>
-            <h3 class="mb-3 font-semibold">Laboratory</h3>
+            <h3 class="mb-3 font-semibold">Laboratory Tests</h3>
             @if ($open && $canOrderTests)
                 <form wire:submit="orderTests" class="space-y-3">
-                    <fieldset class="grid max-h-64 gap-2 overflow-auto sm:grid-cols-2">
-                        <legend class="mb-2 text-sm">Select tests from the facility catalogue</legend>
-                        @forelse ($tests as $test)
-                            <label class="flex items-center gap-2" wire:key="test-{{ $test->id }}"><x-checkbox wire:model="testIds" value="{{ $test->service_id }}" /> {{ $test->name }}</label>
-                        @empty
-                            <p>No active tests configured.</p>
-                        @endforelse
-                    </fieldset>
-                    <label>Laboratory instructions <x-textarea class="w-full" wire:model="labNotes" /></label>
-                    <x-primary-button wire:loading.attr="disabled">Order selected tests</x-primary-button>
+                    <x-rch.order-picker
+                        model="testIds"
+                        :options="$testOptions"
+                        placeholder="Select laboratory tests"
+                        search-label="Search laboratory tests"
+                        empty-message="No active tests configured."
+                    >
+                        <label class="block">Laboratory instructions <x-textarea wire:model="labNotes" /></label>
+                        <x-primary-button x-bind:disabled="!selected.length" wire:loading.attr="disabled">Order selected tests</x-primary-button>
+                    </x-rch.order-picker>
                 </form>
             @endif
             @foreach ($laboratory as $order)
@@ -134,21 +138,16 @@
             <h3 class="mb-3 font-semibold">Procedures</h3>
             @if ($open && auth()->user()->can('procedure-orders.create'))
                 <form wire:submit="orderProcedures" class="space-y-3">
-                    <fieldset class="grid max-h-64 gap-2 overflow-auto sm:grid-cols-2">
-                        <legend>Select procedures</legend>
-                        @forelse ($procedureOptions as $id => $option)
-                            <label class="flex items-center gap-2" wire:key="procedure-option-{{ $id }}">
-                                <x-checkbox wire:model="procedureIds" value="{{ $id }}" />
-                                <span>{{ $option['name'] }} · {{ $option['price'] !== null ? 'TZS '.number_format($option['price'], 2) : ($option['exempt'] ? 'Exempt' : ($option['billable'] ? 'Price unavailable for payer' : 'No charge required')) }}</span>
-                            </label>
-                        @empty
-                            <p>No additional procedures available.</p>
-                        @endforelse
-                    </fieldset>
-                    @if ($procedureOptions->isNotEmpty())
-                        <label>Instructions <x-textarea class="w-full" wire:model="procedureInstructions" /></label>
-                        <x-primary-button wire:loading.attr="disabled">Order selected procedures</x-primary-button>
-                    @endif
+                    <x-rch.order-picker
+                        model="procedureIds"
+                        :options="$procedureOptions"
+                        placeholder="Select procedures"
+                        search-label="Search procedures"
+                        empty-message="No additional procedures available."
+                    >
+                        <label class="block">Instructions <x-textarea wire:model="procedureInstructions" /></label>
+                        <x-primary-button x-bind:disabled="!selected.length" wire:loading.attr="disabled">Order selected procedures</x-primary-button>
+                    </x-rch.order-picker>
                 </form>
             @endif
             @foreach ($procedureOrders as $order)
